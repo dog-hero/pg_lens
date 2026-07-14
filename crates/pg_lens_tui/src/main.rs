@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use ratatui::DefaultTerminal;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::app::{Action, App, update};
 
@@ -58,13 +58,22 @@ async fn run(mut terminal: DefaultTerminal, cli: Cli) -> color_eyre::Result<()> 
     let interval = Duration::from_secs_f64(cli.interval.max(0.5));
     let mut app = App::new();
     app.refresh_interval = interval;
+    app.host = if cli.mock {
+        "mock".to_string()
+    } else {
+        dsn_host(&cli.dsn)
+    };
 
     let (tx, mut actions) = mpsc::channel::<Action>(64);
     let _input_task = event::spawn_input(tx.clone());
+    // The poller reads its cadence live from this watch channel; the loop
+    // below mirrors `app.refresh_interval` into it whenever `+`/`-` change
+    // it. Message-passing only — no shared Mutex.
+    let (interval_tx, interval_rx) = watch::channel(interval);
     let snapshots = if cli.mock {
-        pg_lens_core::poller::spawn_mock(interval)
+        pg_lens_core::poller::spawn_mock(interval_rx)
     } else {
-        pg_lens_core::poller::spawn(cli.dsn, interval)
+        pg_lens_core::poller::spawn(cli.dsn, interval_rx)
     };
     // Seed the app with the poller's initial snapshot before the first frame
     // (in real mode this avoids one frame of placeholder mock data).
@@ -84,7 +93,71 @@ async fn run(mut terminal: DefaultTerminal, cli: Cli) -> color_eyre::Result<()> 
             },
             _ = tick.tick() => update(&mut app, Action::Tick),
         }
+
+        // Push a `+`/`-` interval change to the poller (no-op otherwise;
+        // receivers are only woken when the value actually changed).
+        interval_tx.send_if_modified(|current| {
+            if *current == app.refresh_interval {
+                false
+            } else {
+                *current = app.refresh_interval;
+                true
+            }
+        });
     }
 
     Ok(())
+}
+
+/// Extracts a display-safe host from the DSN for the header. Understands
+/// both libpq `key=value` strings and `postgres://` URLs; never returns
+/// credentials. Falls back to `localhost` (libpq's own default).
+fn dsn_host(dsn: &str) -> String {
+    let trimmed = dsn.trim();
+    // URL form: postgres://user:pass@host:port/db?params
+    if let Some(rest) = trimmed
+        .strip_prefix("postgres://")
+        .or_else(|| trimmed.strip_prefix("postgresql://"))
+    {
+        let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+        let host_port = authority.rsplit('@').next().unwrap_or(authority);
+        let host = host_port.split(':').next().unwrap_or(host_port);
+        if !host.is_empty() {
+            return host.to_string();
+        }
+        return "localhost".to_string();
+    }
+    // key=value form: host=example.com port=5432 ...
+    for pair in trimmed.split_whitespace() {
+        if let Some(value) = pair.strip_prefix("host=") {
+            let value = value.trim_matches('\'');
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    "localhost".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dsn_host;
+
+    #[test]
+    fn host_from_key_value_dsn() {
+        assert_eq!(dsn_host("host=db.prod.internal user=app"), "db.prod.internal");
+        assert_eq!(dsn_host("user=app host='10.0.0.7' port=6432"), "10.0.0.7");
+    }
+
+    #[test]
+    fn host_from_url_dsn_without_leaking_credentials() {
+        assert_eq!(dsn_host("postgres://alice:s3cret@db.example.com:5432/app"), "db.example.com");
+        assert_eq!(dsn_host("postgresql://db.example.com/app?sslmode=require"), "db.example.com");
+    }
+
+    #[test]
+    fn host_defaults_to_localhost() {
+        assert_eq!(dsn_host("user=postgres"), "localhost");
+        assert_eq!(dsn_host("postgres:///app"), "localhost");
+    }
 }

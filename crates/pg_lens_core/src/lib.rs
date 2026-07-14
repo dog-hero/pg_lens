@@ -5,8 +5,10 @@
 //! no knowledge of any frontend's internal message types.
 
 pub mod db;
+pub mod history;
 pub mod models;
 pub mod poller;
 pub mod queries;
 
+pub use history::{HistoryPoint, SnapshotHistory};
 pub use models::{ActivityRow, DbSnapshot, LockRow, PollerStatus, ServerVitals};

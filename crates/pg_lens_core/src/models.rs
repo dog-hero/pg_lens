@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
+use crate::history::SnapshotHistory;
+
 /// Monotonic counter so that every [`DbSnapshot::mock`] call produces visibly
 /// different (but deterministic) data — the mock poller (Fase 2) relies on
 /// this to prove that fresh snapshots actually reach the screen.
@@ -80,8 +82,6 @@ pub struct ServerVitals {
     /// blks_hit / (blks_hit + blks_read), in `0.0..=1.0` (delta-based after
     /// the first poll of a session).
     pub cache_hit_ratio: f64,
-    /// Recent TPS samples (oldest first) for the sparkline.
-    pub tps_history: Vec<u64>,
     /// Cumulative counters from `pg_stat_database` (sum over all databases);
     /// Fase 4 turns some of these into deltas/rates for display.
     pub tup_returned: i64,
@@ -109,6 +109,11 @@ pub struct DbSnapshot {
     pub activity: Vec<ActivityRow>,
     /// Blocked sessions (who waits on whom). Empty when nothing is blocked.
     pub locks: Vec<LockRow>,
+    /// Time series of poll-derived metrics (TPS, active sessions). Owned and
+    /// grown **incrementally by the poller** — one push per poll, never
+    /// rebuilt; a clone travels in every envelope so all consumers (TUI
+    /// sparklines, future web charts) see the same series.
+    pub history: SnapshotHistory,
     pub status: PollerStatus,
 }
 
@@ -120,10 +125,7 @@ impl DbSnapshot {
     pub fn mock() -> Self {
         let seq = MOCK_CALLS.fetch_add(1, Ordering::Relaxed);
 
-        // Sliding window keyed on `seq`: each call shifts the sparkline one
-        // sample to the left and appends a fresh one.
-        let tps_history: Vec<u64> = (0..20).map(|i| 900 + jitter(seq + i, 1, 700)).collect();
-        let tps = *tps_history.last().expect("history is non-empty") as f64;
+        let tps = 900.0 + jitter(seq, 1, 700) as f64;
 
         let active = 4 + jitter(seq, 3, 8) as u32;
         let idle_in_transaction = 1 + jitter(seq, 4, 4) as u32;
@@ -141,7 +143,6 @@ impl DbSnapshot {
             waiting: jitter(seq, 5, 4) as u32,
             tps,
             cache_hit_ratio: 0.95 + jitter(seq, 6, 50) as f64 / 1_000.0,
-            tps_history,
             tup_returned: 9_000_000 + (seq as i64) * 1_500,
             tup_fetched: 7_400_000 + (seq as i64) * 1_200,
             temp_files: 3,
@@ -265,6 +266,9 @@ impl DbSnapshot {
             vitals,
             activity,
             locks,
+            // Empty on purpose: the ring is owned and grown by the poller
+            // ([`crate::poller`]), which stamps its clone onto each envelope.
+            history: SnapshotHistory::default(),
             status: PollerStatus::Ok,
         }
     }
@@ -284,7 +288,6 @@ impl DbSnapshot {
                 waiting: 0,
                 tps: 0.0,
                 cache_hit_ratio: 0.0,
-                tps_history: Vec::new(),
                 tup_returned: 0,
                 tup_fetched: 0,
                 temp_files: 0,
@@ -293,6 +296,7 @@ impl DbSnapshot {
             },
             activity: Vec::new(),
             locks: Vec::new(),
+            history: SnapshotHistory::default(),
             status: PollerStatus::Connecting,
         }
     }

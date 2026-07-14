@@ -94,8 +94,18 @@ pub struct App {
     pub row_order: Vec<usize>,
     pub sort_mode: SortMode,
     pub table_state: TableState,
-    /// Desired poll interval. Fase 2: state + statusbar only; wired into the
-    /// live poller in Fase 3.
+    /// Whether the Micro Lens detail panel (full query of the selected row)
+    /// is open. While open: `j`/`k` still move the selection (the panel
+    /// follows it), `Enter`/`Esc` close the panel, `Tab` closes it and
+    /// switches lens, `q` quits as always.
+    pub detail_open: bool,
+    /// Host shown in the header (`PG 16.3 @ host`); parsed from the DSN in
+    /// `main.rs` — the full DSN (which may carry a password) never reaches
+    /// the view.
+    pub host: String,
+    /// Desired poll interval. The main loop mirrors this into the poller's
+    /// `watch::Receiver<Duration>` after every update, so `+`/`-` take
+    /// effect live (Fase 4).
     pub refresh_interval: Duration,
     /// When the last `Action::Snapshot` arrived — drives the staleness
     /// indicator in the statusbar. `None` until the first snapshot.
@@ -111,6 +121,8 @@ impl App {
             row_order: Vec::new(),
             sort_mode: SortMode::default(),
             table_state: TableState::default().with_selected(0),
+            detail_open: false,
+            host: "localhost".to_string(),
             refresh_interval: DEFAULT_REFRESH,
             last_snapshot_at: None,
             should_quit: false,
@@ -123,6 +135,16 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl App {
+    /// The activity row currently under the cursor, in display order
+    /// (`table_state` indexes `row_order`, which indexes the snapshot).
+    pub fn selected_row(&self) -> Option<&pg_lens_core::ActivityRow> {
+        let display_idx = self.table_state.selected()?;
+        let snapshot_idx = *self.row_order.get(display_idx)?;
+        self.snapshot.activity.get(snapshot_idx)
     }
 }
 
@@ -148,11 +170,30 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Char('q') => app.should_quit = true,
+        // Esc closes the detail panel when it is open; quits otherwise.
+        KeyCode::Esc => {
+            if app.detail_open {
+                app.detail_open = false;
+            } else {
+                app.should_quit = true;
+            }
+        }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
         }
-        KeyCode::Tab => app.active_tab = app.active_tab.next(),
+        // Enter toggles the Micro Lens detail panel for the selected row.
+        KeyCode::Enter => {
+            if app.detail_open {
+                app.detail_open = false;
+            } else if app.active_tab == Tab::MicroLens && app.table_state.selected().is_some() {
+                app.detail_open = true;
+            }
+        }
+        KeyCode::Tab => {
+            app.detail_open = false;
+            app.active_tab = app.active_tab.next();
+        }
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
         KeyCode::Char('s') => {
@@ -193,6 +234,8 @@ fn clamp_selection(app: &mut App) {
     let len = app.snapshot.activity.len();
     if len == 0 {
         app.table_state.select(None);
+        // Nothing to detail anymore.
+        app.detail_open = false;
     } else {
         let clamped = app.table_state.selected().unwrap_or(0).min(len - 1);
         app.table_state.select(Some(clamped));
@@ -316,6 +359,58 @@ mod tests {
         let mut seen = app.row_order.clone();
         seen.sort_unstable();
         assert_eq!(seen, (0..app.snapshot.activity.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn enter_opens_and_closes_detail_on_micro_lens_only() {
+        let mut app = App::new();
+
+        // Macro Lens: Enter is a no-op.
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.detail_open);
+
+        // Micro Lens with a selection: Enter opens, Enter closes.
+        update(&mut app, press(KeyCode::Tab));
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.detail_open);
+    }
+
+    #[test]
+    fn esc_closes_detail_before_quitting() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Tab));
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+
+        // First Esc only closes the panel...
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.detail_open);
+        assert!(!app.should_quit);
+
+        // ...the second one quits.
+        update(&mut app, press(KeyCode::Esc));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn tab_and_navigation_behave_while_detail_is_open() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Tab)); // → Micro Lens
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+
+        // j moves the selection (the panel follows the cursor).
+        let before = app.selected_row().expect("selection").pid;
+        update(&mut app, press(KeyCode::Char('j')));
+        assert!(app.detail_open);
+        assert_ne!(app.selected_row().expect("selection").pid, before);
+
+        // Tab closes the panel and switches lens.
+        update(&mut app, press(KeyCode::Tab));
+        assert!(!app.detail_open);
+        assert_eq!(app.active_tab, Tab::MacroLens);
     }
 
     #[test]

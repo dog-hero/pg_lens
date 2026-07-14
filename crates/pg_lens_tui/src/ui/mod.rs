@@ -1,5 +1,6 @@
 //! View layer: pure, synchronous rendering functions. No I/O, ever.
 
+pub mod format;
 mod macro_lens;
 mod micro_lens;
 
@@ -59,10 +60,11 @@ fn draw_status_banner(app: &App, frame: &mut Frame, area: Rect) {
 fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
     let vitals = &app.snapshot.vitals;
     let header = Line::from(format!(
-        " pg_lens v{} \u{2502} PG {} \u{2502} up {} \u{2502} {}/{} conns",
+        " pg_lens v{} \u{2502} PG {} @ {} \u{2502} up {} \u{2502} {}/{} conns",
         env!("CARGO_PKG_VERSION"),
         vitals.server_version,
-        format_uptime(vitals.uptime_secs),
+        app.host,
+        format::human_uptime(vitals.uptime_secs),
         vitals.connections_total,
         vitals.max_connections,
     ))
@@ -90,27 +92,13 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         _ => "-".to_string(),
     };
     let keys = Line::from(format!(
-        " q/Esc: quit \u{2502} Tab: switch lens \u{2502} j/k: row {row} \u{2502} s: \
-         sort={} \u{2502} +/-: refresh={:.1}s \u{2502} data: {staleness}",
+        " q/Esc: quit \u{2502} Tab: switch lens \u{2502} j/k: row {row} \u{2502} Enter: \
+         detail \u{2502} s: sort={} \u{2502} +/-: refresh={:.1}s \u{2502} data: {staleness}",
         app.sort_mode.label(),
         app.refresh_interval.as_secs_f64(),
     ))
     .dim();
     frame.render_widget(Paragraph::new(keys), area);
-}
-
-/// `3d 4h`, `4h 27m`, `27m`, `42s` — good enough until Fase 4's format.rs.
-fn format_uptime(secs: u64) -> String {
-    let (days, hours, mins) = (secs / 86_400, (secs % 86_400) / 3_600, (secs % 3_600) / 60);
-    if days > 0 {
-        format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {mins}m")
-    } else if mins > 0 {
-        format!("{mins}m")
-    } else {
-        format!("{secs}s")
-    }
 }
 
 #[cfg(test)]
@@ -179,11 +167,4 @@ mod tests {
         assert!(!screen.contains("connecting to PostgreSQL"));
     }
 
-    #[test]
-    fn format_uptime_is_human() {
-        assert_eq!(format_uptime(42), "42s");
-        assert_eq!(format_uptime(27 * 60), "27m");
-        assert_eq!(format_uptime(4 * 3_600 + 27 * 60), "4h 27m");
-        assert_eq!(format_uptime(3 * 86_400 + 4 * 3_600), "3d 4h");
-    }
 }

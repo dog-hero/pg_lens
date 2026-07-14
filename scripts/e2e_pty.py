@@ -10,7 +10,11 @@ real-database run.
 import os, pty, re, select, signal, subprocess, sys, time
 
 BIN = "/Users/leonardo.benedet/BenedetLabs/pg_lens/target/debug/pg_lens_tui"
-COLS, ROWS = 120, 36
+# Overridable so the same harness proves the 80x24 resize case (Fase 4).
+COLS = int(os.environ.get("PG_LENS_E2E_COLS", 120))
+ROWS = int(os.environ.get("PG_LENS_E2E_ROWS", 36))
+# PG_LENS_E2E_BASIC=1: render + quit only (used for the small-terminal run).
+BASIC = bool(os.environ.get("PG_LENS_E2E_BASIC"))
 
 
 class Screen:
@@ -103,8 +107,17 @@ def main():
     pump(2.6);            snaps["t1_nokeys"] = screen.snapshot()
     pump(2.4);            snaps["t2_nokeys"] = screen.snapshot()
     send("\t"); pump(0.9); snaps["t3_after_tab"] = screen.snapshot()
-    send("j");  pump(0.6); snaps["t4_after_j"] = screen.snapshot()
-    send("s");  pump(0.6); snaps["t5_after_s"] = screen.snapshot()
+    if not BASIC:
+        send("j");  pump(0.6); snaps["t4_after_j"] = screen.snapshot()
+        send("s");  pump(0.6); snaps["t5_after_s"] = screen.snapshot()
+        # Fase 4: Enter opens the detail panel; Enter closes it again.
+        send("\r"); pump(0.6); snaps["t6_detail_open"] = screen.snapshot()
+        send("\r"); pump(0.6); snaps["t7_detail_closed"] = screen.snapshot()
+        # Fase 4: '-' three times: 2.0s -> 0.5s, live through the watch
+        # channel. Two snapshots 0.9s apart must differ (at the old 2.0s
+        # cadence they could not have both refreshed).
+        send("---"); pump(0.9); snaps["t8_fast_a"] = screen.snapshot()
+        pump(0.9);             snaps["t9_fast_b"] = screen.snapshot()
     send("q");  pump(1.0)
 
     try:
@@ -128,8 +141,17 @@ def main():
     check("t1 shows Macro Lens (Connections gauge)", "Connections" in snaps["t1_nokeys"])
     check("Tab during refresh switched to Micro Lens (Activity table)",
           "Activity" in snaps["t3_after_tab"] and "PID" in snaps["t3_after_tab"])
-    check("j moved selection (statusbar row 2/6)", "row 2/6" in snaps["t4_after_j"])
-    check("s cycled sort (statusbar sort=state)", "sort=state" in snaps["t5_after_s"])
+    if not BASIC:
+        check("j moved selection (statusbar row 2/6)", "row 2/6" in snaps["t4_after_j"])
+        check("s cycled sort (statusbar sort=state)", "sort=state" in snaps["t5_after_s"])
+        check("Enter opened the detail panel", "Detail" in snaps["t6_detail_open"]
+              and "Enter/Esc: close" in snaps["t6_detail_open"])
+        check("Enter closed the detail panel again",
+              "Enter/Esc: close" not in snaps["t7_detail_closed"])
+        check("'-' x3 shows refresh=0.5s in the statusbar",
+              "refresh=0.5s" in snaps["t8_fast_a"])
+        check("snapshots arrive at the faster cadence (screens 0.9s apart differ)",
+              snaps["t8_fast_a"] != snaps["t9_fast_b"])
     check("q exited cleanly (EXIT_CODE=0)", code == 0)
     print(f"EXIT_CODE={code}")
     sys.exit(0 if ok else 1)

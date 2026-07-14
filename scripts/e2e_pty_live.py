@@ -35,6 +35,12 @@ def main():
                     help="substring expected in the Micro Lens, e.g. 'pg_sleep'")
     ap.add_argument("--expect-tps-move", action="store_true",
                     help="require the TPS reading to change between snapshots")
+    ap.add_argument("--expect-micro-growing", action="store_true",
+                    help="require the --expect-micro row's Duration to increase "
+                         "between two Micro Lens snapshots (Fase 4)")
+    ap.add_argument("--expect-blocked-marker", action="store_true",
+                    help="require a row carrying the textual 'B' (blocked) "
+                         "status marker in the Micro Lens (Fase 4)")
     ap.add_argument("--resilience-container", default=None,
                     help="docker container to stop/start mid-session")
     args = ap.parse_args()
@@ -95,6 +101,44 @@ def main():
     if args.expect_micro:
         check(f"micro lens shows {args.expect_micro!r}",
               args.expect_micro in snaps["t3_micro"])
+
+    def parse_duration(line):
+        """Duration cell -> seconds: 980ms / 12s / 4m32s / 1h04m."""
+        import re
+        m = re.search(r"(?:(\d+)h(\d+)m|(\d+)m(\d+)s|(\d+)ms|(\d+)s)", line)
+        if not m:
+            return None
+        h, hm, mm, ms_, msec, sec = m.groups()
+        if h is not None:
+            return int(h) * 3600 + int(hm) * 60
+        if mm is not None:
+            return int(mm) * 60 + int(ms_)
+        if msec is not None:
+            return int(msec) / 1000.0
+        return int(sec)
+
+    if args.expect_micro_growing and args.expect_micro:
+        pump(4.5)
+        snaps["t3b_micro"] = screen.snapshot()
+        line1 = next((l for l in snaps["t3_micro"].splitlines()
+                      if args.expect_micro in l), "")
+        line2 = next((l for l in snaps["t3b_micro"].splitlines()
+                      if args.expect_micro in l), "")
+        d1, d2 = parse_duration(line1), parse_duration(line2)
+        print(f"  {args.expect_micro} durations: {d1!r}s -> {d2!r}s")
+        check(f"{args.expect_micro!r} row duration increased between captures",
+              d1 is not None and d2 is not None and d2 > d1)
+
+    if args.expect_blocked_marker:
+        import re
+        snap = screen.snapshot()
+        snaps["t3c_blocked"] = snap
+        blocked_lines = [l for l in snap.splitlines()
+                         if re.search(r"(?:\u25b6 )?\bB\b\s+\d+", l)]
+        for l in blocked_lines:
+            print(f"  blocked row: {l.strip()[:100]}")
+        check("a row carries the textual 'B' blocked marker",
+              bool(blocked_lines))
 
     # --- resilience: DB down -> banner + responsive UI -> recovery --------
     if args.resilience_container:

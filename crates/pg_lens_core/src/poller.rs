@@ -7,6 +7,15 @@
 //!   backoff, and errors carried inside the snapshot (`PollerStatus`).
 //! - [`spawn_mock`] — fake data for development/e2e without a database.
 //!
+//! Both take the poll interval as a `watch::Receiver<Duration>`: frontends
+//! adjust the cadence live (the TUI's `+`/`-` keys) by sending a new value —
+//! no shared mutable state, just a message (Fase 4).
+//!
+//! Both also own a [`SnapshotHistory`] ring (Fase 4): one [`HistoryPoint`] is
+//! pushed per poll — incremental, never rebuilt — and a clone of the ring
+//! travels inside every snapshot envelope, so every consumer (TUI sparklines,
+//! the future web's charts) sees the exact same series.
+//!
 //! This module is frontend-agnostic: it knows nothing about terminal
 //! libraries or about any frontend's internal message types.
 
@@ -16,18 +25,35 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio_postgres::{Client, Statement};
 
+use crate::history::{HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::models::{DbSnapshot, PollerStatus, ServerVitals};
 use crate::{db, queries};
 
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
-/// Ring cap for the TPS sparkline history (Fase 4 grows this into a proper
-/// `SnapshotHistory`; a capped Vec is enough for now).
-const TPS_HISTORY_CAP: usize = 120;
+
+/// Sleeps for the interval currently held by `interval_rx`, waking early if
+/// the value changes (so a `+`/`-` keypress takes effect immediately instead
+/// of after the old interval elapses). If the interval sender is gone the
+/// poller simply keeps the last known cadence.
+async fn wait_interval(interval_rx: &mut watch::Receiver<Duration>) {
+    let dur = *interval_rx.borrow_and_update();
+    tokio::select! {
+        _ = tokio::time::sleep(dur) => {}
+        changed = interval_rx.changed() => {
+            if changed.is_err() {
+                // Sender dropped: never resolves again; finish the sleep so
+                // this select cannot busy-loop.
+                tokio::time::sleep(dur).await;
+            }
+        }
+    }
+}
 
 /// Spawns the real poller: connect to `dsn`, detect the server version, pick
 /// the matching [`queries::QuerySet`], prepare the statements **once**, then
-/// publish one [`DbSnapshot`] per `interval` tick.
+/// publish one [`DbSnapshot`] per poll. The cadence is read live from
+/// `interval_rx` before every sleep.
 ///
 /// On any connect/query error the poller publishes a snapshot carrying
 /// `PollerStatus::Error(..)` while *keeping the last good data*, then
@@ -38,22 +64,28 @@ const TPS_HISTORY_CAP: usize = 120;
 ///
 /// # Panics
 ///
-/// Must be called from within a tokio runtime (it calls `tokio::spawn`), and
-/// `interval` must be non-zero (`tokio::time::interval` requirement).
-pub fn spawn(dsn: String, interval: Duration) -> watch::Receiver<Arc<DbSnapshot>> {
+/// Must be called from within a tokio runtime (it calls `tokio::spawn`).
+pub fn spawn(
+    dsn: String,
+    interval_rx: watch::Receiver<Duration>,
+) -> watch::Receiver<Arc<DbSnapshot>> {
     let (tx, rx) = watch::channel(Arc::new(DbSnapshot::connecting()));
-    tokio::spawn(run(dsn, interval, tx));
+    tokio::spawn(run(dsn, interval_rx, tx));
     rx
 }
 
 /// Outer reconnect loop: one [`session`] per connection, backoff in between.
-async fn run(dsn: String, interval: Duration, tx: watch::Sender<Arc<DbSnapshot>>) {
+async fn run(
+    dsn: String,
+    mut interval_rx: watch::Receiver<Duration>,
+    tx: watch::Sender<Arc<DbSnapshot>>,
+) {
     let mut backoff = BACKOFF_INITIAL;
-    // Survives reconnects so the sparkline doesn't reset on a blip.
-    let mut tps_history: Vec<u64> = Vec::new();
+    // Survives reconnects so the sparklines don't reset on a blip.
+    let mut history = SnapshotHistory::default();
     loop {
         let mut polled_ok = false;
-        match session(&dsn, interval, &tx, &mut tps_history, &mut polled_ok).await {
+        match session(&dsn, &mut interval_rx, &tx, &mut history, &mut polled_ok).await {
             SessionEnd::Closed => return,
             SessionEnd::Error(msg) => {
                 if polled_ok {
@@ -83,16 +115,16 @@ enum SessionEnd {
 /// stopped on every exit path.
 async fn session(
     dsn: &str,
-    interval: Duration,
+    interval_rx: &mut watch::Receiver<Duration>,
     tx: &watch::Sender<Arc<DbSnapshot>>,
-    tps_history: &mut Vec<u64>,
+    history: &mut SnapshotHistory,
     polled_ok: &mut bool,
 ) -> SessionEnd {
     let (client, conn_handle) = match db::connect(dsn).await {
         Ok(pair) => pair,
         Err(e) => return SessionEnd::Error(format!("connect failed: {e}")),
     };
-    let end = poll_loop(&client, interval, tx, tps_history, polled_ok).await;
+    let end = poll_loop(&client, interval_rx, tx, history, polled_ok).await;
     conn_handle.abort();
     end
 }
@@ -106,9 +138,9 @@ struct Prepared {
 
 async fn poll_loop(
     client: &Client,
-    interval: Duration,
+    interval_rx: &mut watch::Receiver<Duration>,
     tx: &watch::Sender<Arc<DbSnapshot>>,
-    tps_history: &mut Vec<u64>,
+    history: &mut SnapshotHistory,
     polled_ok: &mut bool,
 ) -> SessionEnd {
     let version_num = match db::server_version_num(client).await {
@@ -132,17 +164,15 @@ async fn poll_loop(
         Err(e) => return SessionEnd::Error(format!("prepare failed: {e}")),
     };
 
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut deltas: Option<DeltaState> = None;
 
+    // First iteration polls immediately (right after connecting); every
+    // later one sleeps for the *current* interval first.
     loop {
-        // First tick completes immediately: poll right after connecting.
-        ticker.tick().await;
         if tx.is_closed() {
             return SessionEnd::Closed;
         }
-        let snapshot = match poll_once(client, &stmts, &mut deltas, tps_history).await {
+        let snapshot = match poll_once(client, &stmts, &mut deltas, history).await {
             Ok(s) => s,
             Err(msg) => return SessionEnd::Error(format!("poll failed: {msg}")),
         };
@@ -150,6 +180,7 @@ async fn poll_loop(
         if tx.send(Arc::new(snapshot)).is_err() {
             return SessionEnd::Closed;
         }
+        wait_interval(interval_rx).await;
     }
 }
 
@@ -167,7 +198,7 @@ async fn poll_once(
     client: &Client,
     stmts: &Prepared,
     deltas: &mut Option<DeltaState>,
-    tps_history: &mut Vec<u64>,
+    history: &mut SnapshotHistory,
 ) -> Result<DbSnapshot, String> {
     // Three futures on one client: tokio-postgres pipelines them.
     let (activity_rows, blocking_rows, info_rows) = tokio::try_join!(
@@ -229,11 +260,12 @@ async fn poll_once(
         cache_hit_ratio,
     });
 
-    tps_history.push(tps.max(0.0).round() as u64);
-    if tps_history.len() > TPS_HISTORY_CAP {
-        let excess = tps_history.len() - TPS_HISTORY_CAP;
-        tps_history.drain(..excess);
-    }
+    // One incremental push per poll — the ring is never rebuilt.
+    history.push(HistoryPoint {
+        epoch_ms: epoch_ms_now(),
+        tps: tps.max(0.0),
+        active_sessions: info.active.max(0) as u32,
+    });
 
     let vitals = ServerVitals {
         server_version: info.server_version,
@@ -246,7 +278,6 @@ async fn poll_once(
         waiting: info.waiting.max(0) as u32,
         tps,
         cache_hit_ratio,
-        tps_history: tps_history.clone(),
         tup_returned: info.tup_returned,
         tup_fetched: info.tup_fetched,
         temp_files: info.temp_files,
@@ -258,6 +289,7 @@ async fn poll_once(
         vitals,
         activity,
         locks,
+        history: history.clone(),
         status: PollerStatus::Ok,
     })
 }
@@ -275,32 +307,47 @@ fn publish_error(tx: &watch::Sender<Arc<DbSnapshot>>, msg: String) {
     let _ = tx.send(Arc::new(snapshot));
 }
 
-/// Spawns a task that publishes a fresh [`DbSnapshot::mock`] every
-/// `interval`, and returns the receiving side of the watch channel.
+/// Stamps one [`HistoryPoint`] derived from `snapshot` onto `history`, then
+/// clones the ring into the envelope — the same ownership rule as the real
+/// poller (shared by the mock).
+fn record_history(history: &mut SnapshotHistory, snapshot: &mut DbSnapshot) {
+    history.push(HistoryPoint {
+        epoch_ms: epoch_ms_now(),
+        tps: snapshot.vitals.tps.max(0.0),
+        active_sessions: snapshot.vitals.active,
+    });
+    snapshot.history = history.clone();
+}
+
+/// Spawns a task that publishes a fresh [`DbSnapshot::mock`] per interval
+/// (read live from `interval_rx`, like the real poller), and returns the
+/// receiving side of the watch channel.
 ///
-/// The channel starts pre-filled with one snapshot, so consumers can render
-/// immediately with `Receiver::borrow` before the first `changed()` fires
-/// (this is the documented `tokio::sync::watch` pattern: the initial value is
-/// *not* marked as seen-changed).
+/// The channel starts pre-filled with one snapshot (already carrying one
+/// history point), so consumers can render immediately with
+/// `Receiver::borrow` before the first `changed()` fires.
 ///
 /// The task ends on its own once every receiver (including clones) has been
 /// dropped — `watch::Sender::send` returns `Err` when the channel is closed.
 ///
 /// # Panics
 ///
-/// Must be called from within a tokio runtime (it calls `tokio::spawn`), and
-/// `interval` must be non-zero (`tokio::time::interval` requirement).
-pub fn spawn_mock(interval: Duration) -> watch::Receiver<Arc<DbSnapshot>> {
-    let (tx, rx) = watch::channel(Arc::new(DbSnapshot::mock()));
+/// Must be called from within a tokio runtime (it calls `tokio::spawn`).
+pub fn spawn_mock(
+    mut interval_rx: watch::Receiver<Duration>,
+) -> watch::Receiver<Arc<DbSnapshot>> {
+    // The mock poller owns the ring exactly like the real one.
+    let mut history = SnapshotHistory::default();
+    let mut first = DbSnapshot::mock();
+    record_history(&mut history, &mut first);
+    let (tx, rx) = watch::channel(Arc::new(first));
 
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
-        // The first tick of `tokio::time::interval` completes immediately;
-        // skip it so the pre-filled value stands for one full interval.
-        ticker.tick().await;
         loop {
-            ticker.tick().await;
-            if tx.send(Arc::new(DbSnapshot::mock())).is_err() {
+            wait_interval(&mut interval_rx).await;
+            let mut snapshot = DbSnapshot::mock();
+            record_history(&mut history, &mut snapshot);
+            if tx.send(Arc::new(snapshot)).is_err() {
                 // All receivers dropped: nobody is watching, stop polling.
                 break;
             }
@@ -314,11 +361,19 @@ pub fn spawn_mock(interval: Duration) -> watch::Receiver<Arc<DbSnapshot>> {
 mod tests {
     use super::*;
 
+    fn interval_rx(ms: u64) -> watch::Receiver<Duration> {
+        let (tx, rx) = watch::channel(Duration::from_millis(ms));
+        // Leak the sender so the interval stays adjustable-shaped but fixed;
+        // wait_interval must tolerate a dropped sender anyway (tested below).
+        std::mem::forget(tx);
+        rx
+    }
+
     /// The poller must publish at least two snapshots that differ from each
     /// other (and from the initial value) — bounded by a timeout, no sleeps.
     #[tokio::test]
     async fn spawn_mock_publishes_distinct_snapshots() {
-        let mut rx = spawn_mock(Duration::from_millis(10));
+        let mut rx = spawn_mock(interval_rx(10));
 
         let initial = serde_json::to_string(&*rx.borrow().clone()).expect("serialize");
 
@@ -337,6 +392,65 @@ mod tests {
         assert_ne!(published[0], published[1]);
     }
 
+    /// The history ring must grow by exactly one point per publish (owned by
+    /// the poller, incremental — never rebuilt or reset between envelopes).
+    #[tokio::test]
+    async fn spawn_mock_grows_history_incrementally() {
+        let mut rx = spawn_mock(interval_rx(10));
+
+        let first = rx.borrow().clone();
+        assert_eq!(first.history.len(), 1, "pre-filled snapshot has one point");
+
+        let mut expected_len = 1;
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(2), rx.changed())
+                .await
+                .expect("poller must publish within 2s")
+                .expect("sender must still be alive");
+            expected_len += 1;
+            let snap = rx.borrow_and_update().clone();
+            assert_eq!(snap.history.len(), expected_len);
+            let latest = snap.history.latest().expect("non-empty history");
+            assert_eq!(latest.tps, snap.vitals.tps.max(0.0));
+            assert_eq!(latest.active_sessions, snap.vitals.active);
+        }
+    }
+
+    /// Dropping the interval sender must not busy-loop or kill the poller:
+    /// it keeps publishing at the last known cadence.
+    #[tokio::test]
+    async fn mock_poller_survives_dropped_interval_sender() {
+        let (interval_tx, interval_rx) = watch::channel(Duration::from_millis(10));
+        let mut rx = spawn_mock(interval_rx);
+        drop(interval_tx);
+
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(2), rx.changed())
+                .await
+                .expect("poller must keep publishing after interval sender drop")
+                .expect("sender must still be alive");
+            rx.borrow_and_update();
+        }
+    }
+
+    /// Sending a new interval takes effect (the sleep wakes early).
+    #[tokio::test]
+    async fn interval_change_wakes_the_poller() {
+        let (interval_tx, interval_rx) = watch::channel(Duration::from_secs(3600));
+        let mut rx = spawn_mock(interval_rx);
+        rx.borrow_and_update();
+
+        // With a one-hour interval nothing would arrive in 2s — unless the
+        // interval message wakes the sleep.
+        interval_tx
+            .send(Duration::from_millis(10))
+            .expect("poller alive");
+        tokio::time::timeout(Duration::from_secs(2), rx.changed())
+            .await
+            .expect("interval change must wake the poller")
+            .expect("sender must still be alive");
+    }
+
     /// An unreachable DSN must not panic: the real poller publishes an error
     /// snapshot (keeping the channel alive) instead.
     #[tokio::test]
@@ -344,7 +458,7 @@ mod tests {
         // Port 1 on localhost: connection refused, immediately.
         let mut rx = spawn(
             "host=127.0.0.1 port=1 user=nobody connect_timeout=1".to_string(),
-            Duration::from_millis(50),
+            interval_rx(50),
         );
 
         assert!(matches!(rx.borrow().status, PollerStatus::Connecting));
@@ -364,7 +478,7 @@ mod tests {
 
     /// Deriving TPS/cache hit: the delta math is exercised through
     /// `hit_ratio` here; the end-to-end path needs a live server (verified in
-    /// the Fase 3 e2e run against Docker).
+    /// the Fase 3/4 e2e runs against Docker).
     #[test]
     fn hit_ratio_guards_division_by_zero() {
         assert_eq!(hit_ratio(0, 0), 0.0);
