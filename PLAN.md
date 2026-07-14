@@ -474,6 +474,9 @@ frontend de disco em produção (embutir); nunca logar o DSN.
   plano detalhado em [PLAN_CONNECTIONS.md](PLAN_CONNECTIONS.md). ✅ C1+C2
 - **Distribuição** (Homebrew tap, Docker/GHCR, deb/rpm, crates.io +
   binstall): plano detalhado em [PLAN_DISTRIBUTION.md](PLAN_DISTRIBUTION.md).
+- **Schema Lens** (pg_stat_user_tables + bloat estimado via
+  ioguix/pgsql-bloat-estimation): plano detalhado em
+  [PLAN_SCHEMA_LENS.md](PLAN_SCHEMA_LENS.md).
 
 ## Fora de escopo (backlog Fase 7+)
 - Ações administrativas (`pg_cancel_backend`/`pg_terminate_backend` — SQL já
