@@ -3,6 +3,7 @@
 pub mod format;
 mod macro_lens;
 mod micro_lens;
+mod schema_lens;
 
 use pg_lens_core::PollerStatus;
 use ratatui::{
@@ -39,6 +40,7 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     match app.active_tab {
         Tab::MacroLens => macro_lens::draw(app, frame, body_area),
         Tab::MicroLens => micro_lens::draw(app, frame, body_area),
+        Tab::SchemaLens => schema_lens::draw(app, frame, body_area),
     }
     draw_statusbar(app, frame, statusbar_area);
 }
@@ -87,14 +89,31 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         Some(at) => format!("{}s ago", at.elapsed().as_secs()),
         None => "waiting".to_string(),
     };
-    let row = match (app.table_state.selected(), app.snapshot.activity.len()) {
+    // Row counter and sort label follow the active lens (the Schema Lens
+    // keeps its own selection and sort mode); `R: recollect` is a Schema
+    // Lens hint (the key itself works from any lens).
+    let (selected, len, sort_label, extra) = match app.active_tab {
+        Tab::SchemaLens => (
+            app.schema_table_state.selected(),
+            app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len()),
+            app.schema_sort_mode.label(),
+            " \u{2502} R: recollect",
+        ),
+        _ => (
+            app.table_state.selected(),
+            app.snapshot.activity.len(),
+            app.sort_mode.label(),
+            "",
+        ),
+    };
+    let row = match (selected, len) {
         (Some(i), len) if len > 0 => format!("{}/{len}", i + 1),
         _ => "-".to_string(),
     };
     let keys = Line::from(format!(
         " q/Esc: quit \u{2502} Tab: switch lens \u{2502} j/k: row {row} \u{2502} Enter: \
-         detail \u{2502} s: sort={} \u{2502} +/-: refresh={:.1}s \u{2502} data: {staleness}",
-        app.sort_mode.label(),
+         detail \u{2502} s: sort={sort_label}{extra} \u{2502} +/-: refresh={:.1}s \u{2502} \
+         data: {staleness}",
         app.refresh_interval.as_secs_f64(),
     ))
     .dim();
@@ -141,6 +160,77 @@ mod tests {
         assert!(screen.contains("Wait"));
         assert!(screen.contains("Duration"));
         assert!(screen.contains("pgbench"));
+    }
+
+    #[test]
+    fn schema_lens_renders_table_footer_and_markers() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let screen = render(&mut app);
+        // Columns of the S0-decision-3 spec.
+        for header in ["Table", "Size", "Live", "Dead", "Bloat%", "Bloat", "Last AV", "Seq/Idx"] {
+            assert!(screen.contains(header), "missing column {header}: {screen}");
+        }
+        // Mock rows, joined bloat, is_na marker, footer.
+        assert!(screen.contains("public.order_items"));
+        assert!(screen.contains("54.0%"), "red-tier bloat pct: {screen}");
+        assert!(screen.contains("!!"), "red severity marker: {screen}");
+        assert!(screen.contains("~?"), "is_na renders ~?, never a number");
+        assert!(screen.contains("db: shop"), "footer names the database");
+        assert!(screen.contains("ESTIMATED"), "estimate label is mandatory");
+        assert!(screen.contains("R: recollect"));
+    }
+
+    #[test]
+    fn schema_lens_without_collection_shows_placeholder() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let mut snap = app.snapshot.as_ref().clone();
+        snap.schema = None;
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
+        let screen = render(&mut app);
+        assert!(screen.contains("collecting schema stats"));
+    }
+
+    #[test]
+    fn schema_lens_error_status_renders_inline_banner() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let mut snap = app.snapshot.as_ref().clone();
+        let mut schema = snap.schema.as_deref().expect("mock schema").clone();
+        schema.status = pg_lens_core::SchemaStatus::Error("permission denied".to_string());
+        snap.schema = Some(Arc::new(schema));
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
+        let screen = render(&mut app);
+        assert!(screen.contains("schema: permission denied"));
+        assert!(screen.contains("showing last collection"));
+        // Last data still rendered underneath.
+        assert!(screen.contains("public.order_items"));
+    }
+
+    #[test]
+    fn schema_detail_lists_the_tables_indexes() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        // Sort by dead tuples puts order_items (which owns the mock's only
+        // index-bloat row) under the cursor at display index 0.
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('s'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        app.detail_open = true;
+        let screen = render(&mut app);
+        assert!(screen.contains("Table \u{2014} public.order_items"));
+        assert!(screen.contains("mod since analyze"));
+        assert!(screen.contains("order_items_pkey"), "index bloat listed: {screen}");
+        assert!(screen.contains("35.0%"), "index bloat pct shown");
     }
 
     #[test]

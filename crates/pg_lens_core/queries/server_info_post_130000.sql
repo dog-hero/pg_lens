@@ -25,7 +25,8 @@ SELECT
       s.waiting,
       current_setting('max_connections')::int4 AS max_connections,
       EXTRACT(epoch FROM (NOW() - pg_postmaster_start_time()))::float8 AS uptime_secs,
-      split_part(current_setting('server_version'), ' ', 1) AS server_version
+      split_part(current_setting('server_version'), ' ', 1) AS server_version,
+      current_database()::text AS database
  FROM
       (SELECT
             coalesce(sum(xact_commit), 0)::int8 AS xact_commit,

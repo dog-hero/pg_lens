@@ -93,6 +93,9 @@ pub struct ServerInfoRow {
     pub max_connections: i32,
     pub uptime_secs: f64,
     pub server_version: String,
+    /// `current_database()` — the Schema Lens is per-database, so its
+    /// header names which database the table stats belong to.
+    pub database: String,
 }
 
 pub fn server_info_from_row(row: &Row) -> Result<ServerInfoRow, tokio_postgres::Error> {
@@ -114,6 +117,7 @@ pub fn server_info_from_row(row: &Row) -> Result<ServerInfoRow, tokio_postgres::
         max_connections: row.try_get("max_connections")?,
         uptime_secs: row.try_get("uptime_secs")?,
         server_version: row.try_get("server_version")?,
+        database: row.try_get("database")?,
     })
 }
 
@@ -170,6 +174,10 @@ pub fn bloat_from_row(row: &Row) -> Result<BloatRow, tokio_postgres::Error> {
     Ok(BloatRow {
         schema: row.try_get("schema")?,
         name: row.try_get("name")?,
+        // Only bloat_indexes.sql outputs `tblname` (the owning table);
+        // bloat_tables.sql has no such column, so the lookup collapses to
+        // `None` there — one parser serves both shapes.
+        table: row.try_get("tblname").ok().flatten(),
         real_bytes: row.try_get("real_bytes")?,
         bloat_bytes,
         bloat_pct,

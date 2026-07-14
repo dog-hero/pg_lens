@@ -440,6 +440,7 @@ async fn poll_once(
 
     let vitals = ServerVitals {
         server_version: info.server_version,
+        database: info.database,
         uptime_secs: info.uptime_secs.max(0.0) as u64,
         connections_total: info.connections_total.max(0) as u32,
         max_connections: info.max_connections.max(0) as u32,

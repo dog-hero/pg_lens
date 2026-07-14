@@ -17,13 +17,14 @@
 --
 -- pg_lens adaptations (kept minimal):
 --   * output aliased/cast onto BloatRow (schema, name, real_bytes,
---     bloat_bytes, bloat_pct, fillfactor, is_na); tblname dropped (not in
---     the model yet), current_database() dropped (per-database anyway);
+--     bloat_bytes, bloat_pct, fillfactor, is_na) + tblname (the owning
+--     table, so the Schema Lens detail can list a table's indexes);
+--     current_database() dropped (per-database anyway);
 --   * system schemas excluded;
 --   * bloat_pct clamped at 0 with GREATEST (a fresh index can estimate
 --     "negative bloat"; the table variant already clamps via CASE);
 --   * ORDER BY estimated bloat DESC, LIMIT 200.
-SELECT nspname::text AS schema, idxname::text AS name,
+SELECT nspname::text AS schema, idxname::text AS name, tblname::text AS tblname,
   (bs*(relpages)::bigint)::int8 AS real_bytes,
   (CASE WHEN relpages > est_pages_ff
     THEN bs*(relpages-est_pages_ff)

@@ -118,6 +118,38 @@ def main():
         # cadence they could not have both refreshed).
         send("---"); pump(0.9); snaps["t8_fast_a"] = screen.snapshot()
         pump(0.9);             snaps["t9_fast_b"] = screen.snapshot()
+        # Fase S3: restore the 2.0s cadence first — the mock refreshes its
+        # schema every 5 ticks, and the R-forces-recollection proof below
+        # needs staleness to climb well past the check thresholds.
+        send("+++"); pump(0.4)
+    # Fase S3: second Tab reaches the Schema Lens (also exercised in BASIC,
+    # proving the 80x24 layout doesn't panic).
+    send("\t"); pump(0.9); snaps["s1_schema"] = screen.snapshot()
+    if not BASIC:
+        # s: size (default) -> dead tuples; order must visibly change.
+        send("s");  pump(0.6); snaps["s2_schema_sorted"] = screen.snapshot()
+        # Enter: table detail (selected row 0 = order_items under dead sort)
+        # must list the table's indexes with their bloat estimates.
+        send("\r"); pump(0.6); snaps["s3_schema_detail"] = screen.snapshot()
+        send("\r"); pump(0.6); snaps["s4_detail_closed"] = screen.snapshot()
+        # R forces a schema re-collection: wait until the footer staleness
+        # climbed to >= 4s (the mock recollects naturally every 5 ticks =
+        # 10s, so 4..7s is a natural-refresh-free window), press R, and the
+        # staleness must drop back below it despite the wait in between.
+        stale_re = re.compile(r"collected (\d+)s ago")
+        before = None
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            pump(1.0)
+            m = stale_re.search(screen.snapshot())
+            if m and 4 <= int(m.group(1)) <= 7:
+                before = int(m.group(1))
+                break
+        snaps["s5_before_R"] = screen.snapshot()
+        send("R"); pump(2.8)
+        snaps["s6_after_R"] = screen.snapshot()
+        m = stale_re.search(snaps["s6_after_R"])
+        after = int(m.group(1)) if m else None
     send("q");  pump(1.0)
 
     try:
@@ -152,6 +184,41 @@ def main():
               "refresh=0.5s" in snaps["t8_fast_a"])
         check("snapshots arrive at the faster cadence (screens 0.9s apart differ)",
               snaps["t8_fast_a"] != snaps["t9_fast_b"])
+    # --- Fase S3: Schema Lens ---------------------------------------------
+    check("Tab x2 reached the Schema Lens (Tables + Bloat% columns)",
+          "Tables" in snaps["s1_schema"] and "Bloat%" in snaps["s1_schema"])
+    # At 80 cols the Table column ellipsis-truncates, so BASIC only asserts
+    # the schema prefix; the full name is checked at the default 120 cols.
+    check("schema table shows mock rows",
+          ("public." if BASIC else "public.order_items") in snaps["s1_schema"])
+    check("footer: db name + ESTIMATED bloat label",
+          "db: shop" in snaps["s1_schema"] and "ESTIMATED" in snaps["s1_schema"])
+    if not BASIC:
+        def first_data_row_table(snap):
+            for line in snap.splitlines():
+                if "public." in line or "audit." in line:
+                    return line
+            return ""
+        check("default sort=size puts pgbench_accounts on top",
+              "sort=size" in snaps["s1_schema"]
+              and "pgbench_accounts" in first_data_row_table(snaps["s1_schema"]))
+        check("s cycled schema sort (sort=dead, order_items now on top)",
+              "sort=dead" in snaps["s2_schema_sorted"]
+              and "order_items" in first_data_row_table(snaps["s2_schema_sorted"]))
+        check("severity markers rendered (red '!!' row present)",
+              "!!" in snaps["s1_schema"])
+        check("is_na renders '~?' instead of a number", "~?" in snaps["s1_schema"])
+        check("Enter opened the table detail with its index bloat rows",
+              "Table — public.order_items" in snaps["s3_schema_detail"]
+              and "order_items_pkey" in snaps["s3_schema_detail"])
+        check("Enter closed the table detail again",
+              "order_items_pkey" not in snaps["s4_detail_closed"])
+        check("staleness climbed into the 4..7s window before R",
+              before is not None)
+        check(f"R reset the collection staleness ({before}s -> {after}s "
+              "despite 2.8s more elapsing)",
+              before is not None and after is not None and after < before
+              and after <= 3)
     check("q exited cleanly (EXIT_CODE=0)", code == 0)
     print(f"EXIT_CODE={code}")
     sys.exit(0 if ok else 1)

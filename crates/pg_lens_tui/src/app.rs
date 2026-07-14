@@ -17,27 +17,33 @@ const REFRESH_MIN: Duration = Duration::from_millis(500);
 const REFRESH_MAX: Duration = Duration::from_secs(10);
 
 /// Which lens (tab) is on screen.
+// The "Lens" postfix is the product vocabulary (Macro/Micro/Schema Lens),
+// not naming noise — keep it despite clippy's shared-postfix lint.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab {
     #[default]
     MacroLens,
     MicroLens,
+    SchemaLens,
 }
 
 impl Tab {
-    pub const TITLES: [&'static str; 2] = ["Macro Lens", "Micro Lens"];
+    pub const TITLES: [&'static str; 3] = ["Macro Lens", "Micro Lens", "Schema Lens"];
 
     pub fn index(self) -> usize {
         match self {
             Tab::MacroLens => 0,
             Tab::MicroLens => 1,
+            Tab::SchemaLens => 2,
         }
     }
 
     pub fn next(self) -> Self {
         match self {
             Tab::MacroLens => Tab::MicroLens,
-            Tab::MicroLens => Tab::MacroLens,
+            Tab::MicroLens => Tab::SchemaLens,
+            Tab::SchemaLens => Tab::MacroLens,
         }
     }
 }
@@ -72,6 +78,54 @@ impl SortMode {
     }
 }
 
+/// Sort column of the Schema Lens table; `s` cycles through the variants
+/// while that lens is active (the Micro Lens keeps its own [`SortMode`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SchemaSortMode {
+    /// Largest total relation size first (the lens's default).
+    #[default]
+    TotalSize,
+    /// Most dead tuples first.
+    DeadTuples,
+    /// Highest estimated bloat% first; tables without a usable estimate
+    /// (`is_na` or no matching bloat row) sort last.
+    BloatPct,
+    /// Most sequential scans first.
+    SeqScans,
+}
+
+impl SchemaSortMode {
+    pub fn next(self) -> Self {
+        match self {
+            SchemaSortMode::TotalSize => SchemaSortMode::DeadTuples,
+            SchemaSortMode::DeadTuples => SchemaSortMode::BloatPct,
+            SchemaSortMode::BloatPct => SchemaSortMode::SeqScans,
+            SchemaSortMode::SeqScans => SchemaSortMode::TotalSize,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SchemaSortMode::TotalSize => "size",
+            SchemaSortMode::DeadTuples => "dead",
+            SchemaSortMode::BloatPct => "bloat%",
+            SchemaSortMode::SeqScans => "seq",
+        }
+    }
+}
+
+/// The `table_bloat` row matching a table, joined by (schema, name). The
+/// sort (here) and the view (`ui/schema_lens.rs`) must agree on this join.
+pub fn find_table_bloat<'a>(
+    schema: &'a pg_lens_core::SchemaSnapshot,
+    table: &pg_lens_core::TableStatRow,
+) -> Option<&'a pg_lens_core::BloatRow> {
+    schema
+        .table_bloat
+        .iter()
+        .find(|b| b.schema == table.schema && b.name == table.name)
+}
+
 /// Everything that can happen, funneled through one mpsc channel.
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -94,11 +148,25 @@ pub struct App {
     pub row_order: Vec<usize>,
     pub sort_mode: SortMode,
     pub table_state: TableState,
-    /// Whether the Micro Lens detail panel (full query of the selected row)
-    /// is open. While open: `j`/`k` still move the selection (the panel
-    /// follows it), `Enter`/`Esc` close the panel, `Tab` closes it and
-    /// switches lens, `q` quits as always.
+    /// Indices into `snapshot.schema.tables` in display order (Schema Lens
+    /// twin of `row_order`; see `schema_sort_mode`).
+    pub schema_row_order: Vec<usize>,
+    pub schema_sort_mode: SchemaSortMode,
+    /// Schema Lens selection, independent from the Micro Lens one so
+    /// switching lenses never loses either cursor.
+    pub schema_table_state: TableState,
+    /// Whether the detail panel is open (Micro Lens: full query of the
+    /// selected session; Schema Lens: full vacuum/analyze stats + index
+    /// bloat of the selected table). While open: `j`/`k` still move the
+    /// selection (the panel follows it), `Enter`/`Esc` close the panel,
+    /// `Tab` closes it and switches lens, `q` quits as always.
     pub detail_open: bool,
+    /// Times `R` was pressed (schema force-recollect). The main loop mirrors
+    /// this counter into the poller's `watch::Sender<u64>` after every
+    /// update — the same message-passing pattern as `refresh_interval`.
+    /// `R` works from any lens: recollecting is harmless and the result is
+    /// waiting when the user tabs over.
+    pub schema_refresh_requests: u64,
     /// Connection label shown in the header (`PG 16.3 @ user@host`); the
     /// core's `ConnLabel` (resolved in `main.rs`) — the full DSN/`Config`
     /// (which may carry a password) never reaches the view.
@@ -121,13 +189,18 @@ impl App {
             row_order: Vec::new(),
             sort_mode: SortMode::default(),
             table_state: TableState::default().with_selected(0),
+            schema_row_order: Vec::new(),
+            schema_sort_mode: SchemaSortMode::default(),
+            schema_table_state: TableState::default().with_selected(0),
             detail_open: false,
+            schema_refresh_requests: 0,
             host: "localhost".to_string(),
             refresh_interval: DEFAULT_REFRESH,
             last_snapshot_at: None,
             should_quit: false,
         };
         resort(&mut app);
+        resort_schema(&mut app);
         app
     }
 }
@@ -146,6 +219,14 @@ impl App {
         let snapshot_idx = *self.row_order.get(display_idx)?;
         self.snapshot.activity.get(snapshot_idx)
     }
+
+    /// The Schema Lens table currently under the cursor, in display order.
+    pub fn selected_table(&self) -> Option<&pg_lens_core::TableStatRow> {
+        let schema = self.snapshot.schema.as_deref()?;
+        let display_idx = self.schema_table_state.selected()?;
+        let snapshot_idx = *self.schema_row_order.get(display_idx)?;
+        schema.tables.get(snapshot_idx)
+    }
 }
 
 /// The single mutation point of the Model.
@@ -156,6 +237,7 @@ pub fn update(app: &mut App, action: Action) {
             app.snapshot = snapshot;
             app.last_snapshot_at = Some(Instant::now());
             resort(app);
+            resort_schema(app);
             clamp_selection(app);
         }
         // The next draw reads the new terminal size from the frame itself.
@@ -182,11 +264,14 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
         }
-        // Enter toggles the Micro Lens detail panel for the selected row.
+        // Enter toggles the detail panel of the active lens's selected row
+        // (Micro: session query; Schema: table stats + index bloat).
         KeyCode::Enter => {
             if app.detail_open {
                 app.detail_open = false;
-            } else if app.active_tab == Tab::MicroLens && app.table_state.selected().is_some() {
+            } else if (app.active_tab == Tab::MicroLens && app.table_state.selected().is_some())
+                || (app.active_tab == Tab::SchemaLens && app.selected_table().is_some())
+            {
                 app.detail_open = true;
             }
         }
@@ -196,9 +281,22 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
+        // `s` cycles the sort of whichever lens is active (each keeps its
+        // own mode, so tabbing away and back never loses the choice).
         KeyCode::Char('s') => {
-            app.sort_mode = app.sort_mode.next();
-            resort(app);
+            if app.active_tab == Tab::SchemaLens {
+                app.schema_sort_mode = app.schema_sort_mode.next();
+                resort_schema(app);
+            } else {
+                app.sort_mode = app.sort_mode.next();
+                resort(app);
+            }
+        }
+        // `R` (uppercase, deliberately distinct from the lowercase keys):
+        // request an immediate schema re-collection. Allowed from any lens —
+        // it is harmless, and the fresh data is ready when the user tabs in.
+        KeyCode::Char('R') => {
+            app.schema_refresh_requests += 1;
         }
         KeyCode::Char('+') | KeyCode::Char('=') => {
             app.refresh_interval = (app.refresh_interval + REFRESH_STEP).min(REFRESH_MAX);
@@ -213,32 +311,61 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-/// Moves the table selection by `delta`, saturating at both ends (no wrap).
+/// Moves the active lens's table selection by `delta`, saturating at both
+/// ends (no wrap). The Macro Lens has no table; j/k default to the Micro
+/// Lens cursor there (harmless, matches the pre-S3 behavior).
 fn move_selection(app: &mut App, delta: i64) {
-    let len = app.snapshot.activity.len();
+    let (state, len) = match app.active_tab {
+        Tab::SchemaLens => (
+            &mut app.schema_table_state,
+            app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len()),
+        ),
+        _ => (&mut app.table_state, app.snapshot.activity.len()),
+    };
+    move_state(state, len, delta);
+}
+
+fn move_state(state: &mut TableState, len: usize, delta: i64) {
     if len == 0 {
-        app.table_state.select(None);
+        state.select(None);
         return;
     }
-    let current = app.table_state.selected().unwrap_or(0).min(len - 1);
+    let current = state.selected().unwrap_or(0).min(len - 1);
     let next = if delta < 0 {
         current.saturating_sub(delta.unsigned_abs() as usize)
     } else {
         (current + delta as usize).min(len - 1)
     };
-    app.table_state.select(Some(next));
+    state.select(Some(next));
 }
 
-/// Keeps the selection valid after the row set changes size.
+/// Keeps both selections valid after the row sets change size.
 fn clamp_selection(app: &mut App) {
     let len = app.snapshot.activity.len();
     if len == 0 {
         app.table_state.select(None);
-        // Nothing to detail anymore.
-        app.detail_open = false;
+        // Nothing to detail anymore (only if this lens's detail was open).
+        if app.active_tab == Tab::MicroLens {
+            app.detail_open = false;
+        }
     } else {
         let clamped = app.table_state.selected().unwrap_or(0).min(len - 1);
         app.table_state.select(Some(clamped));
+    }
+
+    let schema_len = app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len());
+    if schema_len == 0 {
+        app.schema_table_state.select(None);
+        if app.active_tab == Tab::SchemaLens {
+            app.detail_open = false;
+        }
+    } else {
+        let clamped = app
+            .schema_table_state
+            .selected()
+            .unwrap_or(0)
+            .min(schema_len - 1);
+        app.schema_table_state.select(Some(clamped));
     }
 }
 
@@ -263,6 +390,51 @@ fn resort(app: &mut App) {
         SortMode::Pid => order.sort_by_key(|&i| rows[i].pid),
     }
     app.row_order = order;
+}
+
+/// Recomputes `schema_row_order` from the current snapshot + schema sort
+/// mode (the Schema Lens twin of [`resort`]). Ties break by total size
+/// descending, then schema.name ascending, so the order is deterministic.
+fn resort_schema(app: &mut App) {
+    let Some(schema) = app.snapshot.schema.as_deref() else {
+        app.schema_row_order = Vec::new();
+        return;
+    };
+    let rows = &schema.tables;
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    let by_size_then_name = |a: usize, b: usize| {
+        rows[b]
+            .total_bytes
+            .cmp(&rows[a].total_bytes)
+            .then_with(|| (&rows[a].schema, &rows[a].name).cmp(&(&rows[b].schema, &rows[b].name)))
+    };
+    match app.schema_sort_mode {
+        SchemaSortMode::TotalSize => order.sort_by(|&a, &b| by_size_then_name(a, b)),
+        SchemaSortMode::DeadTuples => order.sort_by(|&a, &b| {
+            rows[b]
+                .n_dead_tup
+                .cmp(&rows[a].n_dead_tup)
+                .then_with(|| by_size_then_name(a, b))
+        }),
+        SchemaSortMode::BloatPct => {
+            // Descending by estimated bloat%; tables without a usable
+            // estimate (is_na / no bloat row) sort last, keyed as -1.0 —
+            // valid percentages are always >= 0 after the SQL's clamp.
+            let pct = |i: usize| {
+                find_table_bloat(schema, &rows[i])
+                    .and_then(|b| b.bloat_pct)
+                    .unwrap_or(-1.0)
+            };
+            order.sort_by(|&a, &b| pct(b).total_cmp(&pct(a)).then_with(|| by_size_then_name(a, b)));
+        }
+        SchemaSortMode::SeqScans => order.sort_by(|&a, &b| {
+            rows[b]
+                .seq_scan
+                .cmp(&rows[a].seq_scan)
+                .then_with(|| by_size_then_name(a, b))
+        }),
+    }
+    app.schema_row_order = order;
 }
 
 #[cfg(test)]
@@ -295,11 +467,13 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_lenses() {
+    fn tab_cycles_the_three_lenses() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::MacroLens);
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::MicroLens);
+        update(&mut app, press(KeyCode::Tab));
+        assert_eq!(app.active_tab, Tab::SchemaLens);
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::MacroLens);
         assert!(!app.should_quit);
@@ -410,7 +584,122 @@ mod tests {
         // Tab closes the panel and switches lens.
         update(&mut app, press(KeyCode::Tab));
         assert!(!app.detail_open);
-        assert_eq!(app.active_tab, Tab::MacroLens);
+        assert_eq!(app.active_tab, Tab::SchemaLens);
+    }
+
+    /// Rows of the Schema Lens in display order, projected by `field`.
+    fn schema_displayed<'a, T>(
+        app: &'a App,
+        field: impl Fn(&'a pg_lens_core::TableStatRow) -> T,
+    ) -> Vec<T> {
+        let schema = app.snapshot.schema.as_deref().expect("mock has schema");
+        app.schema_row_order
+            .iter()
+            .map(|&i| field(&schema.tables[i]))
+            .collect()
+    }
+
+    #[test]
+    fn schema_sort_cycles_and_reorders_rows() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Tab));
+        update(&mut app, press(KeyCode::Tab)); // → Schema Lens
+
+        // Default: total size descending (mock's biggest: pgbench_accounts).
+        assert_eq!(app.schema_sort_mode, SchemaSortMode::TotalSize);
+        let sizes = schema_displayed(&app, |t| t.total_bytes);
+        assert!(sizes.windows(2).all(|w| w[0] >= w[1]));
+        assert_eq!(
+            schema_displayed(&app, |t| t.name.clone())[0],
+            "pgbench_accounts"
+        );
+
+        // s → dead tuples descending (mock's bloated one: order_items).
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.schema_sort_mode, SchemaSortMode::DeadTuples);
+        let dead = schema_displayed(&app, |t| t.n_dead_tup);
+        assert!(dead.windows(2).all(|w| w[0] >= w[1]));
+        assert_eq!(schema_displayed(&app, |t| t.name.clone())[0], "order_items");
+
+        // s → bloat% descending, tables without a usable estimate LAST
+        // (mock: audit.raw_events is is_na; pgbench_branches has no row).
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.schema_sort_mode, SchemaSortMode::BloatPct);
+        let names = schema_displayed(&app, |t| t.name.clone());
+        assert_eq!(names[0], "order_items", "highest estimated bloat first");
+        let no_estimate_from = names
+            .iter()
+            .position(|n| n == "pgbench_branches" || n == "raw_events")
+            .expect("estimate-less tables present");
+        assert!(
+            names[no_estimate_from..]
+                .iter()
+                .all(|n| n == "pgbench_branches" || n == "raw_events"),
+            "None estimates must sort last: {names:?}"
+        );
+
+        // s → seq scans descending (mock's hot one: pgbench_branches).
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.schema_sort_mode, SchemaSortMode::SeqScans);
+        let seqs = schema_displayed(&app, |t| t.seq_scan);
+        assert!(seqs.windows(2).all(|w| w[0] >= w[1]));
+
+        // s → back to size; the Micro Lens sort was never touched.
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.schema_sort_mode, SchemaSortMode::TotalSize);
+        assert_eq!(app.sort_mode, SortMode::Duration);
+
+        // Every mode shows every table exactly once.
+        let mut seen = app.schema_row_order.clone();
+        seen.sort_unstable();
+        let table_count = app.snapshot.schema.as_deref().expect("schema").tables.len();
+        assert_eq!(seen, (0..table_count).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn schema_lens_has_its_own_selection_and_detail() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Tab));
+        update(&mut app, press(KeyCode::Tab)); // → Schema Lens
+
+        // j moves the SCHEMA selection, not the activity one.
+        assert_eq!(app.schema_table_state.selected(), Some(0));
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_eq!(app.schema_table_state.selected(), Some(1));
+        assert_eq!(app.table_state.selected(), Some(0), "micro cursor untouched");
+
+        // Enter opens the table detail; Enter closes it.
+        let selected = app.selected_table().expect("selection").name.clone();
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        assert_eq!(app.selected_table().expect("selection").name, selected);
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.detail_open);
+
+        // Esc closes the panel first, quits second (same as Micro).
+        update(&mut app, press(KeyCode::Enter));
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.detail_open);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn uppercase_r_requests_schema_recollection_from_any_lens() {
+        let mut app = App::new();
+        assert_eq!(app.schema_refresh_requests, 0);
+
+        // Macro Lens: R counts (documented decision: works from any lens).
+        update(&mut app, press(KeyCode::Char('R')));
+        assert_eq!(app.schema_refresh_requests, 1);
+
+        // Schema Lens: R keeps counting; lowercase r does nothing.
+        update(&mut app, press(KeyCode::Tab));
+        update(&mut app, press(KeyCode::Tab));
+        update(&mut app, press(KeyCode::Char('R')));
+        assert_eq!(app.schema_refresh_requests, 2);
+        update(&mut app, press(KeyCode::Char('r')));
+        assert_eq!(app.schema_refresh_requests, 2);
+        assert!(!app.should_quit);
     }
 
     #[test]

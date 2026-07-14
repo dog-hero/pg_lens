@@ -110,6 +110,8 @@ mod tests {
                 // Estimates, never presented as measurements.
                 assert!(sql.to_lowercase().contains("estimate"));
             }
+            // The index variant names the owning table (S3 detail join).
+            assert!(q.bloat_indexes.contains("tblname::text AS tblname"));
         }
     }
 

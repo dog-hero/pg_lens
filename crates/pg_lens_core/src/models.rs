@@ -71,6 +71,9 @@ pub struct LockRow {
 #[derive(Clone, Debug, Serialize)]
 pub struct ServerVitals {
     pub server_version: String,
+    /// `current_database()` — the database this connection observes. The
+    /// Schema Lens (per-database by construction) names it in its footer.
+    pub database: String,
     pub uptime_secs: u64,
     pub connections_total: u32,
     pub max_connections: u32,
@@ -140,6 +143,10 @@ pub struct BloatRow {
     pub schema: String,
     /// Table name, or index name for `index_bloat` rows.
     pub name: String,
+    /// For `index_bloat` rows: the table the index belongs to (so the
+    /// Schema Lens detail can list "indexes of this table"). `None` for
+    /// `table_bloat` rows, where `name` already is the table.
+    pub table: Option<String>,
     /// Current on-disk size of the relation.
     pub real_bytes: i64,
     /// Estimated wasted bytes. `None` when the estimate is not applicable.
@@ -304,6 +311,7 @@ impl SchemaSnapshot {
             BloatRow {
                 schema: "public".to_string(),
                 name: "order_items".to_string(),
+                table: None,
                 real_bytes: 187_695_104,
                 bloat_bytes: Some(101_318_656),
                 bloat_pct: Some(53.98),
@@ -314,6 +322,7 @@ impl SchemaSnapshot {
             BloatRow {
                 schema: "public".to_string(),
                 name: "pgbench_history".to_string(),
+                table: None,
                 real_bytes: 14_680_064,
                 bloat_bytes: Some(5_242_880),
                 bloat_pct: Some(35.7),
@@ -324,6 +333,7 @@ impl SchemaSnapshot {
             BloatRow {
                 schema: "public".to_string(),
                 name: "pgbench_accounts".to_string(),
+                table: None,
                 real_bytes: 549_453_824,
                 bloat_bytes: Some(23_068_672),
                 bloat_pct: Some(4.2),
@@ -334,6 +344,7 @@ impl SchemaSnapshot {
             BloatRow {
                 schema: "audit".to_string(),
                 name: "raw_events".to_string(),
+                table: None,
                 real_bytes: 96_468_992,
                 bloat_bytes: None,
                 bloat_pct: None,
@@ -344,6 +355,7 @@ impl SchemaSnapshot {
         let index_bloat = vec![BloatRow {
             schema: "public".to_string(),
             name: "order_items_pkey".to_string(),
+            table: Some("order_items".to_string()),
             real_bytes: 31_457_280,
             bloat_bytes: Some(11_010_048),
             bloat_pct: Some(35.0),
@@ -408,6 +420,7 @@ impl DbSnapshot {
 
         let vitals = ServerVitals {
             server_version: "16.3 (mock)".to_string(),
+            database: "shop".to_string(),
             uptime_secs: 3 * 86_400 + 4 * 3_600 + 27 * 60 + seq * 2,
             connections_total,
             max_connections: 100,
@@ -557,6 +570,7 @@ impl DbSnapshot {
         Self {
             vitals: ServerVitals {
                 server_version: "?".to_string(),
+                database: "?".to_string(),
                 uptime_secs: 0,
                 connections_total: 0,
                 max_connections: 0,
@@ -636,6 +650,10 @@ mod tests {
             .expect("one is_na bloat row");
         assert!(na.bloat_pct.is_none(), "is_na must not carry a number");
         assert!(na.bloat_bytes.is_none());
+        // Index-bloat rows carry their owning table (S3 detail view joins
+        // "indexes of this table" through it); table-bloat rows do not.
+        assert!(schema.index_bloat.iter().all(|b| b.table.is_some()));
+        assert!(schema.table_bloat.iter().all(|b| b.table.is_none()));
         // Fase S3's severity tiers are both exercisable from --mock alone:
         // red = >50% and >10MB; yellow = >30% and >1MB (but not red).
         let tier = |b: &&BloatRow, pct: f64, bytes: i64| {

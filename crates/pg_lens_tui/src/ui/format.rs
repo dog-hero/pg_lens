@@ -57,6 +57,36 @@ pub fn human_bytes(bytes: i64) -> String {
     }
 }
 
+/// Compact human tuple/scan count (decimal, not 1024-based): `988`, `14.2K`,
+/// `1.2M`, `3.4B`. Negative inputs clamp to `0`.
+pub fn human_count(n: i64) -> String {
+    let n = n.max(0);
+    const UNITS: [(i64, &str); 3] = [(1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")];
+    for (scale, suffix) in UNITS {
+        if n >= scale {
+            let value = n as f64 / scale as f64;
+            // One decimal below 100 units ("1.2M", "14.2K"), none above
+            // ("500K") — three significant digits, roughly.
+            return if value < 100.0 {
+                format!("{value:.1}{suffix}")
+            } else {
+                format!("{value:.0}{suffix}")
+            };
+        }
+    }
+    n.to_string()
+}
+
+/// "Time ago" for the vacuum/analyze timestamps: `4m32s ago`, or `—` when
+/// the event never happened (NULL epoch). `now_epoch_secs` is passed in so
+/// the function stays a pure value mapping.
+pub fn human_ago(epoch_secs: Option<f64>, now_epoch_secs: f64) -> String {
+    match epoch_secs {
+        Some(at) => format!("{} ago", human_duration(now_epoch_secs - at)),
+        None => "\u{2014}".to_string(),
+    }
+}
+
 /// Truncates `text` to at most `width` characters, spending the last one on
 /// an ellipsis when something was cut. `width == 0` yields an empty string.
 pub fn truncate_with_ellipsis(text: &str, width: usize) -> String {
@@ -107,6 +137,26 @@ mod tests {
         assert_eq!(human_bytes(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
         assert_eq!(human_bytes((1.2 * 1024.0 * 1024.0 * 1024.0) as i64), "1.2 GB");
         assert_eq!(human_bytes(-7), "0 B");
+    }
+
+    #[test]
+    fn counts_are_compact_and_decimal() {
+        assert_eq!(human_count(0), "0");
+        assert_eq!(human_count(988), "988");
+        assert_eq!(human_count(14_205), "14.2K");
+        assert_eq!(human_count(500_000), "500K");
+        assert_eq!(human_count(1_204_388), "1.2M");
+        assert_eq!(human_count(48_211_390), "48.2M");
+        assert_eq!(human_count(3_400_000_000), "3.4B");
+        assert_eq!(human_count(-5), "0");
+    }
+
+    #[test]
+    fn ago_formats_or_dashes() {
+        assert_eq!(human_ago(Some(1_000.0), 1_272.0), "4m32s ago");
+        assert_eq!(human_ago(None, 1_272.0), "\u{2014}");
+        // Clock skew (future timestamp) clamps via human_duration.
+        assert_eq!(human_ago(Some(2_000.0), 1_272.0), "0s ago");
     }
 
     #[test]

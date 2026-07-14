@@ -300,9 +300,10 @@ async fn run(
     // below mirrors `app.refresh_interval` into it whenever `+`/`-` change
     // it. Message-passing only — no shared Mutex.
     let (interval_tx, interval_rx) = watch::channel(interval);
-    // Schema force-refresh: created here so Fase S3 only has to bind a key
-    // to `_schema_refresh_tx.send(n+1)` — the poller side is already wired.
-    let (_schema_refresh_tx, schema_refresh_rx) = watch::channel(0u64);
+    // Schema force-refresh (Fase S3): the `R` key bumps
+    // `app.schema_refresh_requests`; the loop below mirrors that counter
+    // into this watch channel, and the poller recollects on the next tick.
+    let (schema_refresh_tx, schema_refresh_rx) = watch::channel(0u64);
     let (snapshots, label) = spawn_poller(
         conn,
         interval_rx,
@@ -336,6 +337,16 @@ async fn run(
                 false
             } else {
                 *current = app.refresh_interval;
+                true
+            }
+        });
+        // Same pattern for `R`: mirror the bumped request counter so the
+        // poller force-recollects the schema stats on its next tick.
+        schema_refresh_tx.send_if_modified(|current| {
+            if *current == app.schema_refresh_requests {
+                false
+            } else {
+                *current = app.schema_refresh_requests;
                 true
             }
         });
