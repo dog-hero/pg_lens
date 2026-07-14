@@ -1,19 +1,27 @@
 //! Versioned SQL, embedded at compile time and selected by
 //! `server_version_num` (pg_activity's `post_NNNNNN` convention).
 
-/// The three statements one poller session prepares (once) and runs per tick.
+/// The statements one poller session prepares (once). The first three run
+/// per fast tick; `table_stats` runs only on the slow schema cadence.
 #[derive(Clone, Copy, Debug)]
 pub struct QuerySet {
     pub activity: &'static str,
     pub blocking: &'static str,
     pub server_info: &'static str,
+    pub table_stats: &'static str,
 }
+
+/// Row cap of the table-stats query (top N tables by total size). Kept as a
+/// const so the SQL and any future flag stay in sync (asserted by a test).
+pub const TABLE_STATS_LIMIT: usize = 200;
 
 const ACTIVITY_POST_140000: &str = include_str!("../queries/activity_post_140000.sql");
 const ACTIVITY_POST_130000: &str = include_str!("../queries/activity_post_130000.sql");
 // Uses only 9.6+ features (pg_blocking_pids), so it serves PG 13 too.
 const BLOCKING_POST_140000: &str = include_str!("../queries/blocking_post_140000.sql");
 const SERVER_INFO_POST_130000: &str = include_str!("../queries/server_info_post_130000.sql");
+// n_ins_since_vacuum is PG 13+, matching pg_lens's version floor.
+const TABLE_STATS_POST_130000: &str = include_str!("../queries/table_stats_post_130000.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -23,12 +31,14 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             activity: ACTIVITY_POST_140000,
             blocking: BLOCKING_POST_140000,
             server_info: SERVER_INFO_POST_130000,
+            table_stats: TABLE_STATS_POST_130000,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
             activity: ACTIVITY_POST_130000,
             blocking: BLOCKING_POST_140000,
             server_info: SERVER_INFO_POST_130000,
+            table_stats: TABLE_STATS_POST_130000,
         })
     } else {
         Err(format!(
@@ -55,6 +65,19 @@ mod tests {
         let q = for_version(130_011).expect("PG 13 supported");
         assert!(q.activity.contains("NULL::int8 AS query_id"));
         assert!(!q.activity.contains("a.query_id"));
+    }
+
+    #[test]
+    fn table_stats_serves_pg13_and_up_with_the_row_cap() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.table_stats.contains("pg_stat_user_tables"));
+            assert!(q.table_stats.contains("n_ins_since_vacuum"), "PG13+ set");
+            assert!(
+                q.table_stats.contains(&format!("LIMIT {TABLE_STATS_LIMIT}")),
+                "SQL row cap must match TABLE_STATS_LIMIT"
+            );
+        }
     }
 
     #[test]

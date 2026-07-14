@@ -3,11 +3,12 @@
 //! Every struct here derives `serde::Serialize` from day one: the future web
 //! frontend (Fase 6) streams these exact types as JSON.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
-use crate::history::SnapshotHistory;
+use crate::history::{SnapshotHistory, epoch_ms_now};
 
 /// Monotonic counter so that every [`DbSnapshot::mock`] call produces visibly
 /// different (but deterministic) data — the mock poller (Fase 2) relies on
@@ -91,6 +92,263 @@ pub struct ServerVitals {
     pub deadlocks: i64,
 }
 
+/// One row of the Schema Lens table-stats query
+/// (`queries/table_stats_post_130000.sql`): `pg_stat_user_tables` counters
+/// plus on-disk sizes, for one user table of the *connected database*.
+#[derive(Clone, Debug, Serialize)]
+pub struct TableStatRow {
+    pub schema: String,
+    pub name: String,
+    /// `pg_total_relation_size(relid)` — heap + indexes + TOAST.
+    pub total_bytes: i64,
+    /// `pg_table_size(relid)` — heap + TOAST, no indexes.
+    pub table_bytes: i64,
+    /// `pg_indexes_size(relid)`.
+    pub index_bytes: i64,
+    pub seq_scan: i64,
+    pub seq_tup_read: i64,
+    /// NULL in `pg_stat_user_tables` when the table has no indexes — kept
+    /// as `None` (distinct from "indexed but never scanned" = `Some(0)`).
+    pub idx_scan: Option<i64>,
+    pub idx_tup_fetch: Option<i64>,
+    pub n_tup_ins: i64,
+    pub n_tup_upd: i64,
+    pub n_tup_del: i64,
+    pub n_tup_hot_upd: i64,
+    pub n_live_tup: i64,
+    pub n_dead_tup: i64,
+    pub n_mod_since_analyze: i64,
+    /// PG 13+ (the reason the lens's floor is 13).
+    pub n_ins_since_vacuum: i64,
+    /// `EXTRACT(epoch FROM last_vacuum)::float8` — Unix epoch seconds;
+    /// `None` = never (auto)vacuumed/analyzed since the stats began.
+    pub last_vacuum_epoch_secs: Option<f64>,
+    pub last_autovacuum_epoch_secs: Option<f64>,
+    pub last_analyze_epoch_secs: Option<f64>,
+    pub last_autoanalyze_epoch_secs: Option<f64>,
+    pub vacuum_count: i64,
+    pub autovacuum_count: i64,
+    pub analyze_count: i64,
+    pub autoanalyze_count: i64,
+}
+
+/// One estimated-bloat row (table or btree index), shaped after the output
+/// of ioguix/pgsql-bloat-estimation. Defined in Fase S1 so the snapshot
+/// schema is final; the vectors stay empty until Fase S2 runs the queries.
+#[derive(Clone, Debug, Serialize)]
+pub struct BloatRow {
+    pub schema: String,
+    /// Table name, or index name for `index_bloat` rows.
+    pub name: String,
+    /// Current on-disk size of the relation.
+    pub real_bytes: i64,
+    /// Estimated wasted bytes. `None` when the estimate is not applicable.
+    pub bloat_bytes: Option<i64>,
+    /// Estimated bloat percentage of `real_bytes`. `None` when `is_na`.
+    pub bloat_pct: Option<f64>,
+    pub fillfactor: Option<i32>,
+    /// ioguix's "not applicable" flag: the estimate is unreliable (e.g.
+    /// `name`-typed columns, missing statistics). UIs must show a marker,
+    /// never a made-up number.
+    pub is_na: bool,
+}
+
+/// Health of the *slow* schema collection, separate from [`PollerStatus`]:
+/// a failing schema query must never taint the 2s activity pipeline.
+#[derive(Clone, Debug, Serialize)]
+pub enum SchemaStatus {
+    Ok,
+    Error(String),
+}
+
+/// The Schema Lens payload: table stats (+ estimated bloat from Fase S2 on)
+/// of the connected database, collected on its own slow cadence (default
+/// 60s). Wrapped in an `Arc` inside [`DbSnapshot`] so the fast ticks that
+/// do *not* recollect it reuse the previous collection for free.
+#[derive(Clone, Debug, Serialize)]
+pub struct SchemaSnapshot {
+    /// When this collection ran (Unix epoch milliseconds) — the staleness
+    /// indicator frontends show ("collected Xs ago").
+    pub collected_at_epoch_ms: u64,
+    /// Top tables by total size (the query caps at 200 rows).
+    pub tables: Vec<TableStatRow>,
+    /// Estimated table bloat (empty until Fase S2).
+    pub table_bloat: Vec<BloatRow>,
+    /// Estimated btree index bloat (empty until Fase S2).
+    pub index_bloat: Vec<BloatRow>,
+    pub status: SchemaStatus,
+}
+
+impl SchemaSnapshot {
+    /// Plausible fake data (same contract as [`DbSnapshot::mock`]): a few
+    /// pgbench-flavoured tables, one of them visibly bloated, plus mock
+    /// bloat rows so Fase S3's UI can be built entirely against `--mock`.
+    pub fn mock() -> Self {
+        let seq = MOCK_CALLS.load(Ordering::Relaxed);
+        let churn = (seq as i64) * 37;
+        let tables = vec![
+            TableStatRow {
+                schema: "public".to_string(),
+                name: "pgbench_accounts".to_string(),
+                total_bytes: 671_088_640,
+                table_bytes: 549_453_824,
+                index_bytes: 121_634_816,
+                seq_scan: 12,
+                seq_tup_read: 6_000_000,
+                idx_scan: Some(48_211_390 + churn),
+                idx_tup_fetch: Some(48_211_390 + churn),
+                n_tup_ins: 500_000,
+                n_tup_upd: 1_204_388 + churn,
+                n_tup_del: 0,
+                n_tup_hot_upd: 981_224 + churn,
+                n_live_tup: 500_000,
+                n_dead_tup: 14_205 + jitter(seq, 20, 9_000) as i64,
+                n_mod_since_analyze: 52_180,
+                n_ins_since_vacuum: 0,
+                last_vacuum_epoch_secs: None,
+                last_autovacuum_epoch_secs: Some(1_752_000_000.0),
+                last_analyze_epoch_secs: None,
+                last_autoanalyze_epoch_secs: Some(1_752_000_300.0),
+                vacuum_count: 0,
+                autovacuum_count: 42,
+                analyze_count: 1,
+                autoanalyze_count: 40,
+            },
+            // The bloated-looking one: dead tuples rival live ones and
+            // autovacuum has not caught up.
+            TableStatRow {
+                schema: "public".to_string(),
+                name: "order_items".to_string(),
+                total_bytes: 219_152_384,
+                table_bytes: 187_695_104,
+                index_bytes: 31_457_280,
+                seq_scan: 3_310,
+                seq_tup_read: 940_115_002,
+                idx_scan: Some(88_202),
+                idx_tup_fetch: Some(87_990),
+                n_tup_ins: 2_400_000,
+                n_tup_upd: 5_512_930 + churn,
+                n_tup_del: 1_100_000,
+                n_tup_hot_upd: 210_004,
+                n_live_tup: 1_300_000,
+                n_dead_tup: 1_050_000 + churn,
+                n_mod_since_analyze: 2_205_818,
+                n_ins_since_vacuum: 402_119,
+                last_vacuum_epoch_secs: Some(1_751_400_000.0),
+                last_autovacuum_epoch_secs: Some(1_751_400_000.0),
+                last_analyze_epoch_secs: Some(1_751_400_100.0),
+                last_autoanalyze_epoch_secs: Some(1_751_400_100.0),
+                vacuum_count: 2,
+                autovacuum_count: 7,
+                analyze_count: 2,
+                autoanalyze_count: 6,
+            },
+            TableStatRow {
+                schema: "public".to_string(),
+                name: "pgbench_branches".to_string(),
+                total_bytes: 933_888,
+                table_bytes: 892_928,
+                index_bytes: 40_960,
+                seq_scan: 1_204_400 + churn,
+                seq_tup_read: 6_022_000 + churn * 5,
+                idx_scan: Some(0),
+                idx_tup_fetch: Some(0),
+                n_tup_ins: 5,
+                n_tup_upd: 1_204_388 + churn,
+                n_tup_del: 0,
+                n_tup_hot_upd: 1_100_301 + churn,
+                n_live_tup: 5,
+                n_dead_tup: 88,
+                n_mod_since_analyze: 3_050,
+                n_ins_since_vacuum: 0,
+                last_vacuum_epoch_secs: None,
+                last_autovacuum_epoch_secs: Some(1_752_000_420.0),
+                last_analyze_epoch_secs: None,
+                last_autoanalyze_epoch_secs: Some(1_752_000_425.0),
+                vacuum_count: 0,
+                autovacuum_count: 210,
+                analyze_count: 0,
+                autoanalyze_count: 204,
+            },
+            // A table with no indexes at all: idx_scan is NULL, exercising
+            // the Option path end to end (SQL → model → JSON → UI).
+            TableStatRow {
+                schema: "audit".to_string(),
+                name: "raw_events".to_string(),
+                total_bytes: 96_468_992,
+                table_bytes: 96_468_992,
+                index_bytes: 0,
+                seq_scan: 44,
+                seq_tup_read: 12_007_113,
+                idx_scan: None,
+                idx_tup_fetch: None,
+                n_tup_ins: 273_000 + churn,
+                n_tup_upd: 0,
+                n_tup_del: 0,
+                n_tup_hot_upd: 0,
+                n_live_tup: 273_000 + churn,
+                n_dead_tup: 0,
+                n_mod_since_analyze: 9_113,
+                n_ins_since_vacuum: 9_113,
+                last_vacuum_epoch_secs: None,
+                last_autovacuum_epoch_secs: None,
+                last_analyze_epoch_secs: None,
+                last_autoanalyze_epoch_secs: Some(1_751_990_000.0),
+                vacuum_count: 0,
+                autovacuum_count: 0,
+                analyze_count: 0,
+                autoanalyze_count: 3,
+            },
+        ];
+        let table_bloat = vec![
+            BloatRow {
+                schema: "public".to_string(),
+                name: "order_items".to_string(),
+                real_bytes: 187_695_104,
+                bloat_bytes: Some(101_318_656),
+                bloat_pct: Some(53.98),
+                fillfactor: Some(100),
+                is_na: false,
+            },
+            BloatRow {
+                schema: "public".to_string(),
+                name: "pgbench_accounts".to_string(),
+                real_bytes: 549_453_824,
+                bloat_bytes: Some(23_068_672),
+                bloat_pct: Some(4.2),
+                fillfactor: Some(100),
+                is_na: false,
+            },
+            // is_na: a `name`-typed column makes the estimate unreliable.
+            BloatRow {
+                schema: "audit".to_string(),
+                name: "raw_events".to_string(),
+                real_bytes: 96_468_992,
+                bloat_bytes: None,
+                bloat_pct: None,
+                fillfactor: Some(100),
+                is_na: true,
+            },
+        ];
+        let index_bloat = vec![BloatRow {
+            schema: "public".to_string(),
+            name: "order_items_pkey".to_string(),
+            real_bytes: 31_457_280,
+            bloat_bytes: Some(11_010_048),
+            bloat_pct: Some(35.0),
+            fillfactor: Some(90),
+            is_na: false,
+        }];
+        Self {
+            collected_at_epoch_ms: epoch_ms_now(),
+            tables,
+            table_bloat,
+            index_bloat,
+            status: SchemaStatus::Ok,
+        }
+    }
+}
+
 /// Health of the poller loop, carried inside every snapshot so that all
 /// frontends can surface collection errors without a side channel.
 #[derive(Clone, Debug, Serialize)]
@@ -114,6 +372,11 @@ pub struct DbSnapshot {
     /// rebuilt; a clone travels in every envelope so all consumers (TUI
     /// sparklines, future web charts) see the same series.
     pub history: SnapshotHistory,
+    /// Schema Lens payload, collected on its own slow cadence (default 60s
+    /// — never on the 2s tick). `None` until the first slow collection ran.
+    /// `Arc`: fast ticks that don't recollect reuse the last collection at
+    /// pointer-clone cost.
+    pub schema: Option<Arc<SchemaSnapshot>>,
     pub status: PollerStatus,
 }
 
@@ -269,6 +532,10 @@ impl DbSnapshot {
             // Empty on purpose: the ring is owned and grown by the poller
             // ([`crate::poller`]), which stamps its clone onto each envelope.
             history: SnapshotHistory::default(),
+            // The mock poller overrides this on its own slow cadence (so
+            // staleness UI is exercisable); a bare mock() carries a fresh
+            // collection so `--mock` always has schema data to render.
+            schema: Some(Arc::new(SchemaSnapshot::mock())),
             status: PollerStatus::Ok,
         }
     }
@@ -297,6 +564,7 @@ impl DbSnapshot {
             activity: Vec::new(),
             locks: Vec::new(),
             history: SnapshotHistory::default(),
+            schema: None,
             status: PollerStatus::Connecting,
         }
     }
@@ -329,6 +597,61 @@ mod tests {
         assert!(json.contains("\"pid\":4821"));
         assert!(json.contains("\"max_connections\":100"));
         assert!(json.contains("\"blocked_by\":[4312]"));
+    }
+
+    #[test]
+    fn mock_snapshot_carries_schema_tables() {
+        let snapshot = DbSnapshot::mock();
+        let schema = snapshot.schema.as_ref().expect("mock must carry schema");
+        assert!(schema.tables.len() >= 3, "several tables expected");
+        assert!(matches!(schema.status, SchemaStatus::Ok));
+        assert!(schema.collected_at_epoch_ms > 0);
+        // The bloated-looking table exists and looks bloated.
+        let bloated = schema
+            .tables
+            .iter()
+            .find(|t| t.name == "order_items")
+            .expect("mock bloated table");
+        assert!(bloated.n_dead_tup * 2 > bloated.n_live_tup);
+        // Option path: at least one table has no indexes (idx_scan NULL).
+        assert!(schema.tables.iter().any(|t| t.idx_scan.is_none()));
+        // Mock bloat rows exist for Fase S3, including an is_na one.
+        assert!(!schema.table_bloat.is_empty());
+        assert!(!schema.index_bloat.is_empty());
+        let na = schema
+            .table_bloat
+            .iter()
+            .find(|b| b.is_na)
+            .expect("one is_na bloat row");
+        assert!(na.bloat_pct.is_none(), "is_na must not carry a number");
+        assert!(na.bloat_bytes.is_none());
+    }
+
+    #[test]
+    fn schema_snapshot_serializes_inside_the_envelope() {
+        let snapshot = DbSnapshot::mock();
+        let json = serde_json::to_value(&snapshot).expect("snapshot must serialize");
+        let schema = json.get("schema").expect("schema field present");
+        assert!(
+            schema
+                .get("tables")
+                .and_then(|t| t.as_array())
+                .is_some_and(|t| !t.is_empty()),
+            "schema.tables serialized: {schema}"
+        );
+        assert_eq!(schema["status"], serde_json::json!("Ok"));
+        // A NULL idx_scan crosses as JSON null, not 0.
+        let no_index = schema["tables"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|t| t["name"] == "raw_events")
+            .expect("raw_events row");
+        assert!(no_index["idx_scan"].is_null());
+
+        // `connecting` (pre-first-collection) serializes schema as null.
+        let json = serde_json::to_value(DbSnapshot::connecting()).expect("serialize");
+        assert!(json["schema"].is_null());
     }
 
     #[test]

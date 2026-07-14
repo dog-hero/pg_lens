@@ -4,7 +4,9 @@ version = "0.2.1"
 edition = "2024"
 
 [dependencies]
-serde = { version = "1.0.228", features = ["derive"] }
+# "rc": DbSnapshot.schema is an Arc<SchemaSnapshot> (fast ticks reuse the
+# last slow collection); serializing through the Arc is intentional.
+serde = { version = "1.0.228", features = ["derive", "rc"] }
 # Minimal feature set on purpose: the core only spawns the poller task ("rt"),
 # publishes through watch channels ("sync"), sleeps between polls ("time"),
 # and runs `password_cmd` via `sh -c` ("process", Fase C2).

@@ -26,12 +26,94 @@ use tokio::sync::watch;
 use tokio_postgres::{Client, Statement};
 
 use crate::history::{HistoryPoint, SnapshotHistory, epoch_ms_now};
-use crate::models::{DbSnapshot, PollerStatus, ServerVitals};
+use crate::models::{DbSnapshot, PollerStatus, SchemaSnapshot, SchemaStatus, ServerVitals};
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
 
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
+
+/// Default slow cadence of the Schema Lens collection (`--schema-interval`).
+pub const SCHEMA_INTERVAL_DEFAULT: Duration = Duration::from_secs(60);
+/// Floor for `--schema-interval`: the size/stats queries are too expensive
+/// to run more often than this on purpose.
+pub const SCHEMA_INTERVAL_MIN: Duration = Duration::from_secs(5);
+/// The mock poller refreshes its fake schema every N ticks — short, so the
+/// staleness UI can be exercised without waiting a minute in `--mock`.
+const MOCK_SCHEMA_EVERY_TICKS: u64 = 5;
+
+/// Everything the slow schema collection needs, owned by the poller task —
+/// no Mutex: the force-refresh request arrives as a bumped counter on a
+/// `watch` channel (frontends keep the sender; Fase S3 binds it to `R`).
+struct SchemaState {
+    interval: Duration,
+    refresh_rx: watch::Receiver<u64>,
+    /// When the last collection *attempt* ran (successes and failures both
+    /// arm the timer — a failing schema query must not retry every 2s).
+    last_attempt: Option<Instant>,
+    /// Last collection (or error envelope), reused by every fast tick in
+    /// between at `Arc` cost.
+    current: Option<Arc<SchemaSnapshot>>,
+}
+
+impl SchemaState {
+    fn new(interval: Duration, refresh_rx: watch::Receiver<u64>) -> Self {
+        Self {
+            interval: interval.max(SCHEMA_INTERVAL_MIN),
+            refresh_rx,
+            last_attempt: None,
+            current: None,
+        }
+    }
+
+    /// Should this tick also collect schema stats? True when the slow
+    /// interval elapsed (or never ran) or a force-refresh signal arrived.
+    /// Consumes the pending refresh signal, if any.
+    fn due(&mut self, now: Instant) -> bool {
+        // `has_changed` errs when the sender is gone — no more force
+        // refreshes then, the elapsed check still stands.
+        let forced = self.refresh_rx.has_changed().unwrap_or(false);
+        if forced {
+            self.refresh_rx.borrow_and_update();
+        }
+        forced || cadence_elapsed(self.last_attempt, now, self.interval)
+    }
+
+    /// Stores a successful collection.
+    fn store(&mut self, tables: Vec<crate::models::TableStatRow>) {
+        self.current = Some(Arc::new(SchemaSnapshot {
+            collected_at_epoch_ms: epoch_ms_now(),
+            tables,
+            // Fase S2 fills these.
+            table_bloat: Vec::new(),
+            index_bloat: Vec::new(),
+            status: SchemaStatus::Ok,
+        }));
+    }
+
+    /// Stores a failed collection: the last good data (and its original
+    /// `collected_at`, so staleness stays honest) is kept, only the status
+    /// flips — mirroring the activity pipeline's resilience pattern.
+    fn store_error(&mut self, msg: String) {
+        let previous = self.current.as_deref();
+        self.current = Some(Arc::new(SchemaSnapshot {
+            collected_at_epoch_ms: previous.map_or_else(epoch_ms_now, |p| p.collected_at_epoch_ms),
+            tables: previous.map(|p| p.tables.clone()).unwrap_or_default(),
+            table_bloat: previous.map(|p| p.table_bloat.clone()).unwrap_or_default(),
+            index_bloat: previous.map(|p| p.index_bloat.clone()).unwrap_or_default(),
+            status: SchemaStatus::Error(msg),
+        }));
+    }
+}
+
+/// The pure elapsed check behind [`SchemaState::due`], factored out so the
+/// slow-cadence scheduling is unit-testable without a database.
+fn cadence_elapsed(last_attempt: Option<Instant>, now: Instant, interval: Duration) -> bool {
+    match last_attempt {
+        None => true,
+        Some(at) => now.duration_since(at) >= interval,
+    }
+}
 
 /// Sleeps for the interval currently held by `interval_rx`, waking early if
 /// the value changes (so a `+`/`-` keypress takes effect immediately instead
@@ -66,6 +148,11 @@ async fn wait_interval(interval_rx: &mut watch::Receiver<Duration>) {
 /// so rotating tokens stay fresh across reconnects. A failing command takes
 /// the same resilience path as a DB error: `PollerStatus::Error` + backoff.
 ///
+/// `schema_interval` sets the slow cadence of the Schema Lens collection
+/// (floored at [`SCHEMA_INTERVAL_MIN`]); `schema_refresh_rx` is a bumped
+/// counter — send any new value to force an immediate collection on the
+/// next fast tick (the TUI's `R` key in Fase S3).
+///
 /// The channel starts pre-filled with a [`DbSnapshot::connecting`] value.
 /// The task ends on its own once every receiver has been dropped.
 ///
@@ -76,9 +163,12 @@ pub fn spawn(
     config: tokio_postgres::Config,
     password_source: Option<PasswordSource>,
     interval_rx: watch::Receiver<Duration>,
+    schema_interval: Duration,
+    schema_refresh_rx: watch::Receiver<u64>,
 ) -> watch::Receiver<Arc<DbSnapshot>> {
     let (tx, rx) = watch::channel(Arc::new(DbSnapshot::connecting()));
-    tokio::spawn(run(config, password_source, interval_rx, tx));
+    let schema = SchemaState::new(schema_interval, schema_refresh_rx);
+    tokio::spawn(run(config, password_source, interval_rx, schema, tx));
     rx
 }
 
@@ -87,10 +177,12 @@ async fn run(
     config: tokio_postgres::Config,
     password_source: Option<PasswordSource>,
     mut interval_rx: watch::Receiver<Duration>,
+    mut schema: SchemaState,
     tx: watch::Sender<Arc<DbSnapshot>>,
 ) {
     let mut backoff = BACKOFF_INITIAL;
     // Survives reconnects so the sparklines don't reset on a blip.
+    // (`schema` too: the last collection outlives a connection blip.)
     let mut history = SnapshotHistory::default();
     loop {
         let mut polled_ok = false;
@@ -100,6 +192,7 @@ async fn run(
             &mut interval_rx,
             &tx,
             &mut history,
+            &mut schema,
             &mut polled_ok,
         )
         .await;
@@ -141,6 +234,7 @@ async fn session(
     interval_rx: &mut watch::Receiver<Duration>,
     tx: &watch::Sender<Arc<DbSnapshot>>,
     history: &mut SnapshotHistory,
+    schema: &mut SchemaState,
     polled_ok: &mut bool,
 ) -> SessionEnd {
     // The base config is never mutated: the resolved password goes into a
@@ -159,16 +253,18 @@ async fn session(
         Ok(pair) => pair,
         Err(e) => return SessionEnd::Error(format!("connect failed: {e}")),
     };
-    let end = poll_loop(&client, interval_rx, tx, history, polled_ok).await;
+    let end = poll_loop(&client, interval_rx, tx, history, schema, polled_ok).await;
     conn_handle.abort();
     end
 }
 
-/// The three statements of a session, prepared once (never per tick).
+/// The statements of a session, prepared once (never per tick). The first
+/// three run every fast tick; `table_stats` only on the slow cadence.
 struct Prepared {
     activity: Statement,
     blocking: Statement,
     server_info: Statement,
+    table_stats: Statement,
 }
 
 async fn poll_loop(
@@ -176,6 +272,7 @@ async fn poll_loop(
     interval_rx: &mut watch::Receiver<Duration>,
     tx: &watch::Sender<Arc<DbSnapshot>>,
     history: &mut SnapshotHistory,
+    schema: &mut SchemaState,
     polled_ok: &mut bool,
 ) -> SessionEnd {
     let version_num = match db::server_version_num(client).await {
@@ -190,11 +287,13 @@ async fn poll_loop(
         client.prepare(query_set.activity),
         client.prepare(query_set.blocking),
         client.prepare(query_set.server_info),
+        client.prepare(query_set.table_stats),
     ) {
-        Ok((activity, blocking, server_info)) => Prepared {
+        Ok((activity, blocking, server_info, table_stats)) => Prepared {
             activity,
             blocking,
             server_info,
+            table_stats,
         },
         Err(e) => return SessionEnd::Error(format!("prepare failed: {e}")),
     };
@@ -207,10 +306,24 @@ async fn poll_loop(
         if tx.is_closed() {
             return SessionEnd::Closed;
         }
-        let snapshot = match poll_once(client, &stmts, &mut deltas, history).await {
+        // Slow cadence: only when due (interval elapsed / force refresh)
+        // does the tick ALSO run the schema query — never otherwise. A
+        // failed collection stays inside SchemaStatus (activity intact) and
+        // re-arms the timer, so it is not retried every 2s.
+        let now = Instant::now();
+        if schema.due(now) {
+            schema.last_attempt = Some(now);
+            match collect_schema(client, &stmts.table_stats).await {
+                Ok(tables) => schema.store(tables),
+                Err(msg) => schema.store_error(format!("schema collection failed: {msg}")),
+            }
+        }
+        let mut snapshot = match poll_once(client, &stmts, &mut deltas, history).await {
             Ok(s) => s,
             Err(msg) => return SessionEnd::Error(format!("poll failed: {msg}")),
         };
+        // Ticks in between reuse the last collection at Arc-clone cost.
+        snapshot.schema = schema.current.clone();
         *polled_ok = true;
         if tx.send(Arc::new(snapshot)).is_err() {
             return SessionEnd::Closed;
@@ -325,8 +438,25 @@ async fn poll_once(
         activity,
         locks,
         history: history.clone(),
+        // Stamped by the caller from the poller-owned SchemaState.
+        schema: None,
         status: PollerStatus::Ok,
     })
+}
+
+/// Runs the (slow) table-stats query. Called from the tick loop only when
+/// the schema cadence is due — the anti-pattern nº 1 of this feature is
+/// running this on the fast tick.
+async fn collect_schema(
+    client: &Client,
+    stmt: &Statement,
+) -> Result<Vec<crate::models::TableStatRow>, String> {
+    let rows = client.query(stmt, &[]).await.map_err(|e| e.to_string())?;
+    let mut tables = Vec::with_capacity(rows.len());
+    for row in &rows {
+        tables.push(db::table_stat_from_row(row).map_err(|e| e.to_string())?);
+    }
+    Ok(tables)
 }
 
 fn hit_ratio(hit: i64, read: i64) -> f64 {
@@ -362,6 +492,11 @@ fn record_history(history: &mut SnapshotHistory, snapshot: &mut DbSnapshot) {
 /// history point), so consumers can render immediately with
 /// `Receiver::borrow` before the first `changed()` fires.
 ///
+/// Like the real poller, the mock schema collection runs on its own slow
+/// cadence — every [`MOCK_SCHEMA_EVERY_TICKS`] ticks (short on purpose, so
+/// `--mock` exercises the staleness UI) or when `schema_refresh_rx` bumps —
+/// and the ticks in between reuse the same `Arc<SchemaSnapshot>`.
+///
 /// The task ends on its own once every receiver (including clones) has been
 /// dropped — `watch::Sender::send` returns `Err` when the channel is closed.
 ///
@@ -370,18 +505,33 @@ fn record_history(history: &mut SnapshotHistory, snapshot: &mut DbSnapshot) {
 /// Must be called from within a tokio runtime (it calls `tokio::spawn`).
 pub fn spawn_mock(
     mut interval_rx: watch::Receiver<Duration>,
+    mut schema_refresh_rx: watch::Receiver<u64>,
 ) -> watch::Receiver<Arc<DbSnapshot>> {
     // The mock poller owns the ring exactly like the real one.
     let mut history = SnapshotHistory::default();
     let mut first = DbSnapshot::mock();
     record_history(&mut history, &mut first);
+    // DbSnapshot::mock() builds a fresh schema per call; the poller retains
+    // one and re-stamps it so the slow cadence is observable (same Arc).
+    let mut schema = first.schema.clone();
     let (tx, rx) = watch::channel(Arc::new(first));
 
     tokio::spawn(async move {
+        let mut ticks: u64 = 0;
         loop {
             wait_interval(&mut interval_rx).await;
+            ticks += 1;
             let mut snapshot = DbSnapshot::mock();
             record_history(&mut history, &mut snapshot);
+            let forced = schema_refresh_rx.has_changed().unwrap_or(false);
+            if forced {
+                schema_refresh_rx.borrow_and_update();
+            }
+            if forced || ticks.is_multiple_of(MOCK_SCHEMA_EVERY_TICKS) {
+                schema = snapshot.schema.clone(); // fresh collection
+            } else {
+                snapshot.schema = schema.clone(); // reuse, like real ticks
+            }
             if tx.send(Arc::new(snapshot)).is_err() {
                 // All receivers dropped: nobody is watching, stop polling.
                 break;
@@ -404,11 +554,21 @@ mod tests {
         rx
     }
 
+    fn refresh_rx() -> watch::Receiver<u64> {
+        let (tx, rx) = watch::channel(0u64);
+        std::mem::forget(tx);
+        rx
+    }
+
+    fn spawn_mock_default(ms: u64) -> watch::Receiver<Arc<DbSnapshot>> {
+        spawn_mock(interval_rx(ms), refresh_rx())
+    }
+
     /// The poller must publish at least two snapshots that differ from each
     /// other (and from the initial value) — bounded by a timeout, no sleeps.
     #[tokio::test]
     async fn spawn_mock_publishes_distinct_snapshots() {
-        let mut rx = spawn_mock(interval_rx(10));
+        let mut rx = spawn_mock_default(10);
 
         let initial = serde_json::to_string(&*rx.borrow().clone()).expect("serialize");
 
@@ -431,7 +591,7 @@ mod tests {
     /// the poller, incremental — never rebuilt or reset between envelopes).
     #[tokio::test]
     async fn spawn_mock_grows_history_incrementally() {
-        let mut rx = spawn_mock(interval_rx(10));
+        let mut rx = spawn_mock_default(10);
 
         let first = rx.borrow().clone();
         assert_eq!(first.history.len(), 1, "pre-filled snapshot has one point");
@@ -456,7 +616,7 @@ mod tests {
     #[tokio::test]
     async fn mock_poller_survives_dropped_interval_sender() {
         let (interval_tx, interval_rx) = watch::channel(Duration::from_millis(10));
-        let mut rx = spawn_mock(interval_rx);
+        let mut rx = spawn_mock(interval_rx, refresh_rx());
         drop(interval_tx);
 
         for _ in 0..2 {
@@ -472,7 +632,7 @@ mod tests {
     #[tokio::test]
     async fn interval_change_wakes_the_poller() {
         let (interval_tx, interval_rx) = watch::channel(Duration::from_secs(3600));
-        let mut rx = spawn_mock(interval_rx);
+        let mut rx = spawn_mock(interval_rx, refresh_rx());
         rx.borrow_and_update();
 
         // With a one-hour interval nothing would arrive in 2s — unless the
@@ -494,7 +654,7 @@ mod tests {
         let config: tokio_postgres::Config = "host=127.0.0.1 port=1 user=nobody connect_timeout=1"
             .parse()
             .expect("test DSN must parse");
-        let mut rx = spawn(config, None, interval_rx(50));
+        let mut rx = spawn(config, None, interval_rx(50), SCHEMA_INTERVAL_DEFAULT, refresh_rx());
 
         assert!(matches!(rx.borrow().status, PollerStatus::Connecting));
 
@@ -522,7 +682,7 @@ mod tests {
         let source = PasswordSource::Command(
             "echo topsecret-stdout; echo vault sealed >&2; exit 1".to_string(),
         );
-        let mut rx = spawn(config, Some(source), interval_rx(50));
+        let mut rx = spawn(config, Some(source), interval_rx(50), SCHEMA_INTERVAL_DEFAULT, refresh_rx());
 
         tokio::time::timeout(Duration::from_secs(5), rx.changed())
             .await
@@ -556,7 +716,13 @@ mod tests {
         let config: tokio_postgres::Config = "host=127.0.0.1 port=1 user=nobody connect_timeout=1"
             .parse()
             .expect("test DSN must parse");
-        let _rx = spawn(config, Some(PasswordSource::Command(cmd)), interval_rx(50));
+        let _rx = spawn(
+            config,
+            Some(PasswordSource::Command(cmd)),
+            interval_rx(50),
+            SCHEMA_INTERVAL_DEFAULT,
+            refresh_rx(),
+        );
 
         // First attempt at ~0s, second after the 1s backoff. Poll the file
         // (bounded) until it shows at least two executions.
@@ -583,5 +749,129 @@ mod tests {
     fn hit_ratio_guards_division_by_zero() {
         assert_eq!(hit_ratio(0, 0), 0.0);
         assert_eq!(hit_ratio(90, 10), 0.9);
+    }
+
+    // --- Fase S1: slow schema cadence ---------------------------------------
+
+    /// The pure scheduling rule of the slow cadence: first tick collects,
+    /// then only once the interval elapsed — never on the ticks in between.
+    /// (The real poller's tick loop calls exactly this check; the live-DB
+    /// timing evidence is in the Fase S1 verification run.)
+    #[test]
+    fn cadence_elapsed_gates_the_slow_collection() {
+        let interval = Duration::from_secs(60);
+        let t0 = Instant::now();
+        // Never collected: due immediately.
+        assert!(cadence_elapsed(None, t0, interval));
+        // 2s fast ticks after a collection at t0: not due for 58s...
+        for secs in [2, 30, 58] {
+            assert!(!cadence_elapsed(
+                Some(t0),
+                t0 + Duration::from_secs(secs),
+                interval
+            ));
+        }
+        // ...due again at/after the full interval.
+        assert!(cadence_elapsed(Some(t0), t0 + interval, interval));
+        assert!(cadence_elapsed(
+            Some(t0),
+            t0 + Duration::from_secs(90),
+            interval
+        ));
+    }
+
+    /// A bumped refresh counter makes the very next tick due regardless of
+    /// the elapsed time — and the signal is consumed (one refresh per bump).
+    #[test]
+    fn force_refresh_signal_makes_the_next_tick_due() {
+        let (refresh_tx, refresh_rx) = watch::channel(0u64);
+        let mut schema = SchemaState::new(Duration::from_secs(3600), refresh_rx);
+        let t0 = Instant::now();
+        schema.last_attempt = Some(t0); // just collected: not due for an hour
+        assert!(!schema.due(t0 + Duration::from_secs(2)));
+
+        refresh_tx.send(1).expect("receiver alive");
+        assert!(schema.due(t0 + Duration::from_secs(4)), "bump forces due");
+        assert!(
+            !schema.due(t0 + Duration::from_secs(6)),
+            "signal consumed: no refresh loop"
+        );
+    }
+
+    /// A failed slow collection keeps the last good tables (and their
+    /// original collected_at, so staleness stays honest) — only the status
+    /// flips to Error. Mirrors the activity pipeline's resilience.
+    #[test]
+    fn schema_error_keeps_last_good_tables() {
+        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx());
+        let good = SchemaSnapshot::mock();
+        schema.store(good.tables.clone());
+        let stored = schema.current.clone().expect("stored");
+        let collected_at = stored.collected_at_epoch_ms;
+
+        schema.store_error("permission denied for pg_stat_user_tables".to_string());
+        let after = schema.current.clone().expect("still present");
+        assert_eq!(after.tables.len(), good.tables.len(), "data kept");
+        assert_eq!(after.collected_at_epoch_ms, collected_at, "staleness honest");
+        assert!(matches!(after.status, SchemaStatus::Error(ref m)
+            if m.contains("permission denied")));
+    }
+
+    /// The mock poller reuses the SAME Arc<SchemaSnapshot> between slow
+    /// collections and only swaps it on its mock cadence (every
+    /// MOCK_SCHEMA_EVERY_TICKS ticks) — the observable contract the real
+    /// poller shares.
+    #[tokio::test]
+    async fn spawn_mock_refreshes_schema_on_the_slow_cadence_only() {
+        let mut rx = spawn_mock_default(10);
+        let initial = rx.borrow().schema.clone().expect("mock carries schema");
+
+        let mut swaps = Vec::new();
+        for tick in 1..=(2 * MOCK_SCHEMA_EVERY_TICKS) {
+            tokio::time::timeout(Duration::from_secs(2), rx.changed())
+                .await
+                .expect("poller must publish within 2s")
+                .expect("sender alive");
+            let schema = rx
+                .borrow_and_update()
+                .schema
+                .clone()
+                .expect("every envelope carries schema");
+            if !Arc::ptr_eq(&schema, &initial)
+                && !swaps.last().is_some_and(|(_, s)| Arc::ptr_eq(s, &schema))
+            {
+                swaps.push((tick, schema));
+            }
+        }
+        let swap_ticks: Vec<u64> = swaps.iter().map(|(t, _)| *t).collect();
+        assert_eq!(
+            swap_ticks,
+            vec![MOCK_SCHEMA_EVERY_TICKS, 2 * MOCK_SCHEMA_EVERY_TICKS],
+            "schema must be rebuilt exactly on the slow cadence, reused otherwise"
+        );
+    }
+
+    /// Bumping the refresh channel forces the mock poller to rebuild the
+    /// schema on the very next tick (S3's `R` key contract).
+    #[tokio::test]
+    async fn spawn_mock_force_refresh_rebuilds_schema_immediately() {
+        let (refresh_tx, refresh_rx) = watch::channel(0u64);
+        let mut rx = spawn_mock(interval_rx(10), refresh_rx);
+        let initial = rx.borrow().schema.clone().expect("mock carries schema");
+
+        refresh_tx.send(1).expect("poller alive");
+        tokio::time::timeout(Duration::from_secs(2), rx.changed())
+            .await
+            .expect("poller must publish within 2s")
+            .expect("sender alive");
+        let schema = rx
+            .borrow_and_update()
+            .schema
+            .clone()
+            .expect("schema present");
+        assert!(
+            !Arc::ptr_eq(&schema, &initial),
+            "tick 1 would normally reuse the Arc; the bump must swap it"
+        );
     }
 }

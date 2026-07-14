@@ -7,7 +7,7 @@
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, Config, NoTls, Row};
 
-use crate::models::{ActivityRow, LockRow};
+use crate::models::{ActivityRow, LockRow, TableStatRow};
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
 /// the `Connection` onto its own task: it performs the actual I/O, and no
@@ -114,6 +114,41 @@ pub fn server_info_from_row(row: &Row) -> Result<ServerInfoRow, tokio_postgres::
         max_connections: row.try_get("max_connections")?,
         uptime_secs: row.try_get("uptime_secs")?,
         server_version: row.try_get("server_version")?,
+    })
+}
+
+/// Maps one row of `queries/table_stats_post_130000.sql` onto
+/// [`TableStatRow`]. Counters arrive already COALESCEd to 0 by the SQL —
+/// except `idx_scan`/`idx_tup_fetch`, whose NULL ("table has no indexes")
+/// is information the model keeps as `None`. `last_*` timestamps arrive as
+/// epoch seconds `::float8` (NULL = never), per the repo convention.
+pub fn table_stat_from_row(row: &Row) -> Result<TableStatRow, tokio_postgres::Error> {
+    Ok(TableStatRow {
+        schema: row.try_get("schemaname")?,
+        name: row.try_get("relname")?,
+        total_bytes: row.try_get("total_bytes")?,
+        table_bytes: row.try_get("table_bytes")?,
+        index_bytes: row.try_get("index_bytes")?,
+        seq_scan: row.try_get("seq_scan")?,
+        seq_tup_read: row.try_get("seq_tup_read")?,
+        idx_scan: row.try_get("idx_scan")?,
+        idx_tup_fetch: row.try_get("idx_tup_fetch")?,
+        n_tup_ins: row.try_get("n_tup_ins")?,
+        n_tup_upd: row.try_get("n_tup_upd")?,
+        n_tup_del: row.try_get("n_tup_del")?,
+        n_tup_hot_upd: row.try_get("n_tup_hot_upd")?,
+        n_live_tup: row.try_get("n_live_tup")?,
+        n_dead_tup: row.try_get("n_dead_tup")?,
+        n_mod_since_analyze: row.try_get("n_mod_since_analyze")?,
+        n_ins_since_vacuum: row.try_get("n_ins_since_vacuum")?,
+        last_vacuum_epoch_secs: row.try_get("last_vacuum")?,
+        last_autovacuum_epoch_secs: row.try_get("last_autovacuum")?,
+        last_analyze_epoch_secs: row.try_get("last_analyze")?,
+        last_autoanalyze_epoch_secs: row.try_get("last_autoanalyze")?,
+        vacuum_count: row.try_get("vacuum_count")?,
+        autovacuum_count: row.try_get("autovacuum_count")?,
+        analyze_count: row.try_get("analyze_count")?,
+        autoanalyze_count: row.try_get("autoanalyze_count")?,
     })
 }
 

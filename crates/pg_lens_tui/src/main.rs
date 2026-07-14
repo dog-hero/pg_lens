@@ -93,6 +93,12 @@ struct ConnArgs {
     #[arg(long, default_value_t = 2.0)]
     interval: f64,
 
+    /// Schema Lens collection interval in seconds (minimum 5): table stats
+    /// and sizes are expensive, so they run on this slow cadence — never on
+    /// the fast tick.
+    #[arg(long, value_name = "SECS", default_value_t = 60)]
+    schema_interval: u64,
+
     /// Use built-in mock data instead of a real database (dev/demo mode).
     #[arg(long)]
     mock: bool,
@@ -158,24 +164,42 @@ impl ConnArgs {
     fn interval(&self) -> Duration {
         Duration::from_secs_f64(self.interval.max(0.5))
     }
+
+    /// `--schema-interval`, floored at the core's sanity minimum (5s).
+    fn schema_interval(&self) -> Duration {
+        Duration::from_secs(self.schema_interval)
+            .max(pg_lens_core::poller::SCHEMA_INTERVAL_MIN)
+    }
 }
 
 /// Spawns the poller (mock or real) and returns its snapshot channel plus a
 /// display label. The interval sender rides along: the TUI feeds `+`/`-`
-/// changes into it, `serve` just keeps it alive.
+/// changes into it, `serve` just keeps it alive. `schema_refresh_rx` is the
+/// force-recollection signal (a bumped counter): Fase S3 wires the TUI's `R`
+/// key to its sender — until then callers just keep the sender alive.
 fn spawn_poller(
     conn: Option<Resolved>,
     interval_rx: watch::Receiver<Duration>,
+    schema_interval: Duration,
+    schema_refresh_rx: watch::Receiver<u64>,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, String) {
     match conn {
-        None => (pg_lens_core::poller::spawn_mock(interval_rx), "mock".to_string()),
+        None => (
+            pg_lens_core::poller::spawn_mock(interval_rx, schema_refresh_rx),
+            "mock".to_string(),
+        ),
         Some(resolved) => {
             // The label is the only connection info any frontend sees —
             // host and user, never the password. When the resolution came
             // with a password_cmd, the poller re-runs it per (re)connection.
             let label = resolved.label.to_string();
-            let snapshots =
-                pg_lens_core::poller::spawn(resolved.config, resolved.password_source, interval_rx);
+            let snapshots = pg_lens_core::poller::spawn(
+                resolved.config,
+                resolved.password_source,
+                interval_rx,
+                schema_interval,
+                schema_refresh_rx,
+            );
             (snapshots, label)
         }
     }
@@ -233,7 +257,15 @@ async fn run_serve(args: ServeArgs) -> color_eyre::Result<()> {
     // `serve` has no `+`/`-` keys; the sender only needs to outlive the
     // server so the poller keeps its cadence.
     let (_interval_tx, interval_rx) = watch::channel(args.conn.interval());
-    let (snapshots, label) = spawn_poller(conn, interval_rx);
+    // No re-collect endpoint in the read-only web UI (S4 backlog): the
+    // sender only has to outlive the server, like the interval one.
+    let (_schema_refresh_tx, schema_refresh_rx) = watch::channel(0u64);
+    let (snapshots, label) = spawn_poller(
+        conn,
+        interval_rx,
+        args.conn.schema_interval(),
+        schema_refresh_rx,
+    );
 
     let router = pg_lens_web::router(snapshots, token);
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
@@ -268,7 +300,15 @@ async fn run(
     // below mirrors `app.refresh_interval` into it whenever `+`/`-` change
     // it. Message-passing only — no shared Mutex.
     let (interval_tx, interval_rx) = watch::channel(interval);
-    let (snapshots, label) = spawn_poller(conn, interval_rx);
+    // Schema force-refresh: created here so Fase S3 only has to bind a key
+    // to `_schema_refresh_tx.send(n+1)` — the poller side is already wired.
+    let (_schema_refresh_tx, schema_refresh_rx) = watch::channel(0u64);
+    let (snapshots, label) = spawn_poller(
+        conn,
+        interval_rx,
+        conn_args.schema_interval(),
+        schema_refresh_rx,
+    );
     app.host = label;
     // Seed the app with the poller's initial snapshot before the first frame
     // (in real mode this avoids one frame of placeholder mock data).
