@@ -37,6 +37,19 @@ pub fn spinner_frame(tick_count: u64) -> &'static str {
     SPINNER_FRAMES[(tick_count % SPINNER_FRAMES.len() as u64) as usize]
 }
 
+/// The two-line wordmark (lens glyph + name, subtitle) shared by the splash
+/// and the startup service picker, so both screens read as one product.
+pub fn wordmark_lines() -> [Line<'static>; 2] {
+    [
+        // Small hand-made wordmark: a lens over the name. Tasteful, 2 lines.
+        Line::from(Span::styled(
+            "\u{25cd}  p g _ l e n s",
+            style::accent_style(),
+        )),
+        Line::from("live PostgreSQL observability").style(style::label_style()),
+    ]
+}
+
 pub fn draw(app: &App, frame: &mut Frame) {
     let area = frame.area();
     let error = match &app.snapshot.status {
@@ -70,10 +83,10 @@ pub fn draw(app: &App, frame: &mut Frame) {
             .style(Style::new().fg(Color::Red)),
         _ => Line::from("waiting for the first snapshot").style(style::label_style()),
     };
+    let [wordmark, subtitle] = wordmark_lines();
     let header = Paragraph::new(vec![
-        // Small hand-made wordmark: a lens over the name. Tasteful, 2 lines.
-        Line::from(Span::styled("\u{25cd}  p g _ l e n s", style::accent_style())),
-        Line::from("live PostgreSQL observability").style(style::label_style()),
+        wordmark,
+        subtitle,
         Line::default(),
         Line::from(vec![
             Span::styled(spinner_frame(app.tick_count), style::accent_style()),

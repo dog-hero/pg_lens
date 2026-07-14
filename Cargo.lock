@@ -1464,6 +1464,7 @@ dependencies = [
  "pg_lens_core",
  "pg_lens_web",
  "ratatui",
+ "tempfile",
  "tokio",
 ]
 

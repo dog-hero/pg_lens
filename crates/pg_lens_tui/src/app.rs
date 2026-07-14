@@ -126,6 +126,41 @@ pub fn find_table_bloat<'a>(
         .find(|b| b.schema == table.schema && b.name == table.name)
 }
 
+/// One selectable row of the startup service picker. Built in `main.rs`
+/// from `settings::list_services` summaries — display-safe by construction
+/// (name + host/user only; a `password`/`password_cmd` never reaches here).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickerEntry {
+    /// Display name (`[services.<name>]`, or "localhost" for the default).
+    pub name: String,
+    /// What the services file says, verbatim: `user@host` with `?` for
+    /// fields the entry leaves out (env/default fallbacks NOT applied), or
+    /// `(default)` for the final localhost entry.
+    pub detail: String,
+    /// `Some(name)` = resolve with this service; `None` = the plain
+    /// no-service default resolution (`host=localhost user=postgres`).
+    pub service: Option<String>,
+}
+
+/// State of the startup service picker (`App::picker`); present only while
+/// the picker is on screen — no poller exists yet during that time.
+#[derive(Clone, Debug)]
+pub struct PickerState {
+    pub entries: Vec<PickerEntry>,
+    /// Index into `entries`; j/k/↑/↓ move it, saturating at both ends
+    /// (same behavior as the lens tables).
+    pub selected: usize,
+}
+
+impl PickerState {
+    pub fn new(entries: Vec<PickerEntry>) -> Self {
+        Self {
+            entries,
+            selected: 0,
+        }
+    }
+}
+
 /// Everything that can happen, funneled through one mpsc channel.
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -135,6 +170,10 @@ pub enum Action {
     /// exists to wake the loop up for an immediate redraw.
     Resize,
     Snapshot(Arc<DbSnapshot>),
+    /// The connection label resolved after a picker selection (`main.rs`
+    /// spawns the poller lazily and feeds the display-safe `user@host`
+    /// label back through update() — the sole mutation point).
+    HostLabel(String),
     Tick,
     Quit,
 }
@@ -186,6 +225,13 @@ pub struct App {
     /// Counts `Action::Tick` (250ms cadence) — drives the splash spinner
     /// animation. Mutated only in [`update`], like everything else.
     pub tick_count: u64,
+    /// `Some` while the startup service picker is on screen (no poller
+    /// exists yet); `None` in normal operation. Set once by `main.rs`
+    /// before the loop starts, cleared by Enter inside [`update`].
+    pub picker: Option<PickerState>,
+    /// The entry chosen in the picker. Set (once, by Enter in [`update`])
+    /// and never cleared; `main.rs` watches it to spawn the real poller.
+    pub picked: Option<PickerEntry>,
     pub should_quit: bool,
 }
 
@@ -207,6 +253,8 @@ impl App {
             last_snapshot_at: None,
             first_data_at: None,
             tick_count: 0,
+            picker: None,
+            picked: None,
             should_quit: false,
         };
         resort(&mut app);
@@ -265,6 +313,7 @@ pub fn update(app: &mut App, action: Action) {
         }
         // The next draw reads the new terminal size from the frame itself.
         Action::Resize => {}
+        Action::HostLabel(label) => app.host = label,
         // Only effect: advance the splash spinner (and force a redraw).
         Action::Tick => app.tick_count = app.tick_count.wrapping_add(1),
         Action::Quit => app.should_quit = true,
@@ -273,6 +322,12 @@ pub fn update(app: &mut App, action: Action) {
 
 fn handle_key(app: &mut App, key: KeyEvent) {
     if key.kind != KeyEventKind::Press {
+        return;
+    }
+    // Picker mode: its own tiny keymap — none of the lens keybindings
+    // (Tab/s/R/+/-/Enter-detail) are active while it is on screen.
+    if app.picker.is_some() {
+        handle_picker_key(app, key);
         return;
     }
     match key.code {
@@ -330,6 +385,42 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 .refresh_interval
                 .saturating_sub(REFRESH_STEP)
                 .max(REFRESH_MIN);
+        }
+        _ => {}
+    }
+}
+
+/// Keymap of the startup service picker: j/k/↑/↓ move (saturating, like
+/// the lens tables), Enter picks the highlighted entry (main.rs then
+/// resolves + spawns the poller), q/Esc/Ctrl+C quit cleanly. Everything
+/// else is deliberately inert — there is no poller to talk to yet.
+fn handle_picker_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(picker) = app.picker.as_mut() {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(picker) = app.picker.as_mut()
+                && !picker.entries.is_empty()
+            {
+                picker.selected = (picker.selected + 1).min(picker.entries.len() - 1);
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(picker) = app.picker.take() {
+                match picker.entries.get(picker.selected) {
+                    Some(entry) => app.picked = Some(entry.clone()),
+                    // Empty picker cannot be built (main.rs requires >=1
+                    // service), but stay defensive: keep it on screen.
+                    None => app.picker = Some(picker),
+                }
+            }
         }
         _ => {}
     }
@@ -786,6 +877,125 @@ mod tests {
         lost.status = pg_lens_core::PollerStatus::Error("connection refused".into());
         update(&mut app, Action::Snapshot(Arc::new(lost)));
         assert!(!app.show_splash(), "post-first-data errors use the banner");
+    }
+
+    // --- startup service picker ---------------------------------------------
+
+    fn picker_app() -> App {
+        let mut app = App::new();
+        app.picker = Some(PickerState::new(vec![
+            PickerEntry {
+                name: "prod".into(),
+                detail: "svc@db.prod.internal".into(),
+                service: Some("prod".into()),
+            },
+            PickerEntry {
+                name: "staging".into(),
+                detail: "postgres@db.staging.internal".into(),
+                service: Some("staging".into()),
+            },
+            PickerEntry {
+                name: "localhost".into(),
+                detail: "(default)".into(),
+                service: None,
+            },
+        ]));
+        app
+    }
+
+    fn picker_selected(app: &App) -> usize {
+        app.picker.as_ref().expect("picker open").selected
+    }
+
+    #[test]
+    fn picker_navigation_saturates_at_both_ends() {
+        let mut app = picker_app();
+        assert_eq!(picker_selected(&app), 0);
+
+        // Up at the top stays at the top.
+        update(&mut app, press(KeyCode::Char('k')));
+        assert_eq!(picker_selected(&app), 0);
+        update(&mut app, press(KeyCode::Up));
+        assert_eq!(picker_selected(&app), 0);
+
+        // Down walks to the last entry and saturates there.
+        for _ in 0..10 {
+            update(&mut app, press(KeyCode::Char('j')));
+        }
+        assert_eq!(picker_selected(&app), 2);
+        update(&mut app, press(KeyCode::Down));
+        assert_eq!(picker_selected(&app), 2);
+        update(&mut app, press(KeyCode::Up));
+        assert_eq!(picker_selected(&app), 1);
+        assert!(!app.should_quit);
+        assert!(app.picked.is_none(), "navigation never picks");
+    }
+
+    #[test]
+    fn picker_enter_picks_the_highlighted_entry_and_closes_the_picker() {
+        let mut app = picker_app();
+        update(&mut app, press(KeyCode::Char('j')));
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.picker.is_none(), "picker leaves the screen");
+        let picked = app.picked.as_ref().expect("entry picked");
+        assert_eq!(picked.name, "staging");
+        assert_eq!(picked.service.as_deref(), Some("staging"));
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn picker_enter_on_the_default_entry_maps_to_no_service() {
+        let mut app = picker_app();
+        for _ in 0..5 {
+            update(&mut app, press(KeyCode::Char('j')));
+        }
+        update(&mut app, press(KeyCode::Enter));
+        let picked = app.picked.as_ref().expect("entry picked");
+        assert_eq!(picked.name, "localhost");
+        assert_eq!(picked.service, None, "default = plain resolution");
+    }
+
+    #[test]
+    fn picker_q_and_esc_quit_without_picking() {
+        for code in [KeyCode::Char('q'), KeyCode::Esc] {
+            let mut app = picker_app();
+            update(&mut app, press(code));
+            assert!(app.should_quit);
+            assert!(app.picked.is_none());
+            assert!(app.picker.is_some(), "no entry was consumed");
+        }
+    }
+
+    #[test]
+    fn picker_ignores_lens_keybindings() {
+        let mut app = picker_app();
+        // Tab/s/R/+/- must be inert: no lens switch, no sort change, no
+        // schema refresh request, no interval change — and no panic.
+        for code in [
+            KeyCode::Tab,
+            KeyCode::Char('s'),
+            KeyCode::Char('R'),
+            KeyCode::Char('+'),
+            KeyCode::Char('-'),
+        ] {
+            update(&mut app, press(code));
+        }
+        assert_eq!(app.active_tab, Tab::MacroLens);
+        assert_eq!(app.sort_mode, SortMode::Duration);
+        assert_eq!(app.schema_refresh_requests, 0);
+        assert_eq!(app.refresh_interval, DEFAULT_REFRESH);
+        assert!(app.picker.is_some());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn host_label_action_updates_the_header_host() {
+        let mut app = App::new();
+        update(
+            &mut app,
+            Action::HostLabel("svc@db.prod.internal".to_string()),
+        );
+        assert_eq!(app.host, "svc@db.prod.internal");
     }
 
     #[test]

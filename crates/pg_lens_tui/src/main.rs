@@ -28,11 +28,11 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use pg_lens_core::DbSnapshot;
-use pg_lens_core::settings::{self, ConnSpec, Resolved};
+use pg_lens_core::settings::{self, ConnSpec, Resolved, ServiceSummary};
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, watch};
 
-use crate::app::{Action, App, update};
+use crate::app::{Action, App, PickerEntry, PickerState, update};
 
 mod app;
 mod event;
@@ -172,6 +172,84 @@ impl ConnArgs {
     }
 }
 
+/// How `run` starts: with a connection already resolved (the classic path),
+/// or in picker mode — no poller yet; the user chooses first.
+enum Startup {
+    // Boxed: `Resolved` is large next to the picker variant (clippy
+    // large_enum_variant), and this value exists exactly once at startup.
+    Connect(Box<Option<Resolved>>),
+    Picker(Vec<PickerEntry>),
+}
+
+/// Env vars whose presence (non-empty — empty values count as unset,
+/// consistent with `settings.rs`) expresses a connection intent that the
+/// picker must not second-guess.
+const PICKER_SUPPRESSING_ENV: [&str; 4] =
+    ["PGHOST", "PGSERVICE", "PG_LENS_SERVICE", "PG_LENS_DSN"];
+
+/// Interactive service picker trigger rule (TUI mode only — never `serve`,
+/// never `--mock`; see README "Interactive service picker"). The picker
+/// shows iff ALL of:
+/// - no `--dsn` and no `--service` (empty strings count as unset), and
+/// - none of PGHOST / PGSERVICE / PG_LENS_SERVICE / PG_LENS_DSN is set to a
+///   non-empty value in the captured environment, and
+/// - the services file (the default XDG path, or the `--services-file` /
+///   `PG_LENS_SERVICES_FILE` override) exists, parses, passes the existing
+///   permission checks, and defines at least one service.
+///
+/// Any failure of that chain returns `None`, which means EXACTLY the
+/// pre-picker behavior: plain `settings::resolve` (localhost default) or
+/// its pre-TUI error. Returns display-safe summaries only (names +
+/// host/user — never a `password`/`password_cmd`) plus the loader's
+/// non-fatal warnings.
+fn picker_services(spec: &ConnSpec) -> Option<(Vec<ServiceSummary>, Vec<String>)> {
+    if spec.dsn.as_deref().is_some_and(|d| !d.is_empty())
+        || spec.service.as_deref().is_some_and(|s| !s.is_empty())
+    {
+        return None;
+    }
+    if PICKER_SUPPRESSING_ENV
+        .iter()
+        .any(|var| spec.env.get(*var).is_some_and(|v| !v.is_empty()))
+    {
+        return None;
+    }
+    // `list_services` runs the whole chain (locate → read → parse →
+    // permission checks); any error degrades to the default behavior.
+    match settings::list_services(spec) {
+        Ok((services, warnings)) if !services.is_empty() => Some((services, warnings)),
+        _ => None,
+    }
+}
+
+/// Builds the picker rows: one per service, rendered exactly as the file
+/// says (`?` for fields the entry leaves out — env/default fallbacks are
+/// NOT applied here), plus the trailing `localhost — (default)` entry that
+/// maps to the plain no-service resolution.
+fn picker_entries(services: Vec<ServiceSummary>) -> Vec<PickerEntry> {
+    let mut entries: Vec<PickerEntry> = services
+        .into_iter()
+        .map(|s| {
+            let detail = format!(
+                "{user}@{host}",
+                user = s.user.as_deref().unwrap_or("?"),
+                host = s.host.as_deref().unwrap_or("?"),
+            );
+            PickerEntry {
+                name: s.name.clone(),
+                detail,
+                service: Some(s.name),
+            }
+        })
+        .collect();
+    entries.push(PickerEntry {
+        name: "localhost".to_string(),
+        detail: "(default)".to_string(),
+        service: None,
+    });
+    entries
+}
+
 /// Spawns the poller (mock or real) and returns its snapshot channel plus a
 /// display label. The interval sender rides along: the TUI feeds `+`/`-`
 /// changes into it, `serve` just keeps it alive. `schema_refresh_rx` is the
@@ -223,13 +301,23 @@ async fn run_tui(conn_args: ConnArgs) -> color_eyre::Result<()> {
     if conn_args.list_services {
         return conn_args.list_services();
     }
-    // Resolve the connection *before* entering the alternate screen so a
-    // bad DSN / env var / services file prints as a normal error (and
-    // permission warnings land on stderr), not inside a raw terminal.
-    let conn = conn_args.resolve()?;
+    // Startup mode decision. Picker mode (see `picker_services` for the
+    // full trigger rule) enters the TUI with no poller; otherwise resolve
+    // the connection *before* entering the alternate screen so a bad DSN /
+    // env var / services file prints as a normal error (and permission
+    // warnings land on stderr), not inside a raw terminal.
+    let startup = match picker_services(&conn_args.spec()) {
+        Some((services, warnings)) if !conn_args.mock => {
+            for warning in &warnings {
+                eprintln!("warning: {warning}");
+            }
+            Startup::Picker(picker_entries(services))
+        }
+        _ => Startup::Connect(Box::new(conn_args.resolve()?)),
+    };
 
     let terminal = ratatui::init();
-    let result = run(terminal, &conn_args, conn).await;
+    let result = run(terminal, &conn_args, startup).await;
     ratatui::restore();
     result
 }
@@ -288,7 +376,7 @@ async fn run_serve(args: ServeArgs) -> color_eyre::Result<()> {
 async fn run(
     mut terminal: DefaultTerminal,
     conn_args: &ConnArgs,
-    conn: Option<Resolved>,
+    startup: Startup,
 ) -> color_eyre::Result<()> {
     let interval = conn_args.interval();
     let mut app = App::new();
@@ -304,17 +392,32 @@ async fn run(
     // `app.schema_refresh_requests`; the loop below mirrors that counter
     // into this watch channel, and the poller recollects on the next tick.
     let (schema_refresh_tx, schema_refresh_rx) = watch::channel(0u64);
-    let (snapshots, label) = spawn_poller(
-        conn,
-        interval_rx,
-        conn_args.schema_interval(),
-        schema_refresh_rx,
-    );
-    app.host = label;
-    // Seed the app with the poller's initial snapshot before the first frame
-    // (in real mode this avoids one frame of placeholder mock data).
-    update(&mut app, Action::Snapshot(snapshots.borrow().clone()));
-    let _bridge_task = event::spawn_snapshot_bridge(snapshots, tx);
+    // Picker mode enters the loop with NO poller: the channels above exist
+    // as usual, but their receivers are parked here until the user picks an
+    // entry — the loop then spawns the poller (and its snapshot bridge)
+    // lazily, reusing the exact same wiring as the classic path below.
+    let mut parked_rx: Option<(watch::Receiver<Duration>, watch::Receiver<u64>)> = None;
+    match startup {
+        Startup::Connect(conn) => {
+            let (snapshots, label) = spawn_poller(
+                *conn,
+                interval_rx,
+                conn_args.schema_interval(),
+                schema_refresh_rx,
+            );
+            app.host = label;
+            // Seed the app with the poller's initial snapshot before the
+            // first frame (in real mode this avoids one frame of
+            // placeholder mock data).
+            update(&mut app, Action::Snapshot(snapshots.borrow().clone()));
+            // Dropping the JoinHandle detaches the task; it keeps running.
+            let _bridge_task = event::spawn_snapshot_bridge(snapshots, tx.clone());
+        }
+        Startup::Picker(entries) => {
+            app.picker = Some(PickerState::new(entries));
+            parked_rx = Some((interval_rx, schema_refresh_rx));
+        }
+    }
 
     let mut tick = tokio::time::interval(Duration::from_millis(250));
 
@@ -350,7 +453,216 @@ async fn run(
                 true
             }
         });
+
+        // Lazy poller spawn (picker mode): the first pass after Enter sees
+        // `app.picked` plus the parked receivers and starts the exact same
+        // pipeline `Startup::Connect` uses — the resolved label and the
+        // initial Connecting snapshot go through update() (the sole
+        // mutation point), so the very next draw is the connection splash
+        // ("connecting to user@host…"), then the dashboard on first data.
+        // Connection failures are NOT errors here: they surface as
+        // `PollerStatus::Error` on the splash, retrying with backoff.
+        if let Some(entry) = app.picked.clone()
+            && let Some((interval_rx, schema_refresh_rx)) = parked_rx.take()
+        {
+            // Re-resolve with the chosen service (or none, for the default
+            // entry). The file was readable moments ago at trigger time; if
+            // it changed underneath us, exit the TUI with the plain error —
+            // the same text the pre-TUI path would have printed. Non-fatal
+            // warnings were already printed before the TUI took over.
+            let mut spec = conn_args.spec();
+            spec.dsn = None;
+            spec.service = entry.service.clone();
+            let resolved = settings::resolve(&spec)?;
+            let (snapshots, label) = spawn_poller(
+                Some(resolved),
+                interval_rx,
+                conn_args.schema_interval(),
+                schema_refresh_rx,
+            );
+            update(&mut app, Action::HostLabel(label));
+            update(&mut app, Action::Snapshot(snapshots.borrow().clone()));
+            // Detaches on drop; the bridge lives as long as its channels.
+            let _bridge_task = event::spawn_snapshot_bridge(snapshots, tx.clone());
+        }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// A 0600 services file on disk, kept alive for the test's duration.
+    fn services_file(contents: &str) -> tempfile::TempPath {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        f.write_all(contents.as_bytes()).expect("write");
+        f.flush().expect("flush");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600))
+                .expect("chmod");
+        }
+        f.into_temp_path()
+    }
+
+    const TWO_SERVICES: &str = r#"
+        [services.prod]
+        host = "db.prod.internal"
+        user = "svc_ro"
+        password_cmd = "echo hidden-secret"
+
+        [services.dead]
+        host = "dead.invalid"
+    "#;
+
+    fn spec_with_file(file: &tempfile::TempPath, env_pairs: &[(&str, &str)]) -> ConnSpec {
+        ConnSpec {
+            dsn: None,
+            service: None,
+            services_file: Some(file.to_path_buf()),
+            env: env(env_pairs),
+        }
+    }
+
+    // --- picker trigger rule -------------------------------------------------
+
+    #[test]
+    fn picker_triggers_with_no_hints_and_a_valid_services_file() {
+        let file = services_file(TWO_SERVICES);
+        let (services, _) =
+            picker_services(&spec_with_file(&file, &[])).expect("picker must trigger");
+        let names: Vec<_> = services.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["dead", "prod"], "BTreeMap order");
+    }
+
+    #[test]
+    fn picker_suppressed_by_dsn_or_service_flags() {
+        let file = services_file(TWO_SERVICES);
+        let mut spec = spec_with_file(&file, &[]);
+        spec.dsn = Some("host=x".to_string());
+        assert!(picker_services(&spec).is_none(), "--dsn suppresses");
+
+        let mut spec = spec_with_file(&file, &[]);
+        spec.service = Some("prod".to_string());
+        assert!(picker_services(&spec).is_none(), "--service suppresses");
+    }
+
+    #[test]
+    fn picker_suppressed_by_each_connection_env_var() {
+        let file = services_file(TWO_SERVICES);
+        for var in PICKER_SUPPRESSING_ENV {
+            let spec = spec_with_file(&file, &[(var, "something")]);
+            assert!(
+                picker_services(&spec).is_none(),
+                "{var} set must suppress the picker"
+            );
+        }
+        // Unrelated env vars (even PGUSER/PGPORT) do NOT suppress it.
+        let spec = spec_with_file(&file, &[("PGUSER", "monitor"), ("PGPORT", "5433")]);
+        assert!(picker_services(&spec).is_some());
+    }
+
+    #[test]
+    fn empty_string_values_count_as_unset_everywhere() {
+        let file = services_file(TWO_SERVICES);
+        // Empty env values: consistent with settings.rs, still a picker.
+        let spec = spec_with_file(
+            &file,
+            &[
+                ("PGHOST", ""),
+                ("PGSERVICE", ""),
+                ("PG_LENS_SERVICE", ""),
+                ("PG_LENS_DSN", ""),
+            ],
+        );
+        assert!(picker_services(&spec).is_some(), "empty env = unset");
+
+        // Empty flag values too (clap env-fill can produce Some("")).
+        let mut spec = spec_with_file(&file, &[]);
+        spec.dsn = Some(String::new());
+        spec.service = Some(String::new());
+        assert!(picker_services(&spec).is_some(), "empty flags = unset");
+    }
+
+    #[test]
+    fn picker_suppressed_when_no_services_file_exists() {
+        // Default XDG location pointing into nowhere: no file, no picker.
+        let spec = ConnSpec {
+            env: env(&[("HOME", "/nonexistent-home-for-test")]),
+            ..ConnSpec::default()
+        };
+        assert!(picker_services(&spec).is_none());
+
+        // No derivable location at all (HOME/XDG unset): same.
+        assert!(picker_services(&ConnSpec::default()).is_none());
+
+        // Explicit override pointing at a missing file: same (the error
+        // then surfaces through the normal resolve path, unchanged).
+        let spec = ConnSpec {
+            services_file: Some(PathBuf::from("/nonexistent/services.toml")),
+            ..ConnSpec::default()
+        };
+        assert!(picker_services(&spec).is_none());
+    }
+
+    #[test]
+    fn picker_suppressed_by_parse_error_or_zero_services() {
+        let broken = services_file("this is [not really { toml");
+        assert!(picker_services(&spec_with_file(&broken, &[])).is_none());
+
+        let empty = services_file("");
+        assert!(picker_services(&spec_with_file(&empty, &[])).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn picker_suppressed_by_insecure_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = services_file(TWO_SERVICES);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666))
+            .expect("chmod 666");
+        assert!(
+            picker_services(&spec_with_file(&file, &[])).is_none(),
+            "group/other-writable file must fail the permission check"
+        );
+    }
+
+    // --- picker entries ------------------------------------------------------
+
+    #[test]
+    fn entries_show_what_the_file_says_plus_default_last_and_no_secrets() {
+        let file = services_file(TWO_SERVICES);
+        let (services, _) =
+            picker_services(&spec_with_file(&file, &[])).expect("picker must trigger");
+        let entries = picker_entries(services);
+
+        assert_eq!(entries.len(), 3, "two services + the default");
+        // Verbatim file fields; `?` where the entry is silent (no env or
+        // localhost/postgres fallbacks applied here).
+        assert_eq!(entries[0].name, "dead");
+        assert_eq!(entries[0].detail, "?@dead.invalid");
+        assert_eq!(entries[0].service.as_deref(), Some("dead"));
+        assert_eq!(entries[1].name, "prod");
+        assert_eq!(entries[1].detail, "svc_ro@db.prod.internal");
+        // The default entry is LAST and maps to no-service resolution.
+        assert_eq!(entries[2].name, "localhost");
+        assert_eq!(entries[2].detail, "(default)");
+        assert_eq!(entries[2].service, None);
+
+        // Secrets canary: nothing password-shaped reaches the picker rows.
+        let rendered = format!("{entries:?}");
+        assert!(!rendered.contains("hidden-secret"), "got: {rendered}");
+        assert!(!rendered.contains("password"), "got: {rendered}");
+    }
 }

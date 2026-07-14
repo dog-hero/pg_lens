@@ -25,3 +25,6 @@ pg_lens_core = { version = "0.3.0", path = "../pg_lens_core" }
 pg_lens_web = { version = "0.3.0", path = "../pg_lens_web", optional = true }
 ratatui = "0.30.2"
 tokio = { version = "1.52.3", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

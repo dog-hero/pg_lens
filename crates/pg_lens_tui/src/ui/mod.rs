@@ -3,6 +3,7 @@
 pub mod format;
 mod macro_lens;
 mod micro_lens;
+mod picker;
 mod schema_lens;
 mod splash;
 mod sql;
@@ -27,6 +28,12 @@ use crate::app::{App, Tab};
 /// chrome with zeroed vitals looks broken. After the first Ok snapshot the
 /// dashboard takes over permanently (disconnects show the banner, as ever).
 pub fn draw(app: &mut App, frame: &mut Frame) {
+    // Startup service picker: a pre-poller mode of its own — neither the
+    // splash nor the dashboard makes sense before a connection is chosen.
+    if app.picker.is_some() {
+        picker::draw(app, frame);
+        return;
+    }
     if app.show_splash() {
         splash::draw(app, frame);
         return;

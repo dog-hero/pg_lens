@@ -297,6 +297,19 @@ short-lived tokens (Vault leases, SSO helpers) keep working across
 reconnects. If the command fails, the TUI stays alive and shows the error
 (stderr, never stdout) in the banner, retrying with backoff.
 
+#### Interactive service picker
+
+When the TUI starts with no connection hints at all — no `--dsn`, no
+`--service`, and none of `PGHOST`/`PGSERVICE`/`PG_LENS_SERVICE`/`PG_LENS_DSN`
+set (empty values count as unset) — and a valid services file with at least
+one entry exists, pg_lens opens a picker instead of connecting blindly:
+every service is listed as `name — user@host` (exactly what the file says,
+never a secret), plus a final `localhost — (default)` entry for the plain
+default resolution. `j`/`k`/`↑`/`↓` move, `Enter` connects, `q`/`Esc` quit.
+If any part of that chain doesn't hold (a flag or env var is set, no file,
+parse/permission error, zero services — or `--mock`/`serve`), behavior is
+exactly as before: connect directly.
+
 > **Security note:** this file can execute commands — treat it like code and
 > keep it at `0600`. `pg_lens` refuses a services file that is writable by
 > group/others, and refuses one that combines a plaintext `password` with
