@@ -18,6 +18,15 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # dist/ is not committed; pg_lens_web's build.rs requires it
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/pg_lens_web/frontend/package-lock.json
+      - name: Build frontend bundle
+        run: npm ci && npm run build
+        working-directory: crates/pg_lens_web/frontend
       - name: Tests
         run: cargo test --workspace
       - name: Clippy (deny warnings)

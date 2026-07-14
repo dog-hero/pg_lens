@@ -3,10 +3,11 @@
 /target-musl-*
 
 # --- Node (web frontend) ---
-# frontend/dist IS committed intentionally (small hashed bundles) so plain
-# `cargo build` / `cargo install` works without a Node toolchain — do NOT
-# ignore it. node_modules is never committed.
+# Build artifacts stay out of the repo: run `npm ci && npm run build` in
+# crates/pg_lens_web/frontend before building with the `web` feature
+# (build.rs fails with instructions if dist/ is missing).
 node_modules/
+crates/pg_lens_web/frontend/dist/
 
 # --- Python tooling (e2e harnesses) ---
 __pycache__/

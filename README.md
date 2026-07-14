@@ -248,13 +248,16 @@ Open the printed address in a browser — the dashboard updates in real time
 on every poll.
 
 The frontend (Vite + TypeScript, `crates/pg_lens_web/frontend/`) is
-embedded in the binary; the built `frontend/dist/` is committed so
-`cargo build`/`cargo install` never needs Node. After changing frontend
-sources, rebuild the bundle and then the binary:
+embedded in the binary at compile time. Building with the `web` feature
+(the default) therefore requires Node once, to produce the bundle:
 
 ```sh
 cd crates/pg_lens_web/frontend && npm ci && npm run build
 ```
+
+Skip the requirement entirely with a TUI-only build:
+`cargo build -p pg_lens_tui --no-default-features`. Release binaries from
+CI always ship with the web dashboard included.
 
 ### Authentication
 

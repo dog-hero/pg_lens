@@ -26,6 +26,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # dist/ is not committed; pg_lens_web's build.rs requires it
+      - name: Build frontend bundle
+        run: npm ci && npm run build
+        working-directory: crates/pg_lens_web/frontend
       # pip package bundles the zig compiler (per cargo-zigbuild README)
       - name: Install cargo-zigbuild
         run: pip install cargo-zigbuild
@@ -61,6 +68,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # dist/ is not committed; pg_lens_web's build.rs requires it
+      - name: Build frontend bundle
+        run: npm ci && npm run build
+        working-directory: crates/pg_lens_web/frontend
       - name: Build
         run: cargo build --release -p pg_lens_tui --target ${{ matrix.target }}
       - name: Package
