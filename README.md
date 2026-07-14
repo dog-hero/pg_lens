@@ -37,6 +37,29 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 
 ## Installation
 
+### Prebuilt binaries (releases)
+
+Download the archive for your platform from the
+[releases page](https://github.com/dog-hero/pg_lens/releases). On macOS,
+prefer `curl` — browser downloads get the quarantine attribute and
+Gatekeeper will refuse to run the unsigned binary:
+
+```sh
+# macOS (Apple Silicon)
+curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.1.0/pg_lens-v0.1.0-aarch64-apple-darwin.tar.gz | tar xz
+./pg_lens-v0.1.0-aarch64-apple-darwin/pg_lens_tui --mock
+```
+
+If you already downloaded it with a browser and macOS says the app
+"cannot be verified", clear the quarantine flag once:
+
+```sh
+xattr -d com.apple.quarantine ./pg_lens_tui
+```
+
+(The binaries are not yet signed/notarized with an Apple Developer ID —
+building from source or installing via curl avoids the prompt entirely.)
+
 ### From source
 
 Requires Rust (edition 2024, tested with cargo 1.93):
