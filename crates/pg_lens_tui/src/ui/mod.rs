@@ -3,21 +3,28 @@
 mod macro_lens;
 mod micro_lens;
 
+use pg_lens_core::PollerStatus;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Style, Stylize},
+    style::{Color, Style, Stylize},
     text::Line,
     widgets::{Paragraph, Tabs},
 };
 
 use crate::app::{App, Tab};
 
-/// Root layout: header / tabs / body / statusbar.
+/// Root layout: header / tabs / [status banner] / body / statusbar. The
+/// banner row collapses to zero height while the poller is healthy.
 pub fn draw(app: &mut App, frame: &mut Frame) {
-    let [header_area, tabs_area, body_area, statusbar_area] = Layout::vertical([
+    let banner_height = match app.snapshot.status {
+        PollerStatus::Ok => 0,
+        PollerStatus::Connecting | PollerStatus::Error(_) => 1,
+    };
+    let [header_area, tabs_area, banner_area, body_area, statusbar_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(banner_height),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
@@ -25,11 +32,28 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
 
     draw_header(app, frame, header_area);
     draw_tabs(app, frame, tabs_area);
+    if banner_height > 0 {
+        draw_status_banner(app, frame, banner_area);
+    }
     match app.active_tab {
         Tab::MacroLens => macro_lens::draw(app, frame, body_area),
         Tab::MicroLens => micro_lens::draw(app, frame, body_area),
     }
     draw_statusbar(app, frame, statusbar_area);
+}
+
+/// Poller health banner: loud on error (last good data stays on screen
+/// underneath it), quiet while the first connection is still in flight.
+fn draw_status_banner(app: &App, frame: &mut Frame, area: Rect) {
+    let line = match &app.snapshot.status {
+        PollerStatus::Ok => return,
+        PollerStatus::Connecting => Line::from(" connecting to PostgreSQL\u{2026}").dim(),
+        PollerStatus::Error(msg) => {
+            Line::from(format!(" DB error: {msg} \u{2014} showing last known data"))
+                .style(Style::new().fg(Color::White).bg(Color::Red).bold())
+        }
+    };
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
@@ -129,6 +153,30 @@ mod tests {
         assert!(screen.contains("Wait"));
         assert!(screen.contains("Duration"));
         assert!(screen.contains("pgbench"));
+    }
+
+    #[test]
+    fn error_status_renders_banner_and_keeps_data() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        let mut snap = app.snapshot.as_ref().clone();
+        snap.status = PollerStatus::Error("connection refused".to_string());
+        app.snapshot = Arc::new(snap);
+
+        let screen = render(&mut app);
+        assert!(screen.contains("DB error: connection refused"));
+        assert!(screen.contains("showing last known data"));
+        // Last data still rendered underneath the banner.
+        assert!(screen.contains("Connections"));
+    }
+
+    #[test]
+    fn ok_status_renders_no_banner() {
+        let mut app = App::new();
+        let screen = render(&mut app);
+        assert!(!screen.contains("DB error"));
+        assert!(!screen.contains("connecting to PostgreSQL"));
     }
 
     #[test]

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""PTY end-to-end proof for pg_lens Phase 2.
+"""PTY end-to-end proof for pg_lens (mock mode).
 
-Runs the TUI binary in a real PTY, reconstructs the rendered screen from the
-escape stream (cursor positioning + text; styles ignored), snapshots it at
-timed moments, sends keys, and checks the exit code.
+Runs the TUI binary (with --mock, so no database is needed) in a real PTY,
+reconstructs the rendered screen from the escape stream (cursor positioning +
+text; styles ignored), snapshots it at timed moments, sends keys, and checks
+the exit code. The Screen class is reused by e2e_pty_live.py for the
+real-database run.
 """
 import os, pty, re, select, signal, subprocess, sys, time
 
@@ -79,8 +81,8 @@ def main():
     import fcntl, struct, termios
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     env = dict(os.environ, TERM="xterm-256color")
-    proc = subprocess.Popen([BIN], stdin=slave, stdout=slave, stderr=slave,
-                            env=env, close_fds=True)
+    proc = subprocess.Popen([BIN, "--mock"], stdin=slave, stdout=slave,
+                            stderr=slave, env=env, close_fds=True)
     os.close(slave)
     screen = Screen()
 

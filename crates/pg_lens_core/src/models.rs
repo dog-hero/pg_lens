@@ -44,6 +44,26 @@ pub struct ActivityRow {
     pub query_id: Option<i64>,
 }
 
+/// One blocked session from the blocking query (`pg_blocking_pids` based):
+/// which pid is blocked, by whom, and on what.
+#[derive(Clone, Debug, Serialize)]
+pub struct LockRow {
+    /// The *blocked* backend.
+    pub pid: i32,
+    /// `pg_blocking_pids(pid)` — the backends holding it up.
+    pub blocked_by: Vec<i32>,
+    /// Lock mode being awaited (e.g. `ShareLock`), if a pg_locks row matched.
+    pub mode: Option<String>,
+    /// `pg_locks.locktype` (e.g. `transactionid`, `relation`).
+    pub locktype: Option<String>,
+    /// Relation name, when the awaited lock targets one.
+    pub relation: Option<String>,
+    /// How long the blocked query has been running.
+    pub duration_secs: f64,
+    /// The blocked query text.
+    pub query: String,
+}
+
 /// Server-wide vitals feeding the Macro Lens dashboard.
 #[derive(Clone, Debug, Serialize)]
 pub struct ServerVitals {
@@ -55,11 +75,20 @@ pub struct ServerVitals {
     pub idle: u32,
     pub idle_in_transaction: u32,
     pub waiting: u32,
+    /// Δ(xact_commit + xact_rollback) / Δt, computed by the poller.
     pub tps: f64,
-    /// blks_hit / (blks_hit + blks_read), in `0.0..=1.0`.
+    /// blks_hit / (blks_hit + blks_read), in `0.0..=1.0` (delta-based after
+    /// the first poll of a session).
     pub cache_hit_ratio: f64,
     /// Recent TPS samples (oldest first) for the sparkline.
     pub tps_history: Vec<u64>,
+    /// Cumulative counters from `pg_stat_database` (sum over all databases);
+    /// Fase 4 turns some of these into deltas/rates for display.
+    pub tup_returned: i64,
+    pub tup_fetched: i64,
+    pub temp_files: i64,
+    pub temp_bytes: i64,
+    pub deadlocks: i64,
 }
 
 /// Health of the poller loop, carried inside every snapshot so that all
@@ -67,15 +96,19 @@ pub struct ServerVitals {
 #[derive(Clone, Debug, Serialize)]
 pub enum PollerStatus {
     Ok,
+    /// First connection attempt still in flight — no data yet.
+    Connecting,
     Error(String),
 }
 
-/// One complete observation of the monitored server. Published by the poller
-/// (Fase 3); until then, produced by [`DbSnapshot::mock`].
+/// One complete observation of the monitored server. Published by the real
+/// poller (Fase 3) or, in `--mock` mode, by [`DbSnapshot::mock`].
 #[derive(Clone, Debug, Serialize)]
 pub struct DbSnapshot {
     pub vitals: ServerVitals,
     pub activity: Vec<ActivityRow>,
+    /// Blocked sessions (who waits on whom). Empty when nothing is blocked.
+    pub locks: Vec<LockRow>,
     pub status: PollerStatus,
 }
 
@@ -109,6 +142,11 @@ impl DbSnapshot {
             tps,
             cache_hit_ratio: 0.95 + jitter(seq, 6, 50) as f64 / 1_000.0,
             tps_history,
+            tup_returned: 9_000_000 + (seq as i64) * 1_500,
+            tup_fetched: 7_400_000 + (seq as i64) * 1_200,
+            temp_files: 3,
+            temp_bytes: 48 * 1024 * 1024,
+            deadlocks: 0,
         };
 
         // Long-running sessions keep aging between snapshots.
@@ -210,10 +248,52 @@ impl DbSnapshot {
             },
         ];
 
+        // Matches the story above: pid 4977 waits on a transactionid lock
+        // held by the idle-in-transaction psql session (pid 4312).
+        let locks = vec![LockRow {
+            pid: 4977,
+            blocked_by: vec![4312],
+            mode: Some("ShareLock".to_string()),
+            locktype: Some("transactionid".to_string()),
+            relation: None,
+            duration_secs: 12.7 + age,
+            query: "UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2"
+                .to_string(),
+        }];
+
         Self {
             vitals,
             activity,
+            locks,
             status: PollerStatus::Ok,
+        }
+    }
+
+    /// The pre-filled value of the real poller's watch channel: no data yet,
+    /// first connection attempt still in flight.
+    pub fn connecting() -> Self {
+        Self {
+            vitals: ServerVitals {
+                server_version: "?".to_string(),
+                uptime_secs: 0,
+                connections_total: 0,
+                max_connections: 0,
+                active: 0,
+                idle: 0,
+                idle_in_transaction: 0,
+                waiting: 0,
+                tps: 0.0,
+                cache_hit_ratio: 0.0,
+                tps_history: Vec::new(),
+                tup_returned: 0,
+                tup_fetched: 0,
+                temp_files: 0,
+                temp_bytes: 0,
+                deadlocks: 0,
+            },
+            activity: Vec::new(),
+            locks: Vec::new(),
+            status: PollerStatus::Connecting,
         }
     }
 }
@@ -244,5 +324,14 @@ mod tests {
         let json = serde_json::to_string(&snapshot).expect("snapshot must serialize");
         assert!(json.contains("\"pid\":4821"));
         assert!(json.contains("\"max_connections\":100"));
+        assert!(json.contains("\"blocked_by\":[4312]"));
+    }
+
+    #[test]
+    fn connecting_snapshot_serializes_to_json() {
+        let snapshot = DbSnapshot::connecting();
+        let json = serde_json::to_string(&snapshot).expect("snapshot must serialize");
+        assert!(json.contains("\"status\":\"Connecting\""));
+        assert!(matches!(snapshot.status, PollerStatus::Connecting));
     }
 }
