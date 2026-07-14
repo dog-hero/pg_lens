@@ -471,7 +471,9 @@ frontend de disco em produção (embutir); nunca logar o DSN.
 
 ## Planos complementares
 - **Conexão avançada** (env vars libpq, services file com `password_cmd`):
-  plano detalhado em [PLAN_CONNECTIONS.md](PLAN_CONNECTIONS.md).
+  plano detalhado em [PLAN_CONNECTIONS.md](PLAN_CONNECTIONS.md). ✅ C1+C2
+- **Distribuição** (Homebrew tap, Docker/GHCR, deb/rpm, crates.io +
+  binstall): plano detalhado em [PLAN_DISTRIBUTION.md](PLAN_DISTRIBUTION.md).
 
 ## Fora de escopo (backlog Fase 7+)
 - Ações administrativas (`pg_cancel_backend`/`pg_terminate_backend` — SQL já
