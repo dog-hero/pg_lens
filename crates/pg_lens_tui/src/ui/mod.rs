@@ -29,7 +29,7 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         Tab::MacroLens => macro_lens::draw(app, frame, body_area),
         Tab::MicroLens => micro_lens::draw(app, frame, body_area),
     }
-    draw_statusbar(frame, statusbar_area);
+    draw_statusbar(app, frame, statusbar_area);
 }
 
 fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
@@ -54,8 +54,24 @@ fn draw_tabs(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(tabs, area);
 }
 
-fn draw_statusbar(frame: &mut Frame, area: Rect) {
-    let keys = Line::from(" q/Esc: quit \u{2502} Tab: switch lens").dim();
+fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
+    // Staleness: seconds since the last Action::Snapshot reached update().
+    // Rendered every tick, so it counts up between snapshots.
+    let staleness = match app.last_snapshot_at {
+        Some(at) => format!("{}s ago", at.elapsed().as_secs()),
+        None => "waiting".to_string(),
+    };
+    let row = match (app.table_state.selected(), app.snapshot.activity.len()) {
+        (Some(i), len) if len > 0 => format!("{}/{len}", i + 1),
+        _ => "-".to_string(),
+    };
+    let keys = Line::from(format!(
+        " q/Esc: quit \u{2502} Tab: switch lens \u{2502} j/k: row {row} \u{2502} s: \
+         sort={} \u{2502} +/-: refresh={:.1}s \u{2502} data: {staleness}",
+        app.sort_mode.label(),
+        app.refresh_interval.as_secs_f64(),
+    ))
+    .dim();
     frame.render_widget(Paragraph::new(keys), area);
 }
 

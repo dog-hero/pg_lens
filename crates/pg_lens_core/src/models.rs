@@ -3,7 +3,25 @@
 //! Every struct here derives `serde::Serialize` from day one: the future web
 //! frontend (Fase 6) streams these exact types as JSON.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde::Serialize;
+
+/// Monotonic counter so that every [`DbSnapshot::mock`] call produces visibly
+/// different (but deterministic) data — the mock poller (Fase 2) relies on
+/// this to prove that fresh snapshots actually reach the screen.
+static MOCK_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Deterministic pseudo-random value in `0..range` (SplitMix64-style
+/// scramble). No `rand` dependency needed for fake data.
+fn jitter(seq: u64, salt: u64, range: u64) -> u64 {
+    let mut z = seq
+        .wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 31)) % range
+}
 
 /// One row of `pg_stat_activity`, mirroring the columns produced by the
 /// pg_activity reference query (`get_pg_activity_post_140000.sql`).
@@ -62,25 +80,39 @@ pub struct DbSnapshot {
 }
 
 impl DbSnapshot {
-    /// Plausible, varied fake data for developing the frontends before the
-    /// real data layer exists (Fases 1–2).
+    /// Plausible fake data for developing the frontends before the real data
+    /// layer exists (Fases 1–2). Every call is deterministically *different*
+    /// from the previous one (jittered TPS/counters, scrolling TPS history,
+    /// growing durations) so a screen fed by the mock poller visibly changes.
     pub fn mock() -> Self {
+        let seq = MOCK_CALLS.fetch_add(1, Ordering::Relaxed);
+
+        // Sliding window keyed on `seq`: each call shifts the sparkline one
+        // sample to the left and appends a fresh one.
+        let tps_history: Vec<u64> = (0..20).map(|i| 900 + jitter(seq + i, 1, 700)).collect();
+        let tps = *tps_history.last().expect("history is non-empty") as f64;
+
+        let active = 4 + jitter(seq, 3, 8) as u32;
+        let idle_in_transaction = 1 + jitter(seq, 4, 4) as u32;
+        let connections_total = 30 + jitter(seq, 2, 25) as u32;
+        let idle = connections_total.saturating_sub(active + idle_in_transaction);
+
         let vitals = ServerVitals {
             server_version: "16.3 (mock)".to_string(),
-            uptime_secs: 3 * 86_400 + 4 * 3_600 + 27 * 60,
-            connections_total: 42,
+            uptime_secs: 3 * 86_400 + 4 * 3_600 + 27 * 60 + seq * 2,
+            connections_total,
             max_connections: 100,
-            active: 7,
-            idle: 31,
-            idle_in_transaction: 3,
-            waiting: 2,
-            tps: 1_284.6,
-            cache_hit_ratio: 0.987,
-            tps_history: vec![
-                820, 910, 1004, 1230, 1180, 1290, 1350, 1220, 990, 1080, 1310, 1402, 1285, 1190,
-                1250, 1330, 1410, 1275, 1150, 1284,
-            ],
+            active,
+            idle,
+            idle_in_transaction,
+            waiting: jitter(seq, 5, 4) as u32,
+            tps,
+            cache_hit_ratio: 0.95 + jitter(seq, 6, 50) as f64 / 1_000.0,
+            tps_history,
         };
+
+        // Long-running sessions keep aging between snapshots.
+        let age = seq as f64 * 2.0;
 
         let activity = vec![
             ActivityRow {
@@ -88,7 +120,8 @@ impl DbSnapshot {
                 application_name: "checkout-api".to_string(),
                 database: "shop".to_string(),
                 client: "10.0.4.12".to_string(),
-                duration_secs: 0.043,
+                // Short-lived OLTP query: fresh duration every snapshot.
+                duration_secs: 0.02 + jitter(seq, 7, 80) as f64 / 1_000.0,
                 wait_event: None,
                 username: "app_rw".to_string(),
                 state: "active".to_string(),
@@ -104,7 +137,7 @@ impl DbSnapshot {
                 application_name: "pgbench".to_string(),
                 database: "bench".to_string(),
                 client: "10.0.4.99".to_string(),
-                duration_secs: 12.7,
+                duration_secs: 12.7 + age,
                 wait_event: Some("Lock:transactionid".to_string()),
                 username: "bench".to_string(),
                 state: "active".to_string(),
@@ -119,7 +152,7 @@ impl DbSnapshot {
                 application_name: "reporting".to_string(),
                 database: "warehouse".to_string(),
                 client: "10.0.7.3".to_string(),
-                duration_secs: 384.2,
+                duration_secs: 384.2 + age,
                 wait_event: Some("IO:DataFileRead".to_string()),
                 username: "analytics_ro".to_string(),
                 state: "active".to_string(),
@@ -135,7 +168,7 @@ impl DbSnapshot {
                 application_name: "reporting".to_string(),
                 database: "warehouse".to_string(),
                 client: "10.0.7.3".to_string(),
-                duration_secs: 384.2,
+                duration_secs: 384.2 + age,
                 wait_event: Some("IPC:MessageQueueSend".to_string()),
                 username: "analytics_ro".to_string(),
                 state: "active".to_string(),
@@ -151,7 +184,7 @@ impl DbSnapshot {
                 application_name: "psql".to_string(),
                 database: "shop".to_string(),
                 client: "local".to_string(),
-                duration_secs: 1_922.0,
+                duration_secs: 1_922.0 + age,
                 wait_event: Some("Client:ClientRead".to_string()),
                 username: "leonardo".to_string(),
                 state: "idle in transaction".to_string(),
@@ -166,7 +199,7 @@ impl DbSnapshot {
                 application_name: "vacuumdb".to_string(),
                 database: "shop".to_string(),
                 client: "local".to_string(),
-                duration_secs: 88.4,
+                duration_secs: 88.4 + age,
                 wait_event: None,
                 username: "postgres".to_string(),
                 state: "active".to_string(),
@@ -196,6 +229,13 @@ mod tests {
         assert!(snapshot.vitals.connections_total <= snapshot.vitals.max_connections);
         assert!((0.0..=1.0).contains(&snapshot.vitals.cache_hit_ratio));
         assert!(matches!(snapshot.status, PollerStatus::Ok));
+    }
+
+    #[test]
+    fn mock_varies_between_calls() {
+        let a = serde_json::to_string(&DbSnapshot::mock()).expect("serialize");
+        let b = serde_json::to_string(&DbSnapshot::mock()).expect("serialize");
+        assert_ne!(a, b, "consecutive mock snapshots must differ");
     }
 
     #[test]

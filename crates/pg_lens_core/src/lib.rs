@@ -5,5 +5,6 @@
 //! no knowledge of any frontend's internal message types.
 
 pub mod models;
+pub mod poller;
 
 pub use models::{ActivityRow, DbSnapshot, PollerStatus, ServerVitals};

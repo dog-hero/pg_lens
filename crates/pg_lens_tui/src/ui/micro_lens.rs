@@ -15,18 +15,23 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     ])
     .style(Style::new().bold());
 
-    let rows = app.snapshot.activity.iter().map(|row| {
-        Row::new([
-            row.pid.to_string(),
-            row.database.clone(),
-            row.username.clone(),
-            row.client.clone(),
-            row.state.clone(),
-            row.wait_event.clone().unwrap_or_default(),
-            format_duration(row.duration_secs),
-            row.query.clone(),
-        ])
-    });
+    // Render in the sort order computed by update() (`s` cycles the mode).
+    let rows = app
+        .row_order
+        .iter()
+        .filter_map(|&i| app.snapshot.activity.get(i))
+        .map(|row| {
+            Row::new([
+                row.pid.to_string(),
+                row.database.clone(),
+                row.username.clone(),
+                row.client.clone(),
+                row.state.clone(),
+                row.wait_event.clone().unwrap_or_default(),
+                format_duration(row.duration_secs),
+                row.query.clone(),
+            ])
+        });
 
     let widths = [
         Constraint::Length(6),

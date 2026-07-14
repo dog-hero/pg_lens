@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""PTY end-to-end proof for pg_lens Phase 2.
+
+Runs the TUI binary in a real PTY, reconstructs the rendered screen from the
+escape stream (cursor positioning + text; styles ignored), snapshots it at
+timed moments, sends keys, and checks the exit code.
+"""
+import os, pty, re, select, signal, subprocess, sys, time
+
+BIN = "/Users/leonardo.benedet/BenedetLabs/pg_lens/target/debug/pg_lens_tui"
+COLS, ROWS = 120, 36
+
+
+class Screen:
+    def __init__(self):
+        self.grid = [[" "] * COLS for _ in range(ROWS)]
+        self.r = self.c = 0
+        self.buf = b""
+
+    def feed(self, data: bytes):
+        self.buf += data
+        text = self.buf.decode("utf-8", errors="ignore")
+        self.buf = b""
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            if ch == "\x1b":
+                m = re.match(r"\x1b\[([0-9;?]*)([A-Za-z])", text[i:])
+                if m:
+                    self._csi(m.group(1), m.group(2))
+                    i += m.end()
+                    continue
+                m = re.match(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\)", text[i:])
+                if m:  # OSC (title etc.)
+                    i += m.end()
+                    continue
+                i += 2  # unknown 2-byte escape
+                continue
+            if ch == "\r":
+                self.c = 0
+            elif ch == "\n":
+                self.r = min(self.r + 1, ROWS - 1)
+            elif ch == "\b":
+                self.c = max(self.c - 1, 0)
+            elif ch >= " ":
+                if self.r < ROWS and self.c < COLS:
+                    self.grid[self.r][self.c] = ch
+                self.c = min(self.c + 1, COLS)
+            i += 1
+
+    def _csi(self, params: str, final: str):
+        if params.startswith("?"):
+            return  # private modes (altscreen, cursor visibility)
+        nums = [int(x) for x in params.split(";") if x.isdigit()]
+        if final in "Hf":
+            self.r = (nums[0] if nums else 1) - 1
+            self.c = (nums[1] if len(nums) > 1 else 1) - 1
+        elif final == "A":
+            self.r = max(self.r - (nums[0] if nums else 1), 0)
+        elif final == "B":
+            self.r = min(self.r + (nums[0] if nums else 1), ROWS - 1)
+        elif final == "C":
+            self.c = min(self.c + (nums[0] if nums else 1), COLS - 1)
+        elif final == "D":
+            self.c = max(self.c - (nums[0] if nums else 1), 0)
+        elif final == "J":
+            if nums and nums[0] in (2, 3):
+                self.grid = [[" "] * COLS for _ in range(ROWS)]
+        elif final == "K":
+            self.grid[self.r][self.c:] = [" "] * (COLS - self.c)
+        # 'm' (SGR) and everything else: ignored
+
+    def snapshot(self) -> str:
+        return "\n".join("".join(row).rstrip() for row in self.grid).rstrip()
+
+
+def main():
+    master, slave = pty.openpty()
+    import fcntl, struct, termios
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+    env = dict(os.environ, TERM="xterm-256color")
+    proc = subprocess.Popen([BIN], stdin=slave, stdout=slave, stderr=slave,
+                            env=env, close_fds=True)
+    os.close(slave)
+    screen = Screen()
+
+    def pump(seconds: float):
+        end = time.time() + seconds
+        while time.time() < end:
+            ready, _, _ = select.select([master], [], [], 0.05)
+            if ready:
+                try:
+                    screen.feed(os.read(master, 65536))
+                except OSError:
+                    return
+
+    def send(key: str):
+        os.write(master, key.encode())
+
+    snaps = {}
+    pump(2.6);            snaps["t1_nokeys"] = screen.snapshot()
+    pump(2.4);            snaps["t2_nokeys"] = screen.snapshot()
+    send("\t"); pump(0.9); snaps["t3_after_tab"] = screen.snapshot()
+    send("j");  pump(0.6); snaps["t4_after_j"] = screen.snapshot()
+    send("s");  pump(0.6); snaps["t5_after_s"] = screen.snapshot()
+    send("q");  pump(1.0)
+
+    try:
+        code = proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        code = "KILLED (did not exit on q)"
+
+    for name, snap in snaps.items():
+        with open(f"/tmp/pg_lens_{name}.txt", "w") as f:
+            f.write(snap + "\n")
+
+    ok = True
+    def check(label, cond):
+        nonlocal ok
+        print(f"{'PASS' if cond else 'FAIL'}: {label}")
+        ok = ok and cond
+
+    check("screen changed between t1 and t2 with NO keypress (poller pipeline live)",
+          snaps["t1_nokeys"] != snaps["t2_nokeys"])
+    check("t1 shows Macro Lens (Connections gauge)", "Connections" in snaps["t1_nokeys"])
+    check("Tab during refresh switched to Micro Lens (Activity table)",
+          "Activity" in snaps["t3_after_tab"] and "PID" in snaps["t3_after_tab"])
+    check("j moved selection (statusbar row 2/6)", "row 2/6" in snaps["t4_after_j"])
+    check("s cycled sort (statusbar sort=state)", "sort=state" in snaps["t5_after_s"])
+    check("q exited cleanly (EXIT_CODE=0)", code == 0)
+    print(f"EXIT_CODE={code}")
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()
