@@ -7,7 +7,7 @@
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, Config, NoTls, Row};
 
-use crate::models::{ActivityRow, LockRow, TableStatRow};
+use crate::models::{ActivityRow, BloatRow, LockRow, TableStatRow};
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
 /// the `Connection` onto its own task: it performs the actual I/O, and no
@@ -152,7 +152,65 @@ pub fn table_stat_from_row(row: &Row) -> Result<TableStatRow, tokio_postgres::Er
     })
 }
 
+/// Maps one row of `queries/bloat_tables.sql` / `bloat_indexes.sql` (both
+/// share the exact same output shape) onto [`BloatRow`]. Column wire types
+/// were verified live (Fase S2): text, text, int8, int8, float8, int4, bool
+/// — the casts live in the SQL per the repo's type-trap convention.
+///
+/// `is_na` gating happens HERE, not only in the SQL: a row ioguix flags as
+/// "not applicable" must never carry a number into the models (`None`, not
+/// `0.0`) — see [`na_gate`].
+pub fn bloat_from_row(row: &Row) -> Result<BloatRow, tokio_postgres::Error> {
+    let is_na: bool = row.try_get("is_na")?;
+    let (bloat_bytes, bloat_pct) = na_gate(
+        is_na,
+        row.try_get("bloat_bytes")?,
+        row.try_get("bloat_pct")?,
+    );
+    Ok(BloatRow {
+        schema: row.try_get("schema")?,
+        name: row.try_get("name")?,
+        real_bytes: row.try_get("real_bytes")?,
+        bloat_bytes,
+        bloat_pct,
+        fillfactor: row.try_get("fillfactor")?,
+        is_na,
+    })
+}
+
+/// The is_na rule as a pure (unit-testable) function: an unreliable
+/// estimate carries no numbers at all.
+fn na_gate(
+    is_na: bool,
+    bloat_bytes: Option<i64>,
+    bloat_pct: Option<f64>,
+) -> (Option<i64>, Option<f64>) {
+    if is_na {
+        (None, None)
+    } else {
+        (bloat_bytes, bloat_pct)
+    }
+}
+
 /// `try_get` an optional text column, defaulting NULL to `""`.
 fn opt_text(row: &Row, column: &str) -> Result<String, tokio_postgres::Error> {
     Ok(row.try_get::<_, Option<String>>(column)?.unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The plan's hard rule: `is_na = true` → both estimates are `None`
+    /// (never 0.0 / 0), even when the SQL produced numbers for the row.
+    #[test]
+    fn na_gate_nulls_unreliable_estimates() {
+        assert_eq!(na_gate(true, Some(1_048_576), Some(42.5)), (None, None));
+        assert_eq!(na_gate(true, None, None), (None, None));
+        assert_eq!(
+            na_gate(false, Some(1_048_576), Some(42.5)),
+            (Some(1_048_576), Some(42.5))
+        );
+        assert_eq!(na_gate(false, None, None), (None, None));
+    }
 }

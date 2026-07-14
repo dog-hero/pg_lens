@@ -26,7 +26,9 @@ use tokio::sync::watch;
 use tokio_postgres::{Client, Statement};
 
 use crate::history::{HistoryPoint, SnapshotHistory, epoch_ms_now};
-use crate::models::{DbSnapshot, PollerStatus, SchemaSnapshot, SchemaStatus, ServerVitals};
+use crate::models::{
+    BloatRow, DbSnapshot, PollerStatus, SchemaSnapshot, SchemaStatus, ServerVitals,
+};
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
 
@@ -79,15 +81,27 @@ impl SchemaState {
         forced || cadence_elapsed(self.last_attempt, now, self.interval)
     }
 
-    /// Stores a successful collection.
-    fn store(&mut self, tables: Vec<crate::models::TableStatRow>) {
+    /// Stores a collection whose table stats succeeded. Partial-failure
+    /// semantics (Fase S2): when only the estimated-bloat queries failed,
+    /// the fresh tables are stored (with a fresh `collected_at`), the
+    /// previous bloat vectors are kept, and the status carries the error —
+    /// table stats degrade gracefully instead of vanishing.
+    fn store(&mut self, collection: SchemaCollection) {
+        let previous = self.current.as_deref();
+        let (table_bloat, index_bloat, status) = match collection.bloat {
+            Ok((table_bloat, index_bloat)) => (table_bloat, index_bloat, SchemaStatus::Ok),
+            Err(msg) => (
+                previous.map(|p| p.table_bloat.clone()).unwrap_or_default(),
+                previous.map(|p| p.index_bloat.clone()).unwrap_or_default(),
+                SchemaStatus::Error(format!("estimated-bloat collection failed: {msg}")),
+            ),
+        };
         self.current = Some(Arc::new(SchemaSnapshot {
             collected_at_epoch_ms: epoch_ms_now(),
-            tables,
-            // Fase S2 fills these.
-            table_bloat: Vec::new(),
-            index_bloat: Vec::new(),
-            status: SchemaStatus::Ok,
+            tables: collection.tables,
+            table_bloat,
+            index_bloat,
+            status,
         }));
     }
 
@@ -259,12 +273,15 @@ async fn session(
 }
 
 /// The statements of a session, prepared once (never per tick). The first
-/// three run every fast tick; `table_stats` only on the slow cadence.
+/// three run every fast tick; `table_stats` and the two estimated-bloat
+/// statements only on the slow cadence.
 struct Prepared {
     activity: Statement,
     blocking: Statement,
     server_info: Statement,
     table_stats: Statement,
+    bloat_tables: Statement,
+    bloat_indexes: Statement,
 }
 
 async fn poll_loop(
@@ -288,13 +305,19 @@ async fn poll_loop(
         client.prepare(query_set.blocking),
         client.prepare(query_set.server_info),
         client.prepare(query_set.table_stats),
+        client.prepare(query_set.bloat_tables),
+        client.prepare(query_set.bloat_indexes),
     ) {
-        Ok((activity, blocking, server_info, table_stats)) => Prepared {
-            activity,
-            blocking,
-            server_info,
-            table_stats,
-        },
+        Ok((activity, blocking, server_info, table_stats, bloat_tables, bloat_indexes)) => {
+            Prepared {
+                activity,
+                blocking,
+                server_info,
+                table_stats,
+                bloat_tables,
+                bloat_indexes,
+            }
+        }
         Err(e) => return SessionEnd::Error(format!("prepare failed: {e}")),
     };
 
@@ -313,8 +336,8 @@ async fn poll_loop(
         let now = Instant::now();
         if schema.due(now) {
             schema.last_attempt = Some(now);
-            match collect_schema(client, &stmts.table_stats).await {
-                Ok(tables) => schema.store(tables),
+            match collect_schema(client, &stmts).await {
+                Ok(collection) => schema.store(collection),
                 Err(msg) => schema.store_error(format!("schema collection failed: {msg}")),
             }
         }
@@ -444,19 +467,51 @@ async fn poll_once(
     })
 }
 
-/// Runs the (slow) table-stats query. Called from the tick loop only when
+/// One slow-cadence collection: table stats plus the two estimated-bloat
+/// row sets. The bloat part is a `Result` of its own — a failing bloat
+/// query must not take the table stats down with it (see
+/// [`SchemaState::store`] for the partial-failure semantics).
+struct SchemaCollection {
+    tables: Vec<crate::models::TableStatRow>,
+    bloat: Result<(Vec<BloatRow>, Vec<BloatRow>), String>,
+}
+
+/// Runs the (slow) table-stats + estimated-bloat queries, pipelined on the
+/// session like the fast tick's trio. Called from the tick loop only when
 /// the schema cadence is due — the anti-pattern nº 1 of this feature is
-/// running this on the fast tick.
-async fn collect_schema(
-    client: &Client,
-    stmt: &Statement,
-) -> Result<Vec<crate::models::TableStatRow>, String> {
-    let rows = client.query(stmt, &[]).await.map_err(|e| e.to_string())?;
-    let mut tables = Vec::with_capacity(rows.len());
-    for row in &rows {
+/// running these on the fast tick.
+async fn collect_schema(client: &Client, stmts: &Prepared) -> Result<SchemaCollection, String> {
+    let (table_rows, bloat_table_rows, bloat_index_rows) = tokio::join!(
+        client.query(&stmts.table_stats, &[]),
+        client.query(&stmts.bloat_tables, &[]),
+        client.query(&stmts.bloat_indexes, &[]),
+    );
+    // Table stats are the collection's backbone: their failure fails it all.
+    let table_rows = table_rows.map_err(|e| e.to_string())?;
+    let mut tables = Vec::with_capacity(table_rows.len());
+    for row in &table_rows {
         tables.push(db::table_stat_from_row(row).map_err(|e| e.to_string())?);
     }
-    Ok(tables)
+    let bloat = bloat_table_rows
+        .map_err(|e| e.to_string())
+        .and_then(|rows| bloat_rows(&rows))
+        .and_then(|table_bloat| {
+            let index_bloat = bloat_index_rows
+                .map_err(|e| e.to_string())
+                .and_then(|rows| bloat_rows(&rows))?;
+            Ok((table_bloat, index_bloat))
+        });
+    Ok(SchemaCollection { tables, bloat })
+}
+
+/// Parses one estimated-bloat result set (tables and indexes share the
+/// exact same output shape).
+fn bloat_rows(rows: &[tokio_postgres::Row]) -> Result<Vec<BloatRow>, String> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(db::bloat_from_row(row).map_err(|e| e.to_string())?);
+    }
+    Ok(out)
 }
 
 fn hit_ratio(hit: i64, read: i64) -> f64 {
@@ -805,16 +860,57 @@ mod tests {
     fn schema_error_keeps_last_good_tables() {
         let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx());
         let good = SchemaSnapshot::mock();
-        schema.store(good.tables.clone());
+        schema.store(SchemaCollection {
+            tables: good.tables.clone(),
+            bloat: Ok((good.table_bloat.clone(), good.index_bloat.clone())),
+        });
         let stored = schema.current.clone().expect("stored");
         let collected_at = stored.collected_at_epoch_ms;
 
         schema.store_error("permission denied for pg_stat_user_tables".to_string());
         let after = schema.current.clone().expect("still present");
         assert_eq!(after.tables.len(), good.tables.len(), "data kept");
+        assert_eq!(after.table_bloat.len(), good.table_bloat.len(), "bloat kept");
+        assert_eq!(after.index_bloat.len(), good.index_bloat.len(), "bloat kept");
         assert_eq!(after.collected_at_epoch_ms, collected_at, "staleness honest");
         assert!(matches!(after.status, SchemaStatus::Error(ref m)
             if m.contains("permission denied")));
+    }
+
+    /// Fase S2 partial-failure semantics: table stats succeeded but the
+    /// estimated-bloat queries failed → fresh tables are stored, the
+    /// previous bloat vectors are kept, and the status carries the error.
+    #[test]
+    fn bloat_failure_keeps_table_stats_and_previous_bloat() {
+        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx());
+        let good = SchemaSnapshot::mock();
+        schema.store(SchemaCollection {
+            tables: good.tables.clone(),
+            bloat: Ok((good.table_bloat.clone(), good.index_bloat.clone())),
+        });
+
+        let mut fresh_tables = good.tables.clone();
+        fresh_tables.pop(); // observably different from the previous set
+        schema.store(SchemaCollection {
+            tables: fresh_tables.clone(),
+            bloat: Err("canceling statement due to statement timeout".to_string()),
+        });
+
+        let after = schema.current.clone().expect("stored");
+        assert_eq!(after.tables.len(), fresh_tables.len(), "fresh tables win");
+        assert_eq!(
+            after.table_bloat.len(),
+            good.table_bloat.len(),
+            "previous table bloat kept"
+        );
+        assert_eq!(
+            after.index_bloat.len(),
+            good.index_bloat.len(),
+            "previous index bloat kept"
+        );
+        assert!(matches!(after.status, SchemaStatus::Error(ref m)
+            if m.contains("estimated-bloat collection failed")
+            && m.contains("statement timeout")));
     }
 
     /// The mock poller reuses the SAME Arc<SchemaSnapshot> between slow

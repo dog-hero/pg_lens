@@ -2,13 +2,16 @@
 //! `server_version_num` (pg_activity's `post_NNNNNN` convention).
 
 /// The statements one poller session prepares (once). The first three run
-/// per fast tick; `table_stats` runs only on the slow schema cadence.
+/// per fast tick; `table_stats` + the two estimated-bloat queries run only
+/// on the slow schema cadence.
 #[derive(Clone, Copy, Debug)]
 pub struct QuerySet {
     pub activity: &'static str,
     pub blocking: &'static str,
     pub server_info: &'static str,
     pub table_stats: &'static str,
+    pub bloat_tables: &'static str,
+    pub bloat_indexes: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -22,6 +25,12 @@ const BLOCKING_POST_140000: &str = include_str!("../queries/blocking_post_140000
 const SERVER_INFO_POST_130000: &str = include_str!("../queries/server_info_post_130000.sql");
 // n_ins_since_vacuum is PG 13+, matching pg_lens's version floor.
 const TABLE_STATS_POST_130000: &str = include_str!("../queries/table_stats_post_130000.sql");
+// Estimated bloat, adapted from ioguix/pgsql-bloat-estimation
+// (BSD-2-Clause — attribution kept in the SQL headers). The originals are
+// 9.0/8.2-compatible, so one file serves the whole 13+ range (verified live
+// on 13 and 16 in the Fase S2 run) — no post_NNNNNN variants needed.
+const BLOAT_TABLES: &str = include_str!("../queries/bloat_tables.sql");
+const BLOAT_INDEXES: &str = include_str!("../queries/bloat_indexes.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -32,6 +41,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             blocking: BLOCKING_POST_140000,
             server_info: SERVER_INFO_POST_130000,
             table_stats: TABLE_STATS_POST_130000,
+            bloat_tables: BLOAT_TABLES,
+            bloat_indexes: BLOAT_INDEXES,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -39,6 +50,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             blocking: BLOCKING_POST_140000,
             server_info: SERVER_INFO_POST_130000,
             table_stats: TABLE_STATS_POST_130000,
+            bloat_tables: BLOAT_TABLES,
+            bloat_indexes: BLOAT_INDEXES,
         })
     } else {
         Err(format!(
@@ -77,6 +90,26 @@ mod tests {
                 q.table_stats.contains(&format!("LIMIT {TABLE_STATS_LIMIT}")),
                 "SQL row cap must match TABLE_STATS_LIMIT"
             );
+        }
+    }
+
+    #[test]
+    fn bloat_queries_serve_pg13_and_up_with_cap_and_attribution() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            for (sql, marker) in [
+                (q.bloat_tables, "table/table_bloat.sql"),
+                (q.bloat_indexes, "btree/btree_bloat.sql"),
+            ] {
+                // BSD-2-Clause attribution must survive any future edit.
+                assert!(sql.contains("ioguix/pgsql-bloat-estimation"));
+                assert!(sql.contains("Jehan-Guillaume (ioguix) de Rorthais"));
+                assert!(sql.contains(marker));
+                // Same row-cap philosophy as table_stats.
+                assert!(sql.contains(&format!("LIMIT {TABLE_STATS_LIMIT}")));
+                // Estimates, never presented as measurements.
+                assert!(sql.to_lowercase().contains("estimate"));
+            }
         }
     }
 

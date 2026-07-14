@@ -310,6 +310,17 @@ impl SchemaSnapshot {
                 fillfactor: Some(100),
                 is_na: false,
             },
+            // Yellow tier (>30% and >1MB, but under the red >50%/>10MB bar).
+            BloatRow {
+                schema: "public".to_string(),
+                name: "pgbench_history".to_string(),
+                real_bytes: 14_680_064,
+                bloat_bytes: Some(5_242_880),
+                bloat_pct: Some(35.7),
+                fillfactor: Some(100),
+                is_na: false,
+            },
+            // Healthy: below both severity tiers (renders uncolored).
             BloatRow {
                 schema: "public".to_string(),
                 name: "pgbench_accounts".to_string(),
@@ -625,6 +636,32 @@ mod tests {
             .expect("one is_na bloat row");
         assert!(na.bloat_pct.is_none(), "is_na must not carry a number");
         assert!(na.bloat_bytes.is_none());
+        // Fase S3's severity tiers are both exercisable from --mock alone:
+        // red = >50% and >10MB; yellow = >30% and >1MB (but not red).
+        let tier = |b: &&BloatRow, pct: f64, bytes: i64| {
+            b.bloat_pct.is_some_and(|p| p > pct) && b.bloat_bytes.is_some_and(|by| by > bytes)
+        };
+        assert!(
+            schema
+                .table_bloat
+                .iter()
+                .any(|b| tier(&b, 50.0, 10 << 20)),
+            "one red-tier table bloat row"
+        );
+        assert!(
+            schema
+                .table_bloat
+                .iter()
+                .any(|b| tier(&b, 30.0, 1 << 20) && !tier(&b, 50.0, 10 << 20)),
+            "one yellow-tier table bloat row"
+        );
+        assert!(
+            schema
+                .index_bloat
+                .iter()
+                .any(|b| tier(&b, 30.0, 1 << 20)),
+            "one flagged index bloat row"
+        );
     }
 
     #[test]

@@ -30,6 +30,17 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
   backoff. The UI never blocks on the database.
 - **Live tuning** — adjust the poll interval on the fly with `+` / `-`
   (0.5s–10s).
+- **Schema Lens (data layer)** — per-table `pg_stat_user_tables` counters,
+  on-disk sizes, and **estimated** table/btree-index bloat, collected on a
+  separate slow cadence (default 60s, `--schema-interval`) so it never
+  taxes the fast tick. Bloat estimation uses queries adapted from
+  [ioguix/pgsql-bloat-estimation](https://github.com/ioguix/pgsql-bloat-estimation)
+  (BSD-2-Clause, attribution kept in the SQL headers). Methodology note:
+  these are *statistics-based estimates*, not measurements — they rely on a
+  reasonably fresh `ANALYZE`, underestimate TOASTed columns, and include
+  unavoidable alignment padding; rows the estimator flags as `is_na`
+  (e.g. `name`-typed columns, missing statistics) carry no numbers at all
+  and are shown with a marker instead.
 - **Version-aware queries** — dedicated query sets for PostgreSQL 13, 14+,
   and 16+, following pg_activity's versioning convention.
 - **Single static binary** — no runtime, no dependencies; musl builds run
