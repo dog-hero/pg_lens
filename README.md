@@ -13,8 +13,14 @@ and [btop](https://github.com/aristocratos/btop), built in Rust with
 [ratatui](https://ratatui.rs) for minimal overhead: a **~4 MiB static
 binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 
-<!-- TODO: record a demo gif with vhs (https://github.com/charmbracelet/vhs)
-     and embed it here. No screenshot yet — do not fake one. -->
+![pg_lens TUI demo](docs/demo.gif)
+
+<details>
+<summary>Web Lens dashboard (<code>pg_lens serve</code>)</summary>
+
+![pg_lens web dashboard](docs/web-dashboard.png)
+
+</details>
 
 ## Features
 
