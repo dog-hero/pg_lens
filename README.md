@@ -37,6 +37,17 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 
 ## Installation
 
+### Homebrew (macOS / Linux)
+
+```sh
+brew install dog-hero/tap/pg_lens
+```
+
+The [tap](https://github.com/dog-hero/homebrew-tap) serves the prebuilt
+release binaries and its formula is updated automatically by the release
+workflow. Installing via brew avoids the macOS Gatekeeper prompt entirely
+(no quarantine attribute is applied).
+
 ### Prebuilt binaries (releases)
 
 Download the archive for your platform from the
@@ -46,15 +57,15 @@ Gatekeeper will refuse to run the unsigned binary:
 
 ```sh
 # macOS (Apple Silicon)
-curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.1.0/pg_lens-v0.1.0-aarch64-apple-darwin.tar.gz | tar xz
-./pg_lens-v0.1.0-aarch64-apple-darwin/pg_lens_tui --mock
+curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.2.0/pg_lens-v0.2.0-aarch64-apple-darwin.tar.gz | tar xz
+./pg_lens-v0.2.0-aarch64-apple-darwin/pg_lens --mock
 ```
 
 If you already downloaded it with a browser and macOS says the app
 "cannot be verified", clear the quarantine flag once:
 
 ```sh
-xattr -d com.apple.quarantine ./pg_lens_tui
+xattr -d com.apple.quarantine ./pg_lens
 ```
 
 (The binaries are not yet signed/notarized with an Apple Developer ID —
@@ -68,7 +79,7 @@ Requires Rust (edition 2024, tested with cargo 1.93):
 git clone git@github.com:dog-hero/pg_lens.git
 cd pg_lens
 cargo build --release -p pg_lens_tui
-./target/release/pg_lens_tui --mock   # instant demo, no database needed
+./target/release/pg_lens --mock   # instant demo, no database needed
 ```
 
 ### Static Linux binaries (musl)
@@ -94,8 +105,8 @@ With rustup available (e.g. in CI), the leaner recipe is
 ## Usage
 
 ```sh
-pg_lens_tui --dsn "host=localhost port=5432 user=postgres password=..." [--interval 2]
-pg_lens_tui --mock          # built-in mock data (dev/demo mode)
+pg_lens --dsn "host=localhost port=5432 user=postgres password=..." [--interval 2]
+pg_lens --mock          # built-in mock data (dev/demo mode)
 ```
 
 | Flag / env | Meaning |
@@ -120,10 +131,10 @@ whatever is still missing gets the defaults `host=localhost user=postgres`.
 
 ```sh
 # no --dsn at all — pure environment:
-PGHOST=db.internal PGPORT=5432 PGUSER=pg_monitor_ro PGPASSWORD=... pg_lens_tui
+PGHOST=db.internal PGPORT=5432 PGUSER=pg_monitor_ro PGPASSWORD=... pg_lens
 
 # mix and match — the DSN pins the host, the env supplies the password:
-PGPASSWORD=... pg_lens_tui --dsn "host=db.internal user=pg_monitor_ro"
+PGPASSWORD=... pg_lens --dsn "host=db.internal user=pg_monitor_ro"
 ```
 
 | Env var | Maps to | Notes |
@@ -172,8 +183,8 @@ password_cmd = "security find-generic-password -s pg_local -w"
 ```
 
 ```sh
-pg_lens_tui --service prod       # or: PG_LENS_SERVICE=prod / PGSERVICE=prod
-pg_lens_tui --list-services      # names + host/user, never secrets
+pg_lens --service prod       # or: PG_LENS_SERVICE=prod / PGSERVICE=prod
+pg_lens --list-services      # names + host/user, never secrets
 ```
 
 Any field a service leaves out falls through to the env vars and defaults

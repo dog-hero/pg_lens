@@ -6,7 +6,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  BIN: pg_lens_tui
+  BIN: pg_lens
 
 permissions:
   contents: write
@@ -106,3 +106,61 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  update-tap:
+    name: Update Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      # Secrets cannot be referenced in `if:` conditions, so the guard is a
+      # runtime check on this env var (empty when the secret is not set).
+      TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+    steps:
+      - name: Check for tap token
+        id: token
+        run: |
+          if [ -z "${TAP_GITHUB_TOKEN}" ]; then
+            echo "::notice::TAP_GITHUB_TOKEN secret is not configured — skipping the Homebrew tap update. Publish manually with scripts/gen_formula.sh (see its header)."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.available == 'true'
+      # The .sha256 files were uploaded as workflow artifacts by the build
+      # jobs (and published to the release) — read them from the artifacts.
+      - uses: actions/download-artifact@v4
+        if: steps.token.outputs.available == 'true'
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate formula
+        if: steps.token.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          sha() { cut -d' ' -f1 "dist/pg_lens-${GITHUB_REF_NAME}-$1.tar.gz.sha256"; }
+          scripts/gen_formula.sh "${GITHUB_REF_NAME#v}" \
+            "$(sha aarch64-apple-darwin)" \
+            "$(sha x86_64-apple-darwin)" \
+            "$(sha aarch64-unknown-linux-musl)" \
+            "$(sha x86_64-unknown-linux-musl)" \
+            > pg_lens.rb
+          ruby -c pg_lens.rb
+          cat pg_lens.rb
+      - name: Commit formula to the tap
+        if: steps.token.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/dog-hero/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp pg_lens.rb tap/Formula/pg_lens.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/pg_lens.rb
+          if git diff --cached --quiet; then
+            echo "Formula unchanged — nothing to push."
+            exit 0
+          fi
+          git commit -m "pg_lens ${GITHUB_REF_NAME}"
+          git push

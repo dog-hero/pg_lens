@@ -9,7 +9,7 @@ real-database run.
 """
 import os, pty, re, select, signal, subprocess, sys, time
 
-BIN = "/Users/leonardo.benedet/BenedetLabs/pg_lens/target/debug/pg_lens_tui"
+BIN = "/Users/leonardo.benedet/BenedetLabs/pg_lens/target/debug/pg_lens"
 # Overridable so the same harness proves the 80x24 resize case (Fase 4).
 COLS = int(os.environ.get("PG_LENS_E2E_COLS", 120))
 ROWS = int(os.environ.get("PG_LENS_E2E_ROWS", 36))
