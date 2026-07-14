@@ -247,19 +247,25 @@ jobs:
             "$(sha aarch64-unknown-linux-musl)" \
             "$(sha x86_64-unknown-linux-musl)" \
             > pg_lens.rb
+          scripts/gen_cask.sh "${GITHUB_REF_NAME#v}" \
+            "$(sha aarch64-apple-darwin)" \
+            "$(sha x86_64-apple-darwin)" \
+            > pg_lens_cask.rb
           ruby -c pg_lens.rb
-          cat pg_lens.rb
+          ruby -c pg_lens_cask.rb
+          cat pg_lens.rb pg_lens_cask.rb
       - name: Commit formula to the tap
         if: steps.token.outputs.available == 'true'
         run: |
           set -euo pipefail
           git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/dog-hero/homebrew-tap.git" tap
-          mkdir -p tap/Formula
+          mkdir -p tap/Formula tap/Casks
           cp pg_lens.rb tap/Formula/pg_lens.rb
+          cp pg_lens_cask.rb tap/Casks/pg_lens.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/pg_lens.rb
+          git add Formula/pg_lens.rb Casks/pg_lens.rb
           if git diff --cached --quiet; then
             echo "Formula unchanged — nothing to push."
             exit 0
