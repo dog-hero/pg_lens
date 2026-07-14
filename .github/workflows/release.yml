@@ -128,9 +128,76 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # deb/rpm (amd64+arm64) from the musl tarballs via nfpm — one config
+  # (nfpm.yaml), arch/version injected through env vars.
+  packages:
+    name: Packages (deb/rpm)
+    needs: build-linux
+    runs-on: ubuntu-latest
+    env:
+      NFPM_VER: 2.47.0 # pinned; https://github.com/goreleaser/nfpm/releases
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          # Only the Linux tarballs — the macOS jobs may still be running.
+          pattern: pg_lens-*-linux-musl
+          path: dist
+          merge-multiple: true
+      - name: Install nfpm
+        run: |
+          set -euo pipefail
+          curl -fsSL -o nfpm.tar.gz \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VER}/nfpm_${NFPM_VER}_Linux_x86_64.tar.gz"
+          tar xzf nfpm.tar.gz nfpm
+          sudo install -m 0755 nfpm /usr/local/bin/nfpm
+          nfpm --version
+      - name: Stage binaries
+        run: |
+          set -euo pipefail
+          stage() { # $1 = rust target triple, $2 = GOARCH-style arch
+            tar xzf "dist/pg_lens-${GITHUB_REF_NAME}-$1.tar.gz"
+            mkdir -p "pkg/$2"
+            cp "pg_lens-${GITHUB_REF_NAME}-$1/pg_lens" "pkg/$2/pg_lens"
+          }
+          stage x86_64-unknown-linux-musl amd64
+          stage aarch64-unknown-linux-musl arm64
+      # Debian policy wants /usr/share/doc/<pkg>/changelog.gz whose latest
+      # entry matches the package version (lintian: no-changelog).
+      - name: Generate Debian changelog
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          printf '%s\n' \
+            "pg-lens (${version}) unstable; urgency=medium" \
+            "" \
+            "  * See https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
+            "" \
+            " -- Leonardo Benedet <leonardobenedetster@gmail.com>  $(date -R -u)" \
+            | gzip -9 -n > pkg/changelog.gz
+      - name: Build packages
+        run: |
+          set -euo pipefail
+          export NFPM_VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p packages
+          for arch in amd64 arm64; do
+            for fmt in deb rpm; do
+              # --target with a directory: nfpm picks the conventional file
+              # name (pg_lens_X.Y.Z_amd64.deb / pg_lens-X.Y.Z-1.x86_64.rpm).
+              NFPM_ARCH="$arch" nfpm package \
+                --config nfpm.yaml --packager "$fmt" --target packages/
+            done
+          done
+          (cd packages && for f in *; do shasum -a 256 "$f" > "$f.sha256"; done)
+          ls -l packages/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pg_lens-packages
+          path: packages/*
+
   release:
     name: Publish GitHub release
-    needs: [build-linux, build-macos]
+    needs: [build-linux, build-macos, packages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

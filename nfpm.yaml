@@ -1,0 +1,65 @@
+# nfpm (https://nfpm.goreleaser.com) config — builds the deb/rpm packages
+# attached to every release (release.yml `packages` job).
+#
+# Package name is `pg-lens` (Debian policy forbids `_` in package names —
+# lintian: bad-package-name); the installed binary is still /usr/bin/pg_lens.
+#
+# Env contract (set by the caller):
+#   NFPM_ARCH    — GOARCH-style arch (`amd64` | `arm64`); nfpm maps it per
+#                  packager automatically (rpm: amd64→x86_64, arm64→aarch64).
+#   NFPM_VERSION — version WITHOUT the `v` prefix (deb requires a leading digit).
+#
+# Staged inputs (see the workflow's "Stage binaries" step):
+#   pkg/<arch>/pg_lens — the musl binary
+#   pkg/changelog.gz   — generated Debian changelog (gzip -9 -n)
+#
+#   NFPM_ARCH=arm64 NFPM_VERSION=0.2.0 nfpm package -f nfpm.yaml -p deb -t out/
+name: pg-lens
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+section: database
+priority: optional
+maintainer: Leonardo Benedet <leonardobenedetster@gmail.com>
+description: |-
+  Live PostgreSQL observability from the terminal or the browser.
+  A single static binary providing a pg_activity-style TUI and an
+  embedded web dashboard (pg_lens serve). Supports PostgreSQL 13+.
+vendor: Leonardo Benedet
+homepage: https://github.com/dog-hero/pg_lens
+license: MIT
+contents:
+  - src: pkg/${NFPM_ARCH}/pg_lens
+    dst: /usr/bin/pg_lens
+    expand: true
+    file_info:
+      mode: 0755
+  - src: README.md
+    dst: /usr/share/doc/pg-lens/README.md
+    file_info:
+      mode: 0644
+  # Debian conventions: license text at /usr/share/doc/<pkg>/copyright and a
+  # gzipped changelog (lintian: no-changelog).
+  - src: LICENSE
+    dst: /usr/share/doc/pg-lens/copyright
+    packager: deb
+    file_info:
+      mode: 0644
+  - src: pkg/changelog.gz
+    dst: /usr/share/doc/pg-lens/changelog.gz
+    packager: deb
+    file_info:
+      mode: 0644
+  # The binary is intentionally statically linked (musl) — override the
+  # corresponding lintian error.
+  - src: packaging/pg-lens.lintian-overrides
+    dst: /usr/share/lintian/overrides/pg-lens
+    packager: deb
+    file_info:
+      mode: 0644
+  # RPM convention: /usr/share/licenses/<pkg>/.
+  - src: LICENSE
+    dst: /usr/share/licenses/pg-lens/LICENSE
+    packager: rpm
+    file_info:
+      mode: 0644

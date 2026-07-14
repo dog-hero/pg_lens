@@ -1,0 +1,4 @@
+# pg_lens ships as a single static musl binary on purpose (no runtime
+# dependencies; runs on any Linux, including Alpine). Static linking is the
+# product, not an accident.
+pg-lens: statically-linked-binary
