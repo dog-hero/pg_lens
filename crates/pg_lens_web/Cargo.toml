@@ -1,0 +1,20 @@
+[package]
+name = "pg_lens_web"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8.9"
+futures-util = "0.3.32"
+pg_lens_core = { version = "0.1.0", path = "../pg_lens_core" }
+serde_json = "1.0.150"
+# Constant-time bearer-token comparison (Fase 6 security requirement).
+subtle = "2.6.1"
+# "net" for the TcpListener taken by `serve`, "signal" for Ctrl+C graceful
+# shutdown, "sync" for the watch channel.
+tokio = { version = "1.52.3", features = ["net", "signal", "sync"] }
+
+[dev-dependencies]
+http-body-util = "0.1.4"
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5.3", features = ["util"] }
