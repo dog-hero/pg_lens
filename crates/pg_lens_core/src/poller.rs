@@ -27,6 +27,7 @@ use tokio_postgres::{Client, Statement};
 
 use crate::history::{HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::models::{DbSnapshot, PollerStatus, ServerVitals};
+use crate::services::{self, PasswordSource};
 use crate::{db, queries};
 
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
@@ -60,6 +61,11 @@ async fn wait_interval(interval_rx: &mut watch::Receiver<Duration>) {
 /// `PollerStatus::Error(..)` while *keeping the last good data*, then
 /// reconnects with exponential backoff (1s, 2s, 4s ... max 10s).
 ///
+/// When `password_source` is `Some`, the password is (re-)resolved through
+/// it — e.g. running `password_cmd` — before **every** connection attempt,
+/// so rotating tokens stay fresh across reconnects. A failing command takes
+/// the same resilience path as a DB error: `PollerStatus::Error` + backoff.
+///
 /// The channel starts pre-filled with a [`DbSnapshot::connecting`] value.
 /// The task ends on its own once every receiver has been dropped.
 ///
@@ -68,16 +74,18 @@ async fn wait_interval(interval_rx: &mut watch::Receiver<Duration>) {
 /// Must be called from within a tokio runtime (it calls `tokio::spawn`).
 pub fn spawn(
     config: tokio_postgres::Config,
+    password_source: Option<PasswordSource>,
     interval_rx: watch::Receiver<Duration>,
 ) -> watch::Receiver<Arc<DbSnapshot>> {
     let (tx, rx) = watch::channel(Arc::new(DbSnapshot::connecting()));
-    tokio::spawn(run(config, interval_rx, tx));
+    tokio::spawn(run(config, password_source, interval_rx, tx));
     rx
 }
 
 /// Outer reconnect loop: one [`session`] per connection, backoff in between.
 async fn run(
     config: tokio_postgres::Config,
+    password_source: Option<PasswordSource>,
     mut interval_rx: watch::Receiver<Duration>,
     tx: watch::Sender<Arc<DbSnapshot>>,
 ) {
@@ -86,7 +94,16 @@ async fn run(
     let mut history = SnapshotHistory::default();
     loop {
         let mut polled_ok = false;
-        match session(&config, &mut interval_rx, &tx, &mut history, &mut polled_ok).await {
+        let end = session(
+            &config,
+            password_source.as_ref(),
+            &mut interval_rx,
+            &tx,
+            &mut history,
+            &mut polled_ok,
+        )
+        .await;
+        match end {
             SessionEnd::Closed => return,
             SessionEnd::Error(msg) => {
                 if polled_ok {
@@ -114,14 +131,31 @@ enum SessionEnd {
 
 /// One connection worth of polling; ensures the spawned `Connection` task is
 /// stopped on every exit path.
+///
+/// The password source (when present) is resolved here — once per
+/// *connection attempt*, never per tick — so every reconnect re-runs
+/// `password_cmd` and picks up rotated credentials.
 async fn session(
     config: &tokio_postgres::Config,
+    password_source: Option<&PasswordSource>,
     interval_rx: &mut watch::Receiver<Duration>,
     tx: &watch::Sender<Arc<DbSnapshot>>,
     history: &mut SnapshotHistory,
     polled_ok: &mut bool,
 ) -> SessionEnd {
-    let (client, conn_handle) = match db::connect(config).await {
+    // The base config is never mutated: the resolved password goes into a
+    // per-attempt clone (and is dropped with it).
+    let mut config = config.clone();
+    if let Some(PasswordSource::Command(cmd)) = password_source {
+        match services::resolve_password_cmd(cmd).await {
+            Ok(password) => {
+                config.password(password);
+            }
+            // The error carries at most a stderr excerpt — never stdout.
+            Err(e) => return SessionEnd::Error(e.to_string()),
+        }
+    }
+    let (client, conn_handle) = match db::connect(&config).await {
         Ok(pair) => pair,
         Err(e) => return SessionEnd::Error(format!("connect failed: {e}")),
     };
@@ -460,7 +494,7 @@ mod tests {
         let config: tokio_postgres::Config = "host=127.0.0.1 port=1 user=nobody connect_timeout=1"
             .parse()
             .expect("test DSN must parse");
-        let mut rx = spawn(config, interval_rx(50));
+        let mut rx = spawn(config, None, interval_rx(50));
 
         assert!(matches!(rx.borrow().status, PollerStatus::Connecting));
 
@@ -475,6 +509,71 @@ mod tests {
         }
         // Last (empty) data is retained, not dropped.
         assert!(snapshot.activity.is_empty());
+    }
+
+    /// A failing `password_cmd` must surface as `PollerStatus::Error` (same
+    /// resilience path as a DB error) — and the banner text must carry the
+    /// command's stderr, never its stdout.
+    #[tokio::test]
+    async fn failing_password_cmd_reports_error_status_without_stdout_leak() {
+        let config: tokio_postgres::Config = "host=127.0.0.1 port=1 user=nobody connect_timeout=1"
+            .parse()
+            .expect("test DSN must parse");
+        let source = PasswordSource::Command(
+            "echo topsecret-stdout; echo vault sealed >&2; exit 1".to_string(),
+        );
+        let mut rx = spawn(config, Some(source), interval_rx(50));
+
+        tokio::time::timeout(Duration::from_secs(5), rx.changed())
+            .await
+            .expect("poller must publish an error snapshot within 5s")
+            .expect("sender must still be alive");
+        let snapshot = rx.borrow_and_update().clone();
+        match &snapshot.status {
+            PollerStatus::Error(msg) => {
+                assert!(msg.contains("password_cmd failed"), "got: {msg}");
+                assert!(msg.contains("vault sealed"), "stderr must surface: {msg}");
+                assert!(
+                    !msg.contains("topsecret-stdout"),
+                    "stdout must never leak: {msg}"
+                );
+            }
+            other => panic!("expected PollerStatus::Error, got {other:?}"),
+        }
+    }
+
+    /// The password command must be re-executed on *every* connection
+    /// attempt (rotating tokens): each backoff retry appends one line to a
+    /// side-effect file, which therefore has to keep growing.
+    #[tokio::test]
+    async fn password_cmd_is_reexecuted_per_connection_attempt() {
+        let marker = tempfile::NamedTempFile::new().expect("temp file");
+        let marker_path = marker.path().to_path_buf();
+        // Command succeeds (so the flow reaches the connect step, which then
+        // fails on port 1 and schedules a retry) while logging each run.
+        let cmd = format!("echo ran >> '{}'; echo pw", marker_path.display());
+
+        let config: tokio_postgres::Config = "host=127.0.0.1 port=1 user=nobody connect_timeout=1"
+            .parse()
+            .expect("test DSN must parse");
+        let _rx = spawn(config, Some(PasswordSource::Command(cmd)), interval_rx(50));
+
+        // First attempt at ~0s, second after the 1s backoff. Poll the file
+        // (bounded) until it shows at least two executions.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let runs = std::fs::read_to_string(&marker_path)
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
+            if runs >= 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "password_cmd ran only {runs} time(s) in 10s; expected a re-execution per retry"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Deriving TPS/cache hit: the delta math is exercised through

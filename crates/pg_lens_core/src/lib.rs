@@ -9,6 +9,7 @@ pub mod history;
 pub mod models;
 pub mod poller;
 pub mod queries;
+pub mod services;
 pub mod settings;
 
 // Re-exported so frontends can name `tokio_postgres::Config` (the type
@@ -17,4 +18,5 @@ pub use tokio_postgres;
 
 pub use history::{HistoryPoint, SnapshotHistory};
 pub use models::{ActivityRow, DbSnapshot, LockRow, PollerStatus, ServerVitals};
-pub use settings::{ConnLabel, ConnSpec, SettingsError};
+pub use services::PasswordSource;
+pub use settings::{ConnLabel, ConnSpec, Resolved, SettingsError};

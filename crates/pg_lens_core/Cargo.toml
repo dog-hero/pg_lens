@@ -6,10 +6,14 @@ edition = "2024"
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 # Minimal feature set on purpose: the core only spawns the poller task ("rt"),
-# publishes through watch channels ("sync") and sleeps between polls ("time").
-tokio = { version = "1.52.3", features = ["rt", "sync", "time"] }
+# publishes through watch channels ("sync"), sleeps between polls ("time"),
+# and runs `password_cmd` via `sh -c` ("process", Fase C2).
+tokio = { version = "1.52.3", features = ["process", "rt", "sync", "time"] }
 tokio-postgres = "0.7.18"
+# Services file parsing (Fase C2). Default features = "parse" + "serde".
+toml = "1.1.2"
 
 [dev-dependencies]
 serde_json = "1.0.150"
+tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["macros"] }

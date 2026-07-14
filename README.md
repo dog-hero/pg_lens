@@ -78,6 +78,9 @@ pg_lens_tui --mock          # built-in mock data (dev/demo mode)
 | Flag / env | Meaning |
 |---|---|
 | `--dsn <DSN>` | Connection string: `key=value` DSN or `postgres://` URL. Also read from the `PG_LENS_DSN` env var. Optional — see [Connecting](#connecting) |
+| `--service <name>` | Connect using a named entry from the [services file](#services-file). Also read from `PG_LENS_SERVICE`, falling back to `PGSERVICE`. Mutually exclusive with `--dsn` |
+| `--services-file <path>` | Services file location. Default: `$XDG_CONFIG_HOME/pg_lens/services.toml` (or `~/.config/pg_lens/services.toml`). Also read from `PG_LENS_SERVICES_FILE` |
+| `--list-services` | Print the defined services (names + host/user, never secrets) and exit |
 | `--interval <secs>` | Poll interval in seconds (minimum 0.5). Default: 2 |
 | `--mock` | Use built-in mock data instead of a real database |
 
@@ -110,9 +113,59 @@ PGPASSWORD=... pg_lens_tui --dsn "host=db.internal user=pg_monitor_ro"
 | `PGAPPNAME` | `application_name` | |
 | `PGCONNECT_TIMEOUT` | connect timeout | whole seconds; `0` = wait indefinitely |
 
-**Precedence (highest first):** `--dsn` field → env var → default
-(`host=localhost`, `user=postgres`). Empty env values count as unset. The
-header shows the resolved `user@host` — the password never appears anywhere.
+**Precedence (highest first):** `--dsn` field → [services-file](#services-file)
+entry → env var → default (`host=localhost`, `user=postgres`) — the same
+order libpq uses. Empty env values count as unset. The header shows the
+resolved `user@host` — the password never appears anywhere.
+
+### Services file
+
+For more than one database, register named services in
+`~/.config/pg_lens/services.toml` (inspired by libpq's `pg_service.conf`,
+with one extra trick: `password_cmd` runs an external command and uses its
+stdout as the password, so the file never has to contain a secret):
+
+```toml
+[services.prod]
+host = "db.prod.internal"
+port = 5432
+user = "pg_monitor_ro"
+dbname = "app"
+application_name = "pg_lens"
+connect_timeout_secs = 5
+password_cmd = "vault kv get -field=password secret/pg/prod"
+
+[services.staging]
+host = "db.staging.internal"
+user = "postgres"
+# sugar: a password of the form "$(...)" is treated as password_cmd
+password = "$(op read op://infra/pg-staging/password)"
+
+[services.local]
+host = "localhost"
+user = "postgres"
+# macOS Keychain works too:
+password_cmd = "security find-generic-password -s pg_local -w"
+```
+
+```sh
+pg_lens_tui --service prod       # or: PG_LENS_SERVICE=prod / PGSERVICE=prod
+pg_lens_tui --list-services      # names + host/user, never secrets
+```
+
+Any field a service leaves out falls through to the env vars and defaults
+above; `--dsn` fields always win (and the `--dsn`/`--service` flags are
+mutually exclusive). `password_cmd` runs as `sh -c <cmd>` with a 10s
+timeout, and is **re-executed on every (re)connection attempt** — so
+short-lived tokens (Vault leases, SSO helpers) keep working across
+reconnects. If the command fails, the TUI stays alive and shows the error
+(stderr, never stdout) in the banner, retrying with backoff.
+
+> **Security note:** this file can execute commands — treat it like code and
+> keep it at `0600`. `pg_lens` refuses a services file that is writable by
+> group/others, and refuses one that combines a plaintext `password` with
+> group/other read permission. A plaintext `password` works but is
+> discouraged; prefer `password_cmd`.
 
 ### Keybindings
 

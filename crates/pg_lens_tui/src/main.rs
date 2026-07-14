@@ -20,11 +20,11 @@
 //! as-is and never logged; only the safe `ConnLabel` reaches the view.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
-use pg_lens_core::settings::{self, ConnLabel, ConnSpec};
-use pg_lens_core::tokio_postgres;
+use pg_lens_core::settings::{self, ConnSpec, Resolved};
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, watch};
 
@@ -45,6 +45,24 @@ struct Cli {
     #[arg(long, env = "PG_LENS_DSN")]
     dsn: Option<String>,
 
+    /// Connect using a named entry from the services file. Also read from
+    /// the PG_LENS_SERVICE env var, falling back to PGSERVICE. Mutually
+    /// exclusive with --dsn.
+    #[arg(long, value_name = "NAME", conflicts_with = "dsn")]
+    service: Option<String>,
+
+    /// Path to the services file. Defaults to
+    /// $XDG_CONFIG_HOME/pg_lens/services.toml (or
+    /// ~/.config/pg_lens/services.toml); also read from the
+    /// PG_LENS_SERVICES_FILE env var.
+    #[arg(long, value_name = "PATH")]
+    services_file: Option<PathBuf>,
+
+    /// Print the services defined in the services file (names + host/user,
+    /// never passwords) and exit.
+    #[arg(long)]
+    list_services: bool,
+
     /// Poll interval in seconds (minimum 0.5).
     #[arg(long, default_value_t = 2.0)]
     interval: f64,
@@ -59,17 +77,43 @@ async fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
     color_eyre::install()?;
 
+    let spec = ConnSpec {
+        dsn: cli.dsn.clone(),
+        service: cli.service.clone(),
+        services_file: cli.services_file.clone(),
+        // Captured exactly once; the core takes it by injection.
+        env: std::env::vars().collect::<HashMap<_, _>>(),
+    };
+
+    // --list-services: plain stdout, no TUI. Names + host/user only — a
+    // password or password_cmd never reaches this output.
+    if cli.list_services {
+        let (services, warnings) = settings::list_services(&spec)?;
+        for warning in &warnings {
+            eprintln!("warning: {warning}");
+        }
+        for service in services {
+            println!(
+                "{name}\thost={host}\tuser={user}",
+                name = service.name,
+                host = service.host.as_deref().unwrap_or("-"),
+                user = service.user.as_deref().unwrap_or("-"),
+            );
+        }
+        return Ok(());
+    }
+
     // Resolve the connection *before* entering the alternate screen so a
-    // bad DSN / env var prints as a normal error, not inside a raw terminal.
+    // bad DSN / env var / services file prints as a normal error (and
+    // permission warnings land on stderr), not inside a raw terminal.
     let conn = if cli.mock {
         None
     } else {
-        let spec = ConnSpec {
-            dsn: cli.dsn.clone(),
-            // Captured exactly once; the core takes it by injection.
-            env: std::env::vars().collect::<HashMap<_, _>>(),
-        };
-        Some(settings::resolve(&spec)?)
+        let resolved = settings::resolve(&spec)?;
+        for warning in &resolved.warnings {
+            eprintln!("warning: {warning}");
+        }
+        Some(resolved)
     };
 
     let terminal = ratatui::init();
@@ -81,7 +125,7 @@ async fn main() -> color_eyre::Result<()> {
 async fn run(
     mut terminal: DefaultTerminal,
     cli: &Cli,
-    conn: Option<(tokio_postgres::Config, ConnLabel)>,
+    conn: Option<Resolved>,
 ) -> color_eyre::Result<()> {
     let interval = Duration::from_secs_f64(cli.interval.max(0.5));
     let mut app = App::new();
@@ -98,11 +142,12 @@ async fn run(
             app.host = "mock".to_string();
             pg_lens_core::poller::spawn_mock(interval_rx)
         }
-        Some((config, label)) => {
+        Some(resolved) => {
             // The label is the only connection info the view ever sees —
-            // host and user, never the password.
-            app.host = label.to_string();
-            pg_lens_core::poller::spawn(config, interval_rx)
+            // host and user, never the password. When the resolution came
+            // with a password_cmd, the poller re-runs it per (re)connection.
+            app.host = resolved.label.to_string();
+            pg_lens_core::poller::spawn(resolved.config, resolved.password_source, interval_rx)
         }
     };
     // Seed the app with the poller's initial snapshot before the first frame

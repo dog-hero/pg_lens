@@ -50,12 +50,15 @@ def main():
                          "status marker in the Micro Lens (Fase 4)")
     ap.add_argument("--resilience-container", default=None,
                     help="docker container to stop/start mid-session")
+    ap.add_argument("--extra-arg", action="append", default=[],
+                    help="extra CLI argument passed to the binary (repeatable), "
+                         "e.g. --extra-arg=--service --extra-arg=local16 (Fase C2)")
     args = ap.parse_args()
 
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     env = dict(os.environ, TERM="xterm-256color")
-    cmd = [BIN] + (["--dsn", args.dsn] if args.dsn else [])
+    cmd = [BIN] + (["--dsn", args.dsn] if args.dsn else []) + args.extra_arg
     proc = subprocess.Popen(cmd, stdin=slave, stdout=slave,
                             stderr=slave, env=env, close_fds=True)
     os.close(slave)
