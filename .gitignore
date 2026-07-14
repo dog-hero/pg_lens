@@ -1,8 +1,33 @@
+# --- Rust ---
 /target
-__pycache__/
 /target-musl-*
 
-# Web frontend: node_modules is never committed; frontend/dist IS committed
-# (small, hashed bundles) so plain `cargo build` / `cargo install` works
-# without a Node toolchain.
+# --- Node (web frontend) ---
+# frontend/dist IS committed intentionally (small hashed bundles) so plain
+# `cargo build` / `cargo install` works without a Node toolchain — do NOT
+# ignore it. node_modules is never committed.
 node_modules/
+
+# --- Python tooling (e2e harnesses) ---
+__pycache__/
+*.pyc
+
+# --- OS junk ---
+.DS_Store
+
+# --- Editors / local AI tooling ---
+.vscode/
+.idea/
+.claude/
+.remember/
+
+# --- Secrets & local config: never commit ---
+.env
+.env.*
+*.pem
+*.key
+/services.toml
+
+# --- Logs & scratch ---
+*.log
+*.tmp
