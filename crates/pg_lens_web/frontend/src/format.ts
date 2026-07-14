@@ -33,6 +33,15 @@ export function humanCount(n: number): string {
   return Math.round(n).toLocaleString("en-US");
 }
 
+/** `4m32s ago`, or `—` when the event never happened (TUI's human_ago). */
+export function humanAgo(
+  epochSecs: number | null,
+  nowEpochSecs: number,
+): string {
+  if (epochSecs === null || !Number.isFinite(epochSecs)) return "—";
+  return `${humanDuration(Math.max(0, nowEpochSecs - epochSecs))} ago`;
+}
+
 /** `95.7%` from a 0..1 ratio. */
 export function humanPercent(ratio: number): string {
   if (!Number.isFinite(ratio)) return "-";

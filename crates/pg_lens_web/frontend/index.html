@@ -20,10 +20,40 @@
           <h2>TPS &amp; active sessions</h2>
           <div id="chart"></div>
         </section>
-        <section class="panel">
+        <nav id="tabs" role="tablist">
+          <button
+            id="tab-activity"
+            role="tab"
+            aria-selected="true"
+            aria-controls="activity-panel"
+          >
+            Activity
+          </button>
+          <button
+            id="tab-schema"
+            role="tab"
+            aria-selected="false"
+            aria-controls="schema-panel"
+          >
+            Schema
+          </button>
+        </nav>
+        <section id="activity-panel" class="panel" role="tabpanel">
           <h2>Activity</h2>
           <div class="table-wrap">
             <table id="activity">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+        <section id="schema-panel" class="panel" role="tabpanel" hidden>
+          <h2>Schema <span class="panel-note">estimated bloat</span></h2>
+          <p id="schema-staleness" class="staleness"></p>
+          <p id="schema-warning" class="inline-warning" hidden></p>
+          <p id="schema-placeholder" class="placeholder">collecting…</p>
+          <div class="table-wrap">
+            <table id="schema">
               <thead></thead>
               <tbody></tbody>
             </table>

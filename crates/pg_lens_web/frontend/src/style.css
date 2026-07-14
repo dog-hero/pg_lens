@@ -247,6 +247,149 @@ table#activity {
   font-weight: 700;
 }
 
+/* ── tabs (Activity / Schema) ───────────────────────────────────────── */
+
+#tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+#tabs button {
+  padding: 8px 18px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#tabs button:hover {
+  color: var(--fg);
+}
+
+#tabs button[aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ── schema table ───────────────────────────────────────────────────── */
+
+.panel-note {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+  color: var(--fg-dim);
+  opacity: 0.8;
+}
+
+.staleness {
+  margin: 0 0 10px;
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+}
+
+.inline-warning {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  background: rgba(244, 112, 103, 0.08);
+  color: var(--bad);
+  font-size: 0.82rem;
+}
+
+.placeholder {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+}
+
+table#schema {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+#schema th,
+#schema td {
+  padding: 5px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+#schema th {
+  color: var(--fg-dim);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+#schema th.sortable {
+  cursor: pointer;
+}
+
+#schema th.sortable:hover {
+  color: var(--fg);
+}
+
+#schema th.sorted {
+  color: var(--accent);
+}
+
+#schema th.num,
+#schema td.num {
+  text-align: right;
+}
+
+#schema tbody tr {
+  border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+}
+
+#schema tbody tr.schema-row {
+  cursor: pointer;
+}
+
+#schema tbody tr.schema-row:hover {
+  background: var(--bg-raised);
+}
+
+/* Bloat severity tiers: same thresholds as the TUI (red > 50% & 10 MiB,
+   yellow > 30% & 1 MiB); is_na rows are dimmed — the `~?` marker rules. */
+#schema tr.bloat-yellow {
+  background: rgba(255, 183, 77, 0.07);
+}
+
+#schema tr.bloat-yellow td:first-child {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+#schema tr.bloat-red {
+  background: rgba(244, 112, 103, 0.1);
+}
+
+#schema tr.bloat-red td:first-child {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+#schema tr.bloat-na {
+  color: var(--fg-dim);
+}
+
+#schema tr.schema-detail td {
+  white-space: pre-line;
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+  padding: 6px 8px 10px 28px;
+  background: var(--bg-raised);
+}
+
 /* ── token overlay ──────────────────────────────────────────────────── */
 
 /* author `display: flex` would defeat the `hidden` attribute's UA style */

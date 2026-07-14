@@ -6,6 +6,7 @@ import type { DbSnapshot, PollerStatus } from "./types";
 import { renderVitals } from "./vitals";
 import { HistoryChart } from "./chart";
 import { ActivityTable } from "./table";
+import { SchemaLens } from "./schema";
 import {
   clearToken,
   openStream,
@@ -32,6 +33,28 @@ const tokenError = el<HTMLParagraphElement>("token-error");
 const chart = new HistoryChart(el<HTMLDivElement>("chart"));
 const table = new ActivityTable(el<HTMLTableElement>("activity"));
 const vitalsContainer = el<HTMLElement>("vitals");
+const schemaLens = new SchemaLens(
+  el<HTMLTableElement>("schema"),
+  el<HTMLParagraphElement>("schema-staleness"),
+  el<HTMLParagraphElement>("schema-warning"),
+  el<HTMLParagraphElement>("schema-placeholder"),
+);
+
+// Tab switcher: vitals cards + chart stay visible on both tabs; only the
+// bottom panel (Activity table vs Schema table) swaps.
+const tabs: Array<[HTMLButtonElement, HTMLElement]> = [
+  [el<HTMLButtonElement>("tab-activity"), el<HTMLElement>("activity-panel")],
+  [el<HTMLButtonElement>("tab-schema"), el<HTMLElement>("schema-panel")],
+];
+for (const [button] of tabs) {
+  button.addEventListener("click", () => {
+    for (const [other, panel] of tabs) {
+      const selected = other === button;
+      other.setAttribute("aria-selected", String(selected));
+      panel.hidden = !selected;
+    }
+  });
+}
 
 let stream: StreamHandle | null = null;
 
@@ -57,6 +80,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   renderVitals(vitalsContainer, snapshot.vitals);
   chart.update(snapshot.history);
   table.update(snapshot.activity, snapshot.locks);
+  schemaLens.update(snapshot.schema, snapshot.vitals.database);
   const v = snapshot.vitals;
   serverInfo.textContent = `PG ${v.server_version} · ${v.connections_total}/${v.max_connections} conns`;
 }
