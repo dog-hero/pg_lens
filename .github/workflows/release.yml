@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN: pg_lens_tui
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build (Linux musl)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # pip package bundles the zig compiler (per cargo-zigbuild README)
+      - name: Install cargo-zigbuild
+        run: pip install cargo-zigbuild
+      - name: Build
+        run: cargo zigbuild --release -p pg_lens_tui --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -euo pipefail
+          pkg="pg_lens-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$pkg"
+          cp "target/${{ matrix.target }}/release/${BIN}" "$pkg/"
+          cp README.md LICENSE "$pkg/"
+          tar czf "$pkg.tar.gz" "$pkg"
+          shasum -a 256 "$pkg.tar.gz" > "$pkg.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pg_lens-${{ matrix.target }}
+          path: |
+            pg_lens-*.tar.gz
+            pg_lens-*.tar.gz.sha256
+
+  build-macos:
+    name: Build (macOS)
+    runs-on: macos-14
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release -p pg_lens_tui --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -euo pipefail
+          pkg="pg_lens-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$pkg"
+          cp "target/${{ matrix.target }}/release/${BIN}" "$pkg/"
+          cp README.md LICENSE "$pkg/"
+          tar czf "$pkg.tar.gz" "$pkg"
+          shasum -a 256 "$pkg.tar.gz" > "$pkg.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pg_lens-${{ matrix.target }}
+          path: |
+            pg_lens-*.tar.gz
+            pg_lens-*.tar.gz.sha256
+
+  release:
+    name: Publish GitHub release
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
