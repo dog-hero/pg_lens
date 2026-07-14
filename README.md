@@ -57,8 +57,8 @@ Gatekeeper will refuse to run the unsigned binary:
 
 ```sh
 # macOS (Apple Silicon)
-curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.2.0/pg_lens-v0.2.0-aarch64-apple-darwin.tar.gz | tar xz
-./pg_lens-v0.2.0-aarch64-apple-darwin/pg_lens --mock
+curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.2.1/pg_lens-v0.2.1-aarch64-apple-darwin.tar.gz | tar xz
+./pg_lens-v0.2.1-aarch64-apple-darwin/pg_lens --mock
 ```
 
 If you already downloaded it with a browser and macOS says the app
@@ -144,12 +144,12 @@ and has no dependencies.
 
 ```sh
 # Debian / Ubuntu (pick amd64 or arm64)
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.2.0/pg-lens_0.2.0_amd64.deb
-sudo dpkg -i pg-lens_0.2.0_amd64.deb
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.2.1/pg-lens_0.2.1_amd64.deb
+sudo dpkg -i pg-lens_0.2.1_amd64.deb
 
 # RHEL / Fedora / SUSE (x86_64 or aarch64)
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.2.0/pg-lens-0.2.0-1.x86_64.rpm
-sudo rpm -i pg-lens-0.2.0-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.2.0-1.x86_64.rpm
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.2.1/pg-lens-0.2.1-1.x86_64.rpm
+sudo rpm -i pg-lens-0.2.1-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.2.1-1.x86_64.rpm
 ```
 
 ### From source
