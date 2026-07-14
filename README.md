@@ -71,6 +71,69 @@ xattr -d com.apple.quarantine ./pg_lens
 (The binaries are not yet signed/notarized with an Apple Developer ID —
 building from source or installing via curl avoids the prompt entirely.)
 
+### Docker (GHCR)
+
+Multi-arch images (linux/amd64 + linux/arm64) are published to
+[GHCR](https://github.com/dog-hero/pg_lens/pkgs/container/pg_lens) on
+every release. The default command serves the [Web Lens](#web-lens)
+dashboard on `0.0.0.0:8080`:
+
+```sh
+docker run --rm -p 8080:8080 \
+  -e PG_LENS_AUTH_TOKEN="$(openssl rand -hex 32)" \
+  -e PGHOST=db.internal -e PGUSER=monitor -e PGPASSWORD=secret \
+  ghcr.io/dog-hero/pg_lens
+```
+
+**`PG_LENS_AUTH_TOKEN` is required for the default command**: pg_lens
+refuses to bind a non-loopback address without a token (a container has
+to listen beyond loopback to be reachable, so the image inherits that
+gate). Without the env var the container exits immediately with
+`refusing to listen on non-loopback address 0.0.0.0:8080 without
+authentication`. With it, every `/api` route requires
+`Authorization: Bearer <token>`.
+
+Connection settings come from the standard libpq env vars (`PGHOST`,
+`PGPORT`, `PGUSER`, `PGPASSWORD`, ...) or any `pg_lens` flag appended to
+the run command. A minimal compose file:
+
+```yaml
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: pg
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  pg_lens:
+    image: ghcr.io/dog-hero/pg_lens:latest
+    ports: ["8080:8080"]
+    environment:
+      PG_LENS_AUTH_TOKEN: change-me
+      PGHOST: db
+      PGUSER: postgres
+      PGPASSWORD: pg
+    depends_on:
+      db:
+        condition: service_healthy
+```
+
+The entrypoint is the `pg_lens` binary itself, so any arguments replace
+the default `serve` command — the TUI works too:
+
+```sh
+docker run -it --rm ghcr.io/dog-hero/pg_lens tui \
+  --dsn "host=db.internal user=monitor password=secret"
+```
+
+The image runs as `nobody` (uid 65534) on Alpine. `sh` is present, so
+the [services file](#services-file)'s `password_cmd` works — mount the
+file readable by uid 65534 and pass
+`--services-file /path/to/services.toml --service <name>`.
+
 ### From source
 
 Requires Rust (edition 2024, tested with cargo 1.93):

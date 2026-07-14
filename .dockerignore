@@ -1,0 +1,14 @@
+# Build artifacts — stage 1 rebuilds the frontend, stage 2 rebuilds the crates.
+target
+target-musl-amd64
+target-musl-arm64
+crates/pg_lens_web/frontend/node_modules
+crates/pg_lens_web/frontend/dist
+
+# Not needed inside the image build context.
+.git
+.github
+.claude
+scripts
+*.md
+!README.md
