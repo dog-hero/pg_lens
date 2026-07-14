@@ -9,6 +9,11 @@ Usage:
   e2e_pty_live.py --dsn "host=localhost port=54316 user=postgres password=pg" \
       [--tag pg16] [--expect-header "PG 16"] [--expect-micro pg_sleep] \
       [--expect-tps-move] [--resilience-container pglens_pg16]
+
+Without --dsn the binary is launched bare, resolving the connection from the
+inherited environment (PGHOST/PGPORT/PGUSER/PGPASSWORD..., Fase C1):
+  PGHOST=localhost PGPORT=54316 PGUSER=postgres PGPASSWORD=pg \
+      e2e_pty_live.py --tag env_only --expect-header "PG 16"
 """
 import argparse
 import fcntl
@@ -27,7 +32,9 @@ from e2e_pty import BIN, COLS, ROWS, Screen  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dsn", required=True)
+    ap.add_argument("--dsn", default=None,
+                    help="connection string; omit to exercise env-var "
+                         "resolution (PGHOST etc. inherited from this shell)")
     ap.add_argument("--tag", default="live", help="prefix for /tmp snapshot files")
     ap.add_argument("--expect-header", default=None,
                     help="substring expected in the header, e.g. 'PG 16'")
@@ -48,7 +55,8 @@ def main():
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     env = dict(os.environ, TERM="xterm-256color")
-    proc = subprocess.Popen([BIN, "--dsn", args.dsn], stdin=slave, stdout=slave,
+    cmd = [BIN] + (["--dsn", args.dsn] if args.dsn else [])
+    proc = subprocess.Popen(cmd, stdin=slave, stdout=slave,
                             stderr=slave, env=env, close_fds=True)
     os.close(slave)
     screen = Screen()

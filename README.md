@@ -77,13 +77,42 @@ pg_lens_tui --mock          # built-in mock data (dev/demo mode)
 
 | Flag / env | Meaning |
 |---|---|
-| `--dsn <DSN>` | Connection string: `key=value` DSN or `postgres://` URL. Also read from the `PG_LENS_DSN` env var. Default: `host=localhost user=postgres` |
+| `--dsn <DSN>` | Connection string: `key=value` DSN or `postgres://` URL. Also read from the `PG_LENS_DSN` env var. Optional — see [Connecting](#connecting) |
 | `--interval <secs>` | Poll interval in seconds (minimum 0.5). Default: 2 |
 | `--mock` | Use built-in mock data instead of a real database |
 
 > **Tip:** for production monitoring, use a read-only role granted the
 > [`pg_monitor`](https://www.postgresql.org/docs/current/predefined-roles.html)
 > predefined role in the DSN.
+
+### Connecting
+
+`pg_lens` resolves the connection the way `psql` does: any field the
+`--dsn` sets wins; anything it leaves out falls back to the standard
+[libpq environment variables](https://www.postgresql.org/docs/current/libpq-envars.html);
+whatever is still missing gets the defaults `host=localhost user=postgres`.
+
+```sh
+# no --dsn at all — pure environment:
+PGHOST=db.internal PGPORT=5432 PGUSER=pg_monitor_ro PGPASSWORD=... pg_lens_tui
+
+# mix and match — the DSN pins the host, the env supplies the password:
+PGPASSWORD=... pg_lens_tui --dsn "host=db.internal user=pg_monitor_ro"
+```
+
+| Env var | Maps to | Notes |
+|---|---|---|
+| `PGHOST` | `host` | hostname or Unix-socket directory |
+| `PGPORT` | `port` | must be a valid TCP port |
+| `PGDATABASE` | `dbname` | |
+| `PGUSER` | `user` | default: `postgres` |
+| `PGPASSWORD` | `password` | never displayed or logged |
+| `PGAPPNAME` | `application_name` | |
+| `PGCONNECT_TIMEOUT` | connect timeout | whole seconds; `0` = wait indefinitely |
+
+**Precedence (highest first):** `--dsn` field → env var → default
+(`host=localhost`, `user=postgres`). Empty env values count as unset. The
+header shows the resolved `user@host` — the password never appears anywhere.
 
 ### Keybindings
 

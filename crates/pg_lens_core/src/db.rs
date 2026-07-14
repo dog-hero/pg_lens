@@ -5,15 +5,19 @@
 //! it into a `PollerStatus::Error`.
 
 use tokio::task::JoinHandle;
-use tokio_postgres::{Client, NoTls, Row};
+use tokio_postgres::{Client, Config, NoTls, Row};
 
 use crate::models::{ActivityRow, LockRow};
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
 /// the `Connection` onto its own task: it performs the actual I/O, and no
 /// query completes unless it is polled concurrently.
-pub async fn connect(dsn: &str) -> Result<(Client, JoinHandle<()>), tokio_postgres::Error> {
-    let (client, connection) = tokio_postgres::connect(dsn, NoTls).await?;
+///
+/// Takes a resolved [`Config`] (see [`crate::settings::resolve`]) rather
+/// than a DSN string, so passwords resolved from the environment are never
+/// re-interpolated into text.
+pub async fn connect(config: &Config) -> Result<(Client, JoinHandle<()>), tokio_postgres::Error> {
+    let (client, connection) = config.connect(NoTls).await?;
     let handle = tokio::spawn(async move {
         // A connection error also surfaces as an error on the Client side,
         // where the poller reports it through PollerStatus — nothing to do

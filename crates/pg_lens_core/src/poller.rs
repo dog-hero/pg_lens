@@ -50,7 +50,8 @@ async fn wait_interval(interval_rx: &mut watch::Receiver<Duration>) {
     }
 }
 
-/// Spawns the real poller: connect to `dsn`, detect the server version, pick
+/// Spawns the real poller: connect using `config`, detect the server
+/// version, pick
 /// the matching [`queries::QuerySet`], prepare the statements **once**, then
 /// publish one [`DbSnapshot`] per poll. The cadence is read live from
 /// `interval_rx` before every sleep.
@@ -66,17 +67,17 @@ async fn wait_interval(interval_rx: &mut watch::Receiver<Duration>) {
 ///
 /// Must be called from within a tokio runtime (it calls `tokio::spawn`).
 pub fn spawn(
-    dsn: String,
+    config: tokio_postgres::Config,
     interval_rx: watch::Receiver<Duration>,
 ) -> watch::Receiver<Arc<DbSnapshot>> {
     let (tx, rx) = watch::channel(Arc::new(DbSnapshot::connecting()));
-    tokio::spawn(run(dsn, interval_rx, tx));
+    tokio::spawn(run(config, interval_rx, tx));
     rx
 }
 
 /// Outer reconnect loop: one [`session`] per connection, backoff in between.
 async fn run(
-    dsn: String,
+    config: tokio_postgres::Config,
     mut interval_rx: watch::Receiver<Duration>,
     tx: watch::Sender<Arc<DbSnapshot>>,
 ) {
@@ -85,7 +86,7 @@ async fn run(
     let mut history = SnapshotHistory::default();
     loop {
         let mut polled_ok = false;
-        match session(&dsn, &mut interval_rx, &tx, &mut history, &mut polled_ok).await {
+        match session(&config, &mut interval_rx, &tx, &mut history, &mut polled_ok).await {
             SessionEnd::Closed => return,
             SessionEnd::Error(msg) => {
                 if polled_ok {
@@ -114,13 +115,13 @@ enum SessionEnd {
 /// One connection worth of polling; ensures the spawned `Connection` task is
 /// stopped on every exit path.
 async fn session(
-    dsn: &str,
+    config: &tokio_postgres::Config,
     interval_rx: &mut watch::Receiver<Duration>,
     tx: &watch::Sender<Arc<DbSnapshot>>,
     history: &mut SnapshotHistory,
     polled_ok: &mut bool,
 ) -> SessionEnd {
-    let (client, conn_handle) = match db::connect(dsn).await {
+    let (client, conn_handle) = match db::connect(config).await {
         Ok(pair) => pair,
         Err(e) => return SessionEnd::Error(format!("connect failed: {e}")),
     };
@@ -451,15 +452,15 @@ mod tests {
             .expect("sender must still be alive");
     }
 
-    /// An unreachable DSN must not panic: the real poller publishes an error
-    /// snapshot (keeping the channel alive) instead.
+    /// An unreachable server must not panic: the real poller publishes an
+    /// error snapshot (keeping the channel alive) instead.
     #[tokio::test]
     async fn spawn_real_reports_connect_errors_via_status() {
         // Port 1 on localhost: connection refused, immediately.
-        let mut rx = spawn(
-            "host=127.0.0.1 port=1 user=nobody connect_timeout=1".to_string(),
-            interval_rx(50),
-        );
+        let config: tokio_postgres::Config = "host=127.0.0.1 port=1 user=nobody connect_timeout=1"
+            .parse()
+            .expect("test DSN must parse");
+        let mut rx = spawn(config, interval_rx(50));
 
         assert!(matches!(rx.borrow().status, PollerStatus::Connecting));
 

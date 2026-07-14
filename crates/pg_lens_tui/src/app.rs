@@ -99,9 +99,9 @@ pub struct App {
     /// follows it), `Enter`/`Esc` close the panel, `Tab` closes it and
     /// switches lens, `q` quits as always.
     pub detail_open: bool,
-    /// Host shown in the header (`PG 16.3 @ host`); parsed from the DSN in
-    /// `main.rs` — the full DSN (which may carry a password) never reaches
-    /// the view.
+    /// Connection label shown in the header (`PG 16.3 @ user@host`); the
+    /// core's `ConnLabel` (resolved in `main.rs`) — the full DSN/`Config`
+    /// (which may carry a password) never reaches the view.
     pub host: String,
     /// Desired poll interval. The main loop mirrors this into the poller's
     /// `watch::Receiver<Duration>` after every update, so `+`/`-` take
