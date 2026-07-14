@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use pg_lens_core::DbSnapshot;
+use pg_lens_core::{DbSnapshot, PollerStatus};
 use ratatui::widgets::TableState;
 
 /// Default poll interval; `+`/`-` move it in [`REFRESH_STEP`] steps.
@@ -178,6 +178,14 @@ pub struct App {
     /// When the last `Action::Snapshot` arrived — drives the staleness
     /// indicator in the statusbar. `None` until the first snapshot.
     pub last_snapshot_at: Option<Instant>,
+    /// When the first *Ok* snapshot arrived — `None` means real data has
+    /// never been on screen, which is exactly the condition for the
+    /// full-screen connection splash (`ui/splash.rs`). Once set it never
+    /// clears: later disconnects keep the banner-over-last-data behavior.
+    pub first_data_at: Option<Instant>,
+    /// Counts `Action::Tick` (250ms cadence) — drives the splash spinner
+    /// animation. Mutated only in [`update`], like everything else.
+    pub tick_count: u64,
     pub should_quit: bool,
 }
 
@@ -197,6 +205,8 @@ impl App {
             host: "localhost".to_string(),
             refresh_interval: DEFAULT_REFRESH,
             last_snapshot_at: None,
+            first_data_at: None,
+            tick_count: 0,
             should_quit: false,
         };
         resort(&mut app);
@@ -220,6 +230,14 @@ impl App {
         self.snapshot.activity.get(snapshot_idx)
     }
 
+    /// Whether the full-screen connection splash renders instead of the
+    /// dashboard: true only while no Ok snapshot has EVER arrived AND the
+    /// poller is not currently Ok (pre-first-data Connecting/Error). After
+    /// the first real data, errors fall back to the classic banner.
+    pub fn show_splash(&self) -> bool {
+        self.first_data_at.is_none() && !matches!(self.snapshot.status, PollerStatus::Ok)
+    }
+
     /// The Schema Lens table currently under the cursor, in display order.
     pub fn selected_table(&self) -> Option<&pg_lens_core::TableStatRow> {
         let schema = self.snapshot.schema.as_deref()?;
@@ -236,13 +254,19 @@ pub fn update(app: &mut App, action: Action) {
         Action::Snapshot(snapshot) => {
             app.snapshot = snapshot;
             app.last_snapshot_at = Some(Instant::now());
+            // First Ok snapshot ever: leave the splash for the dashboard,
+            // permanently (see `App::show_splash`).
+            if app.first_data_at.is_none() && matches!(app.snapshot.status, PollerStatus::Ok) {
+                app.first_data_at = Some(Instant::now());
+            }
             resort(app);
             resort_schema(app);
             clamp_selection(app);
         }
         // The next draw reads the new terminal size from the frame itself.
         Action::Resize => {}
-        Action::Tick => {}
+        // Only effect: advance the splash spinner (and force a redraw).
+        Action::Tick => app.tick_count = app.tick_count.wrapping_add(1),
         Action::Quit => app.should_quit = true,
     }
 }
@@ -721,6 +745,47 @@ mod tests {
             update(&mut app, press(KeyCode::Char('+')));
         }
         assert_eq!(app.refresh_interval, REFRESH_MAX);
+    }
+
+    #[test]
+    fn tick_advances_the_spinner_counter_and_nothing_else() {
+        let mut app = App::new();
+        assert_eq!(app.tick_count, 0);
+        update(&mut app, Action::Tick);
+        update(&mut app, Action::Tick);
+        assert_eq!(app.tick_count, 2);
+        assert!(!app.should_quit);
+        assert!(app.first_data_at.is_none(), "ticks never count as data");
+    }
+
+    #[test]
+    fn splash_shows_until_the_first_ok_snapshot_then_never_again() {
+        let mut app = App::new();
+        // App::new seeds an Ok mock snapshot, but pre-update state in real
+        // mode is Connecting: simulate the real pipeline.
+        update(
+            &mut app,
+            Action::Snapshot(Arc::new(DbSnapshot::connecting())),
+        );
+        assert!(app.show_splash(), "Connecting + no data ever = splash");
+
+        // Error while still pre-first-data: stay on the splash (error box).
+        let mut failed = DbSnapshot::connecting();
+        failed.status = pg_lens_core::PollerStatus::Error("no pg_hba.conf entry".into());
+        update(&mut app, Action::Snapshot(Arc::new(failed)));
+        assert!(app.show_splash(), "pre-first-data errors stay on splash");
+        assert!(app.first_data_at.is_none());
+
+        // First Ok snapshot: dashboard, permanently.
+        update(&mut app, Action::Snapshot(Arc::new(DbSnapshot::mock())));
+        assert!(!app.show_splash());
+        assert!(app.first_data_at.is_some());
+
+        // A later disconnect does NOT bring the splash back (banner instead).
+        let mut lost = DbSnapshot::mock();
+        lost.status = pg_lens_core::PollerStatus::Error("connection refused".into());
+        update(&mut app, Action::Snapshot(Arc::new(lost)));
+        assert!(!app.show_splash(), "post-first-data errors use the banner");
     }
 
     #[test]

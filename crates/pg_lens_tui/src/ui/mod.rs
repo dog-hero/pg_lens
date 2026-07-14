@@ -4,13 +4,16 @@ pub mod format;
 mod macro_lens;
 mod micro_lens;
 mod schema_lens;
+mod splash;
+mod sql;
+mod style;
 
 use pg_lens_core::PollerStatus;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
-    text::Line,
+    text::{Line, Span},
     widgets::{Paragraph, Tabs},
 };
 
@@ -18,7 +21,16 @@ use crate::app::{App, Tab};
 
 /// Root layout: header / tabs / [status banner] / body / statusbar. The
 /// banner row collapses to zero height while the poller is healthy.
+///
+/// Exception: while no real data has EVER arrived (`App::show_splash`), a
+/// full-screen connection splash renders instead of the dashboard — empty
+/// chrome with zeroed vitals looks broken. After the first Ok snapshot the
+/// dashboard takes over permanently (disconnects show the banner, as ever).
 pub fn draw(app: &mut App, frame: &mut Frame) {
+    if app.show_splash() {
+        splash::draw(app, frame);
+        return;
+    }
     let banner_height = match app.snapshot.status {
         PollerStatus::Ok => 0,
         PollerStatus::Connecting | PollerStatus::Error(_) => 1,
@@ -92,32 +104,56 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     // Row counter and sort label follow the active lens (the Schema Lens
     // keeps its own selection and sort mode); `R: recollect` is a Schema
     // Lens hint (the key itself works from any lens).
-    let (selected, len, sort_label, extra) = match app.active_tab {
+    let (selected, len, sort_label, schema_extra) = match app.active_tab {
         Tab::SchemaLens => (
             app.schema_table_state.selected(),
             app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len()),
             app.schema_sort_mode.label(),
-            " \u{2502} R: recollect",
+            true,
         ),
         _ => (
             app.table_state.selected(),
             app.snapshot.activity.len(),
             app.sort_mode.label(),
-            "",
+            false,
         ),
     };
     let row = match (selected, len) {
         (Some(i), len) if len > 0 => format!("{}/{len}", i + 1),
         _ => "-".to_string(),
     };
-    let keys = Line::from(format!(
-        " q/Esc: quit \u{2502} Tab: switch lens \u{2502} j/k: row {row} \u{2502} Enter: \
-         detail \u{2502} s: sort={sort_label}{extra} \u{2502} +/-: refresh={:.1}s \u{2502} \
-         data: {staleness}",
-        app.refresh_interval.as_secs_f64(),
-    ))
-    .dim();
-    frame.render_widget(Paragraph::new(keys), area);
+    // Keybinding letters in accent, descriptions dim (style::hint), the
+    // separators dim — same text as ever, only the styling changed.
+    let sep = Span::styled(" \u{2502} ", style::label_style());
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
+    let push_hint = |spans: &mut Vec<Span<'static>>, key: &str, desc: String, lead: bool| {
+        if lead {
+            spans.push(sep.clone());
+        }
+        let [k, d] = style::hint(key, desc);
+        spans.push(k);
+        spans.push(d);
+    };
+    push_hint(&mut spans, "q/Esc", ": quit".into(), false);
+    push_hint(&mut spans, "Tab", ": switch lens".into(), true);
+    push_hint(&mut spans, "j/k", format!(": row {row}"), true);
+    push_hint(&mut spans, "Enter", ": detail".into(), true);
+    push_hint(&mut spans, "s", format!(": sort={sort_label}"), true);
+    if schema_extra {
+        push_hint(&mut spans, "R", ": recollect".into(), true);
+    }
+    push_hint(
+        &mut spans,
+        "+/-",
+        format!(": refresh={:.1}s", app.refresh_interval.as_secs_f64()),
+        true,
+    );
+    spans.push(sep.clone());
+    spans.push(Span::styled(
+        format!("data: {staleness}"),
+        style::label_style(),
+    ));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 #[cfg(test)]
@@ -238,6 +274,13 @@ mod tests {
         use std::sync::Arc;
 
         let mut app = App::new();
+        // Real data arrived earlier (splash-splash gate: post-first-data
+        // errors must render the banner over the dashboard, never the
+        // splash) — simulate it through the real update path.
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Snapshot(Arc::new(pg_lens_core::DbSnapshot::mock())),
+        );
         let mut snap = app.snapshot.as_ref().clone();
         snap.status = PollerStatus::Error("connection refused".to_string());
         app.snapshot = Arc::new(snap);
@@ -247,6 +290,92 @@ mod tests {
         assert!(screen.contains("showing last known data"));
         // Last data still rendered underneath the banner.
         assert!(screen.contains("Connections"));
+    }
+
+    /// Pre-first-data Connecting: the splash replaces the dashboard.
+    #[test]
+    fn splash_renders_while_connecting_before_any_data() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Snapshot(Arc::new(pg_lens_core::DbSnapshot::connecting())),
+        );
+        app.host = "postgres@db.internal:5432".to_string();
+        let screen = render(&mut app);
+        assert!(screen.contains("p g _ l e n s"), "wordmark: {screen}");
+        assert!(screen.contains("connecting to"));
+        assert!(screen.contains("postgres@db.internal:5432"));
+        assert!(screen.contains("waiting for the first snapshot"));
+        // Dashboard chrome must NOT render underneath.
+        assert!(!screen.contains("Connections"));
+        assert!(!screen.contains("Macro Lens"));
+    }
+
+    /// Pre-first-data Error: splash stays (poller retries with backoff),
+    /// with the wrapped error text in a box plus the retry hint.
+    #[test]
+    fn splash_shows_wrapped_error_and_retry_hint_before_any_data() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        let mut snap = pg_lens_core::DbSnapshot::connecting();
+        // Long password_cmd-style stderr: must word-wrap inside the box.
+        let msg = "password_cmd failed: `op read op://infra/pg/password` exited with status 1: \
+                   [ERROR] 2026/07/14 could not resolve item op://infra/pg/password in vault";
+        snap.status = PollerStatus::Error(msg.to_string());
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
+
+        let screen = render(&mut app);
+        assert!(screen.contains("connection error"));
+        assert!(screen.contains("password_cmd failed"));
+        // The tail survived the wrap (nothing overflowed off-screen).
+        assert!(screen.contains("in vault"), "wrapped tail visible: {screen}");
+        assert!(screen.contains("connection failed"));
+        assert!(screen.contains("retrying automatically \u{b7} q/Esc: quit"));
+        assert!(!screen.contains("Macro Lens"), "no dashboard underneath");
+    }
+
+    /// The spinner glyph changes between ticks (animation proof at the
+    /// TestBackend level; the PTY run proves it end-to-end).
+    #[test]
+    fn splash_spinner_advances_on_tick() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Snapshot(Arc::new(pg_lens_core::DbSnapshot::connecting())),
+        );
+        let before = render(&mut app);
+        crate::app::update(&mut app, crate::app::Action::Tick);
+        let after = render(&mut app);
+        assert_ne!(before, after, "tick must advance the spinner frame");
+    }
+
+    /// 80x24: splash renders without panicking, wordmark + hint intact.
+    #[test]
+    fn splash_fits_a_small_terminal() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        let mut snap = pg_lens_core::DbSnapshot::connecting();
+        snap.status = PollerStatus::Error("connection refused".to_string());
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("p g _ l e n s"));
+        assert!(screen.contains("connection refused"));
     }
 
     #[test]

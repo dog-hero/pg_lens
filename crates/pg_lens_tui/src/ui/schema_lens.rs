@@ -29,7 +29,7 @@ use ratatui::{
 };
 
 use crate::app::{App, find_table_bloat};
-use crate::ui::format;
+use crate::ui::{format, style};
 
 /// Fixed widths of every column except the flexible Table one, in order:
 /// severity, Size, Live, Dead, Bloat%, Bloat, Last AV, Seq/Idx.
@@ -247,39 +247,52 @@ fn draw_detail(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
         table.schema, table.name
     );
 
+    // Dim key, bold value (style::kv) — consistent with the Macro vitals.
     let mut lines = vec![
-        Line::from(format!(
-            "size: total {} \u{b7} table {} \u{b7} indexes {}",
-            format::human_bytes(table.total_bytes),
-            format::human_bytes(table.table_bytes),
-            format::human_bytes(table.index_bytes),
-        )),
-        Line::from(format!(
-            "tuples: live {} \u{b7} dead {} \u{b7} mod since analyze {} \u{b7} ins since vacuum {}",
-            format::human_count(table.n_live_tup),
-            format::human_count(table.n_dead_tup),
-            format::human_count(table.n_mod_since_analyze),
-            format::human_count(table.n_ins_since_vacuum),
-        )),
-        Line::from(format!(
-            "vacuum:  manual {} (x{}) \u{b7} auto {} (x{})",
-            format::human_ago(table.last_vacuum_epoch_secs, now),
-            table.vacuum_count,
-            format::human_ago(table.last_autovacuum_epoch_secs, now),
-            table.autovacuum_count,
-        )),
-        Line::from(format!(
-            "analyze: manual {} (x{}) \u{b7} auto {} (x{})",
-            format::human_ago(table.last_analyze_epoch_secs, now),
-            table.analyze_count,
-            format::human_ago(table.last_autoanalyze_epoch_secs, now),
-            table.autoanalyze_count,
-        )),
-        Line::from(format!(
-            "estimated table bloat: {}",
+        style::kv(
+            "size: ",
+            format!(
+                "total {} \u{b7} table {} \u{b7} indexes {}",
+                format::human_bytes(table.total_bytes),
+                format::human_bytes(table.table_bytes),
+                format::human_bytes(table.index_bytes),
+            ),
+        ),
+        style::kv(
+            "tuples: ",
+            format!(
+                "live {} \u{b7} dead {} \u{b7} mod since analyze {} \u{b7} ins since vacuum {}",
+                format::human_count(table.n_live_tup),
+                format::human_count(table.n_dead_tup),
+                format::human_count(table.n_mod_since_analyze),
+                format::human_count(table.n_ins_since_vacuum),
+            ),
+        ),
+        style::kv(
+            "vacuum:  ",
+            format!(
+                "manual {} (x{}) \u{b7} auto {} (x{})",
+                format::human_ago(table.last_vacuum_epoch_secs, now),
+                table.vacuum_count,
+                format::human_ago(table.last_autovacuum_epoch_secs, now),
+                table.autovacuum_count,
+            ),
+        ),
+        style::kv(
+            "analyze: ",
+            format!(
+                "manual {} (x{}) \u{b7} auto {} (x{})",
+                format::human_ago(table.last_analyze_epoch_secs, now),
+                table.analyze_count,
+                format::human_ago(table.last_autoanalyze_epoch_secs, now),
+                table.autoanalyze_count,
+            ),
+        ),
+        style::kv(
+            "estimated table bloat: ",
             bloat_summary(find_table_bloat(schema, table)),
-        )),
-        Line::from("indexes (estimated btree bloat):"),
+        ),
+        Line::from("indexes (estimated btree bloat):").style(style::label_style()),
     ];
 
     let mut any_index = false;

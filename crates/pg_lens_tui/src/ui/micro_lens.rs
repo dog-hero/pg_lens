@@ -17,11 +17,11 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, Clear, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap},
 };
 
 use crate::app::App;
-use crate::ui::format;
+use crate::ui::{format, sql};
 
 /// (width, spacing-follows) of every fixed column, in order. The last,
 /// flexible column (Query) takes whatever is left.
@@ -71,16 +71,27 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
             } else {
                 Style::new()
             };
-            Row::new([
-                status.to_string(),
-                row.pid.to_string(),
-                row.database.clone(),
-                row.username.clone(),
-                row.client.clone(),
-                row.state.clone(),
-                row.wait_event.clone().unwrap_or_default(),
-                format::human_duration(row.duration_secs),
-                format::truncate_with_ellipsis(&row.query, query_width),
+            // Truncate FIRST (char-safe), then tokenize the truncated text —
+            // the ellipsis lands in a default-styled span. Tinted rows
+            // (blocked red / waiting yellow) keep PLAIN text: their row fg
+            // is the severity signal, and per-span SQL colors would
+            // fragment it (documented decision — severity beats syntax).
+            let query_text = format::truncate_with_ellipsis(&row.query, query_width);
+            let query_cell = if is_blocked || is_waiting {
+                Cell::from(query_text)
+            } else {
+                Cell::from(sql::highlight_line(&query_text))
+            };
+            Row::new(vec![
+                Cell::from(status.to_string()),
+                Cell::from(row.pid.to_string()),
+                Cell::from(row.database.clone()),
+                Cell::from(row.username.clone()),
+                Cell::from(row.client.clone()),
+                Cell::from(row.state.clone()),
+                Cell::from(row.wait_event.clone().unwrap_or_default()),
+                Cell::from(format::human_duration(row.duration_secs)),
+                query_cell,
             ])
             .style(style)
         });
@@ -136,7 +147,8 @@ fn draw_detail(app: &App, frame: &mut Frame, area: Rect) {
     if let Some(wait) = &row.wait_event {
         lines.push(Line::from(format!("wait: {wait}")).style(Style::new().fg(Color::Yellow)));
     }
-    lines.push(Line::from(row.query.clone()));
+    // Full query, line by line, with SQL syntax highlighting.
+    lines.extend(sql::highlight_lines(&row.query));
 
     let panel = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
