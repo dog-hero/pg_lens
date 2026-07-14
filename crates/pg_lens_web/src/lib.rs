@@ -6,7 +6,8 @@
 //! no write/admin endpoints (Fase 6 is read-only by design).
 //!
 //! Routes:
-//! - `GET /` — placeholder page (the TypeScript frontend arrives in Fase 6b).
+//! - `GET /` + static assets — the built TypeScript frontend, embedded in
+//!   the binary via `rust-embed` (never served from disk in release).
 //! - `GET /api/snapshot` — the current snapshot as JSON.
 //! - `GET /api/stream` — Server-Sent Events: the current snapshot
 //!   immediately, then one event per poller tick. Pattern copied from the
@@ -16,8 +17,11 @@
 //! Security: when a bearer token is configured, every `/api/*` route
 //! requires `Authorization: Bearer <token>`, compared in constant time via
 //! `subtle::ConstantTimeEq` (a naive `==` short-circuits on the first
-//! differing byte, which leaks how much of a guess was right). Deciding
-//! *whether* a token is mandatory for a given bind address is
+//! differing byte, which leaks how much of a guess was right). Because the
+//! browser `EventSource` API cannot set request headers, `/api/*` also
+//! accepts `?token=<token>` as an equivalent credential (same constant-time
+//! comparison) — see [`require_auth`] for the trade-off. Deciding *whether*
+//! a token is mandatory for a given bind address is
 //! [`ensure_listen_allowed`] — the CLI must call it before binding.
 
 use std::convert::Infallible;
@@ -26,10 +30,10 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::stream::Stream;
 use pg_lens_core::DbSnapshot;
@@ -93,13 +97,30 @@ pub fn router(snapshots: watch::Receiver<Arc<DbSnapshot>>, auth_token: Option<St
         .route("/stream", get(stream))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
-        .route("/", get(index))
         .nest("/api", api)
+        // Everything that is not /api is a frontend asset (or 404). The
+        // frontend itself is public even when a token is set — it contains
+        // no data, and it is where the user *enters* the token.
+        .fallback(static_assets)
         .with_state(state)
 }
 
 /// Bearer-token gate for `/api/*`. No token configured → open (the CLI only
 /// permits that on loopback). Configured → compare in constant time.
+///
+/// Two ways to present the token:
+/// - `Authorization: Bearer <token>` — preferred; used by curl and by the
+///   frontend's `fetch` calls.
+/// - `?token=<token>` query parameter — exists **only** because the browser
+///   `EventSource` API cannot set request headers, so `/api/stream` has no
+///   other way to authenticate. Trade-off (documented in the README): a
+///   token in the URL can land in reverse-proxy access logs and browser
+///   history. Mitigations: this server never logs request URLs, the token
+///   is a revocable shared secret (rotate by restarting with a new
+///   `PG_LENS_AUTH_TOKEN`), and remote deploys are expected to sit behind
+///   TLS. The standard alternative — a session cookie minted from the
+///   bearer token — buys CSRF surface for little gain on a read-only,
+///   single-secret API.
 async fn require_auth(
     State(state): State<WebState>,
     request: axum::extract::Request,
@@ -108,15 +129,24 @@ async fn require_auth(
     let Some(expected) = &state.token else {
         return next.run(request).await;
     };
-    let presented = request
+    let header_token = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::to_owned);
+    let query_token = request
+        .uri()
+        .query()
+        .and_then(|query| {
+            form_urlencoded::parse(query.as_bytes()).find(|(key, _)| key == "token")
+        })
+        .map(|(_, value)| value.into_owned());
     // `ct_eq` on byte slices: length mismatch returns false immediately
     // (only the token's *length* can leak), equal lengths compare every
     // byte before deciding.
-    let authorized = presented
+    let authorized = header_token
+        .or(query_token)
         .map(|token| bool::from(token.as_bytes().ct_eq(expected.as_bytes())))
         .unwrap_or(false);
     if authorized {
@@ -177,20 +207,42 @@ async fn stream(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-/// `GET /` — placeholder until Fase 6b embeds the built frontend.
-async fn index() -> Html<&'static str> {
-    Html(
-        "<!doctype html>\
-         <html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <title>pg_lens</title></head><body>\
-         <h1>pg_lens web</h1>\
-         <p>The web frontend arrives in phase 6b. Until then:</p>\
-         <ul>\
-         <li><a href=\"/api/snapshot\"><code>GET /api/snapshot</code></a> — current snapshot (JSON)</li>\
-         <li><code>GET /api/stream</code> — live snapshots (Server-Sent Events)</li>\
-         </ul>\
-         </body></html>",
-    )
+/// The Vite-built frontend (`frontend/dist`), embedded at compile time.
+/// `build.rs` guarantees the folder exists with a clear error otherwise.
+/// In release builds the files live inside the binary (the Fase 6
+/// anti-pattern list forbids serving the frontend from disk in production);
+/// debug builds read the same folder from disk for fast iteration.
+#[derive(rust_embed::Embed)]
+#[folder = "frontend/dist"]
+struct Assets;
+
+/// Serves the embedded frontend: `/` → `index.html`, everything else by
+/// path. MIME types come from rust-embed's `mime-guess` metadata (the
+/// pattern shown in rust-embed's own axum example). Vite emits hashed
+/// asset filenames, so `/assets/*` can be cached forever; `index.html`
+/// (whose content references the hashes) must always revalidate.
+async fn static_assets(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    match Assets::get(path) {
+        Some(file) => {
+            let mime = file.metadata.mimetype().to_string();
+            let cache = if path.starts_with("assets/") {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::CACHE_CONTROL, cache.to_string()),
+                ],
+                file.data,
+            )
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -294,17 +346,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_accepts_token_query_param() {
+        // EventSource cannot set headers, so ?token= must be equivalent.
+        let (_tx, router) = mock_router(Some("sekret"));
+        let ok = get_response(router.clone(), "/api/snapshot?token=sekret", None).await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let wrong = get_response(router.clone(), "/api/snapshot?token=nope", None).await;
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        let stream = get_response(router, "/api/stream?token=sekret", None).await;
+        assert_eq!(stream.status(), StatusCode::OK);
+        assert_eq!(stream.headers()[header::CONTENT_TYPE], "text/event-stream");
+    }
+
+    #[tokio::test]
     async fn index_is_open_html_even_with_token() {
         let (_tx, router) = mock_router(Some("sekret"));
         let response = get_response(router, "/", None).await;
         assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .expect("ascii")
+                .starts_with("text/html")
+        );
         let body = response
             .into_body()
             .collect()
             .await
             .expect("body")
             .to_bytes();
-        assert!(String::from_utf8_lossy(&body).contains("phase 6b"));
+        let html = String::from_utf8_lossy(&body);
+        // The real Vite app: root div + hashed asset references.
+        assert!(html.contains("id=\"app\""), "app root present");
+        assert!(html.contains("/assets/"), "hashed asset links present");
+    }
+
+    #[tokio::test]
+    async fn embedded_assets_serve_with_correct_mime_types() {
+        let (_tx, router) = mock_router(None);
+        // Discover the hashed asset names from the embedded index.html.
+        let index = Assets::get("index.html").expect("index embedded");
+        let html = String::from_utf8_lossy(&index.data);
+        let js = extract_asset(&html, ".js").expect("index references a JS bundle");
+        let css = extract_asset(&html, ".css").expect("index references a CSS bundle");
+
+        let response = get_response(router.clone(), &format!("/{js}"), None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .expect("ascii")
+                .contains("javascript")
+        );
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+
+        let response = get_response(router.clone(), &format!("/{css}"), None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/css");
+
+        let missing = get_response(router, "/assets/nope.js", None).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// First `assets/…<ext>` path referenced by the built index.html.
+    fn extract_asset(html: &str, ext: &str) -> Option<String> {
+        html.match_indices("assets/").find_map(|(start, _)| {
+            let candidate = &html[start..];
+            let end = candidate.find('"')?;
+            let path = &candidate[..end];
+            path.ends_with(ext).then(|| path.to_string())
+        })
     }
 
     #[test]

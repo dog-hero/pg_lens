@@ -226,9 +226,67 @@ cargo run -p pg_lens_tui -- --dsn "host=localhost port=54316 user=postgres passw
 See [CLAUDE.md](CLAUDE.md) for architecture invariants and
 [PLAN.md](PLAN.md) for the full development plan.
 
+## Web Lens
+
+`pg_lens serve` hosts the same Macro/Micro Lens as a live web dashboard —
+vitals cards, a TPS/active-sessions chart (uPlot), and a sortable activity
+table with blocked/waiting row highlighting — streamed over Server-Sent
+Events from the same poller the TUI uses. Read-only by design: no
+cancel/terminate actions are exposed over HTTP.
+
+<!-- TODO: screenshot of the web dashboard -->
+
+### Quickstart
+
+```sh
+pg_lens serve --mock                      # demo data, http://127.0.0.1:8080
+pg_lens serve --dsn "host=... user=..."   # against a real server
+pg_lens serve --listen 127.0.0.1:9000     # different port (default 8080)
+```
+
+Open the printed address in a browser — the dashboard updates in real time
+on every poll.
+
+The frontend (Vite + TypeScript, `crates/pg_lens_web/frontend/`) is
+embedded in the binary; the built `frontend/dist/` is committed so
+`cargo build`/`cargo install` never needs Node. After changing frontend
+sources, rebuild the bundle and then the binary:
+
+```sh
+cd crates/pg_lens_web/frontend && npm ci && npm run build
+```
+
+### Authentication
+
+Binding to anything other than loopback requires a token:
+
+```sh
+PG_LENS_AUTH_TOKEN=$(openssl rand -hex 32) pg_lens serve --listen 0.0.0.0:8080
+```
+
+All `/api/*` routes then require `Authorization: Bearer <token>` — the web
+page prompts for the token on first load. Because the browser `EventSource`
+API cannot set headers, `/api/*` also accepts `?token=<token>` as an
+equivalent credential (same constant-time comparison). Trade-off: a token
+in a URL can end up in reverse-proxy access logs and browser history —
+treat it as a revocable secret, rotate it by restarting with a new value,
+and never expose the server without TLS.
+
+### Security notes
+
+- **Read-only DSN**: connect with a role granted only
+  [`pg_monitor`](https://www.postgresql.org/docs/current/predefined-roles.html)
+  (`CREATE ROLE lens LOGIN PASSWORD '...'; GRANT pg_monitor TO lens;`) —
+  the dashboard needs nothing more.
+- **TLS**: the binary does not terminate TLS; put a reverse proxy (Caddy,
+  nginx) in front for any non-localhost deployment.
+- **Default bind is `127.0.0.1`** — exposure is an explicit operator
+  decision, and refused without `PG_LENS_AUTH_TOKEN`.
+- The DSN/password never appears in any endpoint, log line, or JSON payload.
+
 ## Roadmap
 
-- [ ] **Web Lens** — `pg_lens serve`: an axum-based web dashboard consuming
+- [x] **Web Lens** — `pg_lens serve`: an axum-based web dashboard consuming
       the same watch channel (SSE streaming, TypeScript + uPlot frontend
       embedded in the binary, token auth, read-only).
 - [ ] Admin actions (`pg_cancel_backend` / `pg_terminate_backend`)

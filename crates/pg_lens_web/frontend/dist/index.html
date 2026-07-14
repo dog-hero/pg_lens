@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>pg_lens</title>
+    <script type="module" crossorigin src="/assets/index-BX51T3k9.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-B0_bnRtb.css">
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar">
+        <span class="brand">pg_lens</span>
+        <span id="server-info" class="server-info"></span>
+        <span id="conn-state" class="conn-state" data-state="connecting">connecting…</span>
+      </header>
+      <div id="status-banner" hidden></div>
+      <main>
+        <section id="vitals" class="cards"></section>
+        <section class="panel">
+          <h2>TPS &amp; active sessions</h2>
+          <div id="chart"></div>
+        </section>
+        <section class="panel">
+          <h2>Activity</h2>
+          <div class="table-wrap">
+            <table id="activity">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+      <div id="token-overlay" hidden>
+        <form id="token-form">
+          <h2>Authentication required</h2>
+          <p>
+            This server was started with <code>PG_LENS_AUTH_TOKEN</code>.
+            Paste the token to connect.
+          </p>
+          <input
+            id="token-input"
+            type="password"
+            autocomplete="off"
+            placeholder="bearer token"
+          />
+          <button type="submit">Connect</button>
+          <p id="token-error" class="token-error" hidden>Invalid token.</p>
+        </form>
+      </div>
+    </div>
+  </body>
+</html>

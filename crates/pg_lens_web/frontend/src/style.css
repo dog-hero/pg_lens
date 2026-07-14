@@ -1,0 +1,318 @@
+/* pg_lens dark theme — minimal, no framework. Palette loosely mirrors the
+   TUI: dark slate background, cyan accents, red/yellow row tints. */
+
+:root {
+  --bg: #0d1117;
+  --bg-panel: #161b22;
+  --bg-raised: #1c2129;
+  --border: #30363d;
+  --fg: #e6edf3;
+  --fg-dim: #8b949e;
+  --accent: #4fc3f7;
+  --warn: #ffb74d;
+  --bad: #f47067;
+  font-size: 15px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+#app {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 16px 32px;
+}
+
+/* ── header ─────────────────────────────────────────────────────────── */
+
+#topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: var(--accent);
+}
+
+.server-info {
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+}
+
+.conn-state {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--fg-dim);
+}
+
+.conn-state[data-state="live"] {
+  color: #7ee787;
+}
+
+.conn-state[data-state="reconnecting"] {
+  color: var(--warn);
+}
+
+/* ── poller status banner ───────────────────────────────────────────── */
+
+#status-banner {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  background: rgba(255, 183, 77, 0.08);
+  color: var(--warn);
+  font-size: 0.85rem;
+}
+
+/* ── vitals cards ───────────────────────────────────────────────────── */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.card-label {
+  color: var(--fg-dim);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.card-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-top: 4px;
+  white-space: nowrap;
+}
+
+.card.warn .card-value {
+  color: var(--warn);
+}
+
+.card.bad .card-value {
+  color: var(--bad);
+}
+
+.card-detail {
+  color: var(--fg-dim);
+  font-size: 0.75rem;
+  margin-top: 6px;
+}
+
+.meter {
+  height: 4px;
+  margin-top: 8px;
+  border-radius: 2px;
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
+.card.warn .meter-fill {
+  background: var(--warn);
+}
+
+.card.bad .meter-fill {
+  background: var(--bad);
+}
+
+/* ── panels ─────────────────────────────────────────────────────────── */
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+
+.panel h2 {
+  margin: 0 0 10px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+}
+
+/* uPlot dark-theme tweaks */
+#chart .u-legend {
+  color: var(--fg-dim);
+  font-size: 0.75rem;
+}
+
+/* ── activity table ─────────────────────────────────────────────────── */
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table#activity {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+#activity th,
+#activity td {
+  padding: 5px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+#activity th {
+  color: var(--fg-dim);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+#activity th.sortable {
+  cursor: pointer;
+}
+
+#activity th.sortable:hover {
+  color: var(--fg);
+}
+
+#activity th.sorted {
+  color: var(--accent);
+}
+
+#activity th.num,
+#activity td.num {
+  text-align: right;
+}
+
+#activity tbody tr {
+  border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+}
+
+#activity tbody tr:hover {
+  background: var(--bg-raised);
+}
+
+#activity td.query {
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-dim);
+}
+
+/* waiting (W): yellow tint; blocked (B): red tint — red wins, as in the TUI */
+#activity tr.waiting {
+  background: rgba(255, 183, 77, 0.07);
+}
+
+#activity tr.waiting td:first-child {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+#activity tr.blocked {
+  background: rgba(244, 112, 103, 0.1);
+}
+
+#activity tr.blocked td:first-child {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+/* ── token overlay ──────────────────────────────────────────────────── */
+
+/* author `display: flex` would defeat the `hidden` attribute's UA style */
+#token-overlay[hidden] {
+  display: none;
+}
+
+#token-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(13, 17, 23, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+#token-form {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px;
+  width: min(420px, 90vw);
+}
+
+#token-form h2 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+#token-form p {
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+}
+
+#token-input {
+  width: 100%;
+  padding: 8px 10px;
+  margin: 8px 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+}
+
+#token-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#token-form button {
+  padding: 8px 16px;
+  background: var(--accent);
+  color: #06232f;
+  border: none;
+  border-radius: 6px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#token-form button:hover {
+  filter: brightness(1.1);
+}
+
+.token-error {
+  color: var(--bad) !important;
+}
