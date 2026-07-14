@@ -469,6 +469,10 @@ frontend de disco em produção (embutir); nunca logar o DSN.
 
 ---
 
+## Planos complementares
+- **Conexão avançada** (env vars libpq, services file com `password_cmd`):
+  plano detalhado em [PLAN_CONNECTIONS.md](PLAN_CONNECTIONS.md).
+
 ## Fora de escopo (backlog Fase 7+)
 - Ações administrativas (`pg_cancel_backend`/`pg_terminate_backend` — SQL já
   mapeado no pg_activity; na web exigiria auth mais forte + auditoria),
