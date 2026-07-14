@@ -41,7 +41,7 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 
 ```sh
 # macOS — cask (prebuilt binary, no Xcode/CLT required):
-brew install --cask dog-hero/tap/pg_lens
+brew install --cask --no-quarantine dog-hero/tap/pg_lens
 
 # Linux (Homebrew on Linux) — formula:
 brew install dog-hero/tap/pg_lens
@@ -49,11 +49,14 @@ brew install dog-hero/tap/pg_lens
 
 The [tap](https://github.com/dog-hero/homebrew-tap) serves the prebuilt
 release binaries and is updated automatically by the release workflow.
-Installing via brew avoids the macOS Gatekeeper prompt entirely (no
-quarantine attribute is applied). On macOS prefer the **cask**: plain
-formulas from a tap go through Homebrew's source-build preflight and fail
-with "Your Xcode is too outdated" on fresh systems, even though nothing
-is compiled — the cask skips that check.
+
+macOS notes (until the binaries are notarized with an Apple Developer
+ID): the **cask + `--no-quarantine`** combination is the reliable path —
+plain formulas from a tap run Homebrew's source-build preflight and fail
+with "Your Xcode is too outdated" on fresh systems (even though nothing
+is compiled), while casks skip that check but apply the quarantine
+attribute, which makes Gatekeeper kill the unsigned binary. The formula
+also works on macOS if your Command Line Tools are up to date.
 
 ### Prebuilt binaries (releases)
 
