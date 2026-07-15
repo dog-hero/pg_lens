@@ -26,7 +26,8 @@ SELECT
       current_setting('max_connections')::int4 AS max_connections,
       EXTRACT(epoch FROM (NOW() - pg_postmaster_start_time()))::float8 AS uptime_secs,
       split_part(current_setting('server_version'), ' ', 1) AS server_version,
-      current_database()::text AS database
+      current_database()::text AS database,
+      pg_is_in_recovery() AS is_in_recovery
  FROM
       (SELECT
             coalesce(sum(xact_commit), 0)::int8 AS xact_commit,

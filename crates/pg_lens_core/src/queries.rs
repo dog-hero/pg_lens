@@ -20,6 +20,12 @@ pub struct QuerySet {
     pub statements: &'static str,
     pub cancel_backend: &'static str,
     pub terminate_backend: &'static str,
+    /// Streaming replicas of a primary (`pg_stat_replication`). Runs per fast
+    /// tick; a few rows, cheap. Empty on a standby.
+    pub replication: &'static str,
+    /// WAL receiver of a standby (`pg_stat_wal_receiver`). Runs per fast tick.
+    /// Empty on a primary.
+    pub wal_receiver: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -52,6 +58,11 @@ const STATEMENTS: &str = include_str!("../queries/statements.sql");
 // PG 13), so one file each serves the whole supported range.
 const DO_CANCEL_BACKEND: &str = include_str!("../queries/do_cancel_backend.sql");
 const DO_TERMINATE_BACKEND: &str = include_str!("../queries/do_terminate_backend.sql");
+// Replication (primary + standby sides). Adapted from dalibo/pg_activity;
+// version-independent 10+ (replay_lag / pg_stat_wal_receiver), so one file
+// each serves the whole supported range.
+const REPLICATION: &str = include_str!("../queries/replication.sql");
+const WAL_RECEIVER: &str = include_str!("../queries/wal_receiver.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -67,6 +78,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             statements: STATEMENTS,
             cancel_backend: DO_CANCEL_BACKEND,
             terminate_backend: DO_TERMINATE_BACKEND,
+            replication: REPLICATION,
+            wal_receiver: WAL_RECEIVER,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -79,6 +92,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             statements: STATEMENTS,
             cancel_backend: DO_CANCEL_BACKEND,
             terminate_backend: DO_TERMINATE_BACKEND,
+            replication: REPLICATION,
+            wal_receiver: WAL_RECEIVER,
         })
     } else {
         Err(format!(
@@ -171,6 +186,17 @@ mod tests {
                 q.statements.contains(&format!("LIMIT {STATEMENTS_LIMIT}")),
                 "SQL row cap must match STATEMENTS_LIMIT"
             );
+        }
+    }
+
+    #[test]
+    fn replication_queries_serve_pg13_and_up() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.replication.contains("pg_stat_replication"));
+            // LSN diff guarded against evaluation during recovery.
+            assert!(q.replication.contains("pg_is_in_recovery()"));
+            assert!(q.wal_receiver.contains("pg_stat_wal_receiver"));
         }
     }
 

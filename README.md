@@ -58,6 +58,15 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
   cluster-wide); collection shares the Schema Lens slow cadence, and `R`
   force-refreshes both. `queryid` is exposed as a string in the JSON API —
   the raw int8 can exceed JavaScript's safe-integer range.
+- **Replication panel** — the Macro Lens shows a **Replication** panel when
+  the server is a primary with connected replicas (one line per streaming
+  standby, with `pg_stat_replication` state, sync mode, and replay lag in
+  both bytes and time) or a standby (its WAL receiver, upstream, and replay
+  lag). Lag is tiered yellow/red with a textual `!`/`!!` marker; a replica
+  0 bytes behind is always "caught up" even if a primary has been idle for
+  minutes (the time-based measure is unreliable there). The lag columns of
+  `pg_stat_replication` require the `pg_monitor` role or superuser — a
+  non-privileged user simply sees no replicas.
 - **Version-aware queries** — dedicated query sets for PostgreSQL 13, 14+,
   and 16+, following pg_activity's versioning convention.
 - **Single static binary** — no runtime, no dependencies; musl builds run

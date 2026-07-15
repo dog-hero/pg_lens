@@ -269,6 +269,50 @@ table#activity {
   font-weight: 700;
 }
 
+/* ── replication panel ──────────────────────────────────────────────── */
+
+#replication .repl-row {
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+#replication .repl-name {
+  color: var(--accent);
+  font-weight: 600;
+  min-width: 16ch;
+}
+
+#replication .repl-state {
+  color: var(--fg-dim);
+}
+
+#replication .repl-lag {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Lag severity: same thresholds as the TUI (yellow > 10 MB / 10 s,
+   red > 100 MB / 60 s). Foreground on the lag figure, subtle row tint. */
+#replication .repl-lag.warn {
+  color: var(--warn);
+}
+
+#replication .repl-lag.bad {
+  color: var(--bad);
+}
+
+#replication .repl-row.lag-warn {
+  background: rgba(255, 183, 77, 0.07);
+}
+
+#replication .repl-row.lag-bad {
+  background: rgba(244, 112, 103, 0.1);
+}
+
 /* ── tabs (Activity / Schema) ───────────────────────────────────────── */
 
 #tabs {

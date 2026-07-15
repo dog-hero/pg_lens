@@ -8,6 +8,7 @@ import { HistoryChart } from "./chart";
 import { ActivityTable } from "./table";
 import { SchemaLens } from "./schema";
 import { StatementsLens } from "./statements";
+import { renderReplication } from "./replication";
 import {
   clearToken,
   openStream,
@@ -34,6 +35,8 @@ const tokenError = el<HTMLParagraphElement>("token-error");
 const chart = new HistoryChart(el<HTMLDivElement>("chart"));
 const table = new ActivityTable(el<HTMLTableElement>("activity"));
 const vitalsContainer = el<HTMLElement>("vitals");
+const replicationPanel = el<HTMLElement>("replication-panel");
+const replicationBody = el<HTMLElement>("replication");
 const schemaLens = new SchemaLens(
   el<HTMLTableElement>("schema"),
   el<HTMLParagraphElement>("schema-staleness"),
@@ -87,6 +90,7 @@ function renderStatus(status: PollerStatus): void {
 function renderSnapshot(snapshot: DbSnapshot): void {
   renderStatus(snapshot.status);
   renderVitals(vitalsContainer, snapshot.vitals);
+  renderReplication(replicationPanel, replicationBody, snapshot.replication);
   chart.update(snapshot.history);
   table.update(snapshot.activity, snapshot.locks);
   schemaLens.update(snapshot.schema, snapshot.vitals.database);

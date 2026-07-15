@@ -153,6 +153,33 @@ export interface StatementsSnapshot {
   status: StatementsStatus;
 }
 
+/** One streaming replica of a primary (pg_stat_replication). */
+export interface WalSenderRow {
+  application_name: string;
+  client: string;
+  state: string;
+  sync_state: string;
+  replay_lag_bytes: number | null;
+  replay_lag_secs: number | null;
+}
+
+/** The standby side (pg_stat_wal_receiver + last replay position). */
+export interface WalReceiverRow {
+  status: string;
+  sender_host: string | null;
+  sender_port: number | null;
+  replay_lag_bytes: number | null;
+  replay_lag_secs: number | null;
+}
+
+/**
+ * Replication role & topology (externally-tagged, mirroring the Rust enum):
+ * a primary lists its replicas, a standby carries its WAL receiver.
+ */
+export type ReplicationInfo =
+  | { Primary: { senders: WalSenderRow[] } }
+  | { Standby: { receiver: WalReceiverRow | null } };
+
 export interface DbSnapshot {
   vitals: ServerVitals;
   activity: ActivityRow[];
@@ -160,5 +187,6 @@ export interface DbSnapshot {
   history: SnapshotHistory;
   schema: SchemaSnapshot | null;
   statements: StatementsSnapshot | null;
+  replication: ReplicationInfo | null;
   status: PollerStatus;
 }

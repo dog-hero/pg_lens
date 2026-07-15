@@ -28,7 +28,7 @@ use tokio_postgres::{Client, Statement};
 use crate::history::{HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::models::{
     AdminActionResult, AdminCommand, AdminOutcome, BloatRow, DbSnapshot, PollerStatus,
-    SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
+    ReplicationInfo, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
     StatementsStatus,
 };
 use crate::services::{self, PasswordSource};
@@ -446,6 +446,8 @@ struct Prepared {
     bloat_indexes: Statement,
     cancel_backend: Statement,
     terminate_backend: Statement,
+    replication: Statement,
+    wal_receiver: Statement,
 }
 
 #[allow(clippy::too_many_arguments)] // poller-internal plumbing, one call site
@@ -477,6 +479,8 @@ async fn poll_loop(
         client.prepare(query_set.bloat_indexes),
         client.prepare(query_set.cancel_backend),
         client.prepare(query_set.terminate_backend),
+        client.prepare(query_set.replication),
+        client.prepare(query_set.wal_receiver),
     ) {
         Ok((
             activity,
@@ -487,6 +491,8 @@ async fn poll_loop(
             bloat_indexes,
             cancel_backend,
             terminate_backend,
+            replication,
+            wal_receiver,
         )) => Prepared {
             activity,
             blocking,
@@ -496,6 +502,8 @@ async fn poll_loop(
             bloat_indexes,
             cancel_backend,
             terminate_backend,
+            replication,
+            wal_receiver,
         },
         Err(e) => return SessionEnd::Error(format!("prepare failed: {e}")),
     };
@@ -588,11 +596,16 @@ async fn poll_once(
     deltas: &mut Option<DeltaState>,
     history: &mut SnapshotHistory,
 ) -> Result<DbSnapshot, String> {
-    // Three futures on one client: tokio-postgres pipelines them.
-    let (activity_rows, blocking_rows, info_rows) = tokio::try_join!(
+    // Five futures on one client: tokio-postgres pipelines them. The two
+    // replication queries are a few rows each — one is empty depending on the
+    // server's role, and `is_in_recovery` (from server_info) picks which side
+    // to present.
+    let (activity_rows, blocking_rows, info_rows, sender_rows, receiver_rows) = tokio::try_join!(
         client.query(&stmts.activity, &[]),
         client.query(&stmts.blocking, &[]),
         client.query(&stmts.server_info, &[]),
+        client.query(&stmts.replication, &[]),
+        client.query(&stmts.wal_receiver, &[]),
     )
     .map_err(|e| e.to_string())?;
 
@@ -608,6 +621,22 @@ async fn poll_once(
         .first()
         .ok_or_else(|| "server info query returned no rows".to_string())?;
     let info = db::server_info_from_row(info_row).map_err(|e| e.to_string())?;
+
+    // Role decides which replication view to present. A primary lists its
+    // connected replicas; a standby shows its single WAL receiver.
+    let replication = if info.is_in_recovery {
+        let receiver = match receiver_rows.first() {
+            Some(row) => Some(db::wal_receiver_from_row(row).map_err(|e| e.to_string())?),
+            None => None,
+        };
+        Some(ReplicationInfo::Standby { receiver })
+    } else {
+        let mut senders = Vec::with_capacity(sender_rows.len());
+        for row in &sender_rows {
+            senders.push(db::wal_sender_from_row(row).map_err(|e| e.to_string())?);
+        }
+        Some(ReplicationInfo::Primary { senders })
+    };
 
     let now = Instant::now();
     let xact_total = info.xact_commit + info.xact_rollback;
@@ -683,6 +712,7 @@ async fn poll_once(
         schema: None,
         statements: None,
         last_admin_action: None,
+        replication,
         status: PollerStatus::Ok,
     })
 }

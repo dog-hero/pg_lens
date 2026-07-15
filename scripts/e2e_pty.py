@@ -207,6 +207,12 @@ def main():
     check("screen changed between t1 and t2 with NO keypress (poller pipeline live)",
           snaps["t1_nokeys"] != snaps["t2_nokeys"])
     check("t1 shows Macro Lens (Connections gauge)", "Connections" in snaps["t1_nokeys"])
+    check("Macro Lens shows the Replication panel with both mock replicas",
+          "Replication" in snaps["t1_nokeys"] and "replica-1" in snaps["t1_nokeys"]
+          and "replica-2-dr" in snaps["t1_nokeys"])
+    check("lagging replica carries the '!' severity marker",
+          any("!" in ln and "replica-2-dr" in ln
+              for ln in snaps["t1_nokeys"].splitlines()))
     check("Tab during refresh switched to Micro Lens (Activity table)",
           "Activity" in snaps["t3_after_tab"] and "PID" in snaps["t3_after_tab"])
     if not BASIC:

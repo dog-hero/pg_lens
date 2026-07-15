@@ -605,6 +605,56 @@ pub struct AdminActionResult {
     pub at_epoch_ms: u64,
 }
 
+/// One streaming replica connected to a primary (`pg_stat_replication`,
+/// `queries/replication.sql`). Lag is reported both ways because either can
+/// matter: bytes for how much WAL is outstanding, seconds for how stale the
+/// replica's view is.
+#[derive(Clone, Debug, Serialize)]
+pub struct WalSenderRow {
+    /// `application_name` the replica reports (often its `cluster_name`).
+    pub application_name: String,
+    /// `client_addr::text`, or `"local"` when NULL (Unix-socket replica).
+    pub client: String,
+    /// `streaming`, `catchup`, `backup`, `startup`, …
+    pub state: String,
+    /// `async`, `sync`, `quorum`, `potential`.
+    pub sync_state: String,
+    /// WAL bytes the replica's replay is behind the primary's current LSN.
+    /// `None` on a cascading standby (LSN diff is guarded during recovery).
+    pub replay_lag_bytes: Option<i64>,
+    /// `replay_lag` interval in seconds; `None` while the replica is idle.
+    pub replay_lag_secs: Option<f64>,
+}
+
+/// The standby side (`pg_stat_wal_receiver` + last replay position,
+/// `queries/wal_receiver.sql`).
+#[derive(Clone, Debug, Serialize)]
+pub struct WalReceiverRow {
+    /// `streaming`, `waiting`, `stopping`, …
+    pub status: String,
+    pub sender_host: Option<String>,
+    pub sender_port: Option<i32>,
+    /// Received-but-not-yet-replayed WAL bytes on this standby.
+    pub replay_lag_bytes: Option<i64>,
+    /// Seconds since the last replayed transaction's commit timestamp;
+    /// `None` when nothing has been replayed yet.
+    pub replay_lag_secs: Option<f64>,
+}
+
+/// Replication role and topology, refreshed every fast tick (the queries are
+/// a few rows and cheap). Absent (`DbSnapshot.replication == None`) only
+/// before the first successful poll of a session.
+#[derive(Clone, Debug, Serialize)]
+pub enum ReplicationInfo {
+    /// This server is a primary; lists its connected replicas (may be empty,
+    /// in which case the Macro Lens hides the panel).
+    Primary { senders: Vec<WalSenderRow> },
+    /// This server is a standby receiving WAL from an upstream. `receiver` is
+    /// `None` if `pg_stat_wal_receiver` is momentarily empty (e.g. between
+    /// reconnects to the primary).
+    Standby { receiver: Option<WalReceiverRow> },
+}
+
 /// Health of the poller loop, carried inside every snapshot so that all
 /// frontends can surface collection errors without a side channel.
 #[derive(Clone, Debug, Serialize)]
@@ -643,6 +693,9 @@ pub struct DbSnapshot {
     /// admin actions (the TUI) dedupe on `at_epoch_ms`; read-only frontends
     /// (the web) simply never look at it.
     pub last_admin_action: Option<AdminActionResult>,
+    /// Replication role and topology, refreshed every fast tick. `None` only
+    /// before the first successful poll of a session.
+    pub replication: Option<ReplicationInfo>,
     pub status: PollerStatus,
 }
 
@@ -808,6 +861,28 @@ impl DbSnapshot {
             statements: Some(Arc::new(StatementsSnapshot::mock())),
             // Stamped by the (mock) poller after it executes a command.
             last_admin_action: None,
+            // Primary with two replicas: one healthy/async near-zero lag, one
+            // lagging tens of MB — so the panel and its severity tiers show.
+            replication: Some(ReplicationInfo::Primary {
+                senders: vec![
+                    WalSenderRow {
+                        application_name: "replica-1".to_string(),
+                        client: "10.0.8.21".to_string(),
+                        state: "streaming".to_string(),
+                        sync_state: "async".to_string(),
+                        replay_lag_bytes: Some(196_608 + jitter(seq, 8, 131_072) as i64),
+                        replay_lag_secs: Some(0.12 + jitter(seq, 9, 400) as f64 / 1_000.0),
+                    },
+                    WalSenderRow {
+                        application_name: "replica-2-dr".to_string(),
+                        client: "10.9.2.4".to_string(),
+                        state: "streaming".to_string(),
+                        sync_state: "async".to_string(),
+                        replay_lag_bytes: Some(48 * 1024 * 1024 + (seq as i64) * 131_072),
+                        replay_lag_secs: Some(14.5 + age),
+                    },
+                ],
+            }),
             status: PollerStatus::Ok,
         }
     }
@@ -840,6 +915,7 @@ impl DbSnapshot {
             schema: None,
             statements: None,
             last_admin_action: None,
+            replication: None,
             status: PollerStatus::Connecting,
         }
     }

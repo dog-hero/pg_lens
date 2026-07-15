@@ -7,7 +7,9 @@
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, Config, NoTls, Row};
 
-use crate::models::{ActivityRow, BloatRow, LockRow, StatementRow, TableStatRow};
+use crate::models::{
+    ActivityRow, BloatRow, LockRow, StatementRow, TableStatRow, WalReceiverRow, WalSenderRow,
+};
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
 /// the `Connection` onto its own task: it performs the actual I/O, and no
@@ -96,6 +98,9 @@ pub struct ServerInfoRow {
     /// `current_database()` — the Schema Lens is per-database, so its
     /// header names which database the table stats belong to.
     pub database: String,
+    /// `pg_is_in_recovery()` — true on a standby, false on a primary. Decides
+    /// which replication view the Macro Lens presents.
+    pub is_in_recovery: bool,
 }
 
 pub fn server_info_from_row(row: &Row) -> Result<ServerInfoRow, tokio_postgres::Error> {
@@ -118,6 +123,34 @@ pub fn server_info_from_row(row: &Row) -> Result<ServerInfoRow, tokio_postgres::
         uptime_secs: row.try_get("uptime_secs")?,
         server_version: row.try_get("server_version")?,
         database: row.try_get("database")?,
+        is_in_recovery: row.try_get("is_in_recovery")?,
+    })
+}
+
+/// Maps one row of `queries/replication.sql` onto [`WalSenderRow`] (the
+/// primary side: one connected streaming replica). Lag columns are nullable —
+/// `replay_lag` is NULL while a replica is idle, and the byte diff is NULL on
+/// a cascading standby (guarded by the CASE in the SQL).
+pub fn wal_sender_from_row(row: &Row) -> Result<WalSenderRow, tokio_postgres::Error> {
+    Ok(WalSenderRow {
+        application_name: row.try_get("application_name")?,
+        client: row.try_get("client")?,
+        state: row.try_get("state")?,
+        sync_state: row.try_get("sync_state")?,
+        replay_lag_bytes: row.try_get("replay_lag_bytes")?,
+        replay_lag_secs: row.try_get("replay_lag_secs")?,
+    })
+}
+
+/// Maps one row of `queries/wal_receiver.sql` onto [`WalReceiverRow`] (the
+/// standby side). At most one row exists.
+pub fn wal_receiver_from_row(row: &Row) -> Result<WalReceiverRow, tokio_postgres::Error> {
+    Ok(WalReceiverRow {
+        status: row.try_get("status")?,
+        sender_host: row.try_get("sender_host")?,
+        sender_port: row.try_get("sender_port")?,
+        replay_lag_bytes: row.try_get("replay_lag_bytes")?,
+        replay_lag_secs: row.try_get("replay_lag_secs")?,
     })
 }
 
