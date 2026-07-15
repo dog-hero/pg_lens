@@ -48,5 +48,7 @@ jobs:
           cache: npm
           cache-dependency-path: crates/pg_lens_web/frontend/package-lock.json
       - run: npm ci
+      # SQL tokenizer unit tests (node:test + native TS type-stripping)
+      - run: npm test
       # runs `tsc --noEmit && vite build`
       - run: npm run build

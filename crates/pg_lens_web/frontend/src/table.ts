@@ -6,6 +6,7 @@
 
 import type { ActivityRow, LockRow } from "./types";
 import { humanDuration } from "./format";
+import { renderSqlInto } from "./sql";
 
 type SortKey =
   | "pid"
@@ -118,7 +119,6 @@ export class ActivityTable {
           [row.state, false],
           [row.wait_event ?? "", false],
           [humanDuration(row.duration_secs), true],
-          [row.query, false],
         ];
         for (const [text, numeric] of cells) {
           const td = document.createElement("td");
@@ -126,9 +126,13 @@ export class ActivityTable {
           if (numeric) td.classList.add("num");
           tr.append(td);
         }
-        const query = tr.lastElementChild as HTMLTableCellElement;
+        // Query cell: SQL-highlighted spans (XSS-safe — renderSqlInto only
+        // ever writes textContent), tooltip carries the full text.
+        const query = document.createElement("td");
         query.classList.add("query");
         query.title = row.query;
+        renderSqlInto(query, row.query);
+        tr.append(query);
         return tr;
       }),
     );

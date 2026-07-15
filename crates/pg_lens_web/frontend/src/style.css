@@ -228,6 +228,28 @@ table#activity {
   color: var(--fg-dim);
 }
 
+/* SQL syntax highlighting — same palette as the TUI's ui/sql.rs:
+   keywords bold cyan, strings green, numbers magenta, comments dim.
+   Foreground-only so the blocked/waiting row tints (subtle backgrounds)
+   still read through, exactly like the TUI's fg-only spans. */
+.sql-kw {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.sql-str {
+  color: #7ee787;
+}
+
+.sql-num {
+  color: #d2a8ff;
+}
+
+.sql-cmt {
+  color: var(--fg-dim);
+  opacity: 0.7;
+}
+
 /* waiting (W): yellow tint; blocked (B): red tint — red wins, as in the TUI */
 #activity tr.waiting {
   background: rgba(255, 183, 77, 0.07);
