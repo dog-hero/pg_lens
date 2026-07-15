@@ -1,7 +1,15 @@
 [package]
 name = "pg_lens_core"
-version = "0.4.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Frontend-agnostic core for pg_lens: PostgreSQL poller, versioned system queries, and serializable snapshot models."
+keywords = ["postgres", "postgresql", "monitoring", "observability", "database"]
+categories = ["database"]
+readme = "../../README.md"
 
 [dependencies]
 # "rc": DbSnapshot.schema is an Arc<SchemaSnapshot> (fast ticks reuse the
@@ -10,7 +18,7 @@ serde = { version = "1.0.228", features = ["derive", "rc"] }
 # Minimal feature set on purpose: the core only spawns the poller task ("rt"),
 # publishes through watch channels ("sync"), sleeps between polls ("time"),
 # and runs `password_cmd` via `sh -c` ("process", Fase C2).
-tokio = { version = "1.52.3", features = ["process", "rt", "sync", "time"] }
+tokio = { version = "1.52.3", features = ["macros", "process", "rt", "sync", "time"] }
 tokio-postgres = "0.7.18"
 # Services file parsing (Fase C2). Default features = "parse" + "serde".
 toml = "1.1.2"

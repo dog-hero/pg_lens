@@ -1,13 +1,31 @@
 [package]
 name = "pg_lens_web"
-version = "0.4.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Web Lens for pg_lens: an axum + SSE server that streams the same PostgreSQL snapshots as the TUI, with an embedded TypeScript dashboard."
+keywords = ["postgres", "postgresql", "monitoring", "axum", "dashboard"]
+categories = ["database", "web-programming"]
+readme = "../../README.md"
+# The Vite-built frontend is gitignored (a build artifact), so it is not
+# picked up by cargo's default git-file packaging. Listing it in `include`
+# ships it inside the published .crate — the publish CI runs `npm run build`
+# first, so rust-embed finds `frontend/dist/` at compile time.
+include = [
+    "src/**/*.rs",
+    "build.rs",
+    "frontend/dist/**/*",
+    "Cargo.toml",
+]
 
 [dependencies]
 axum = "0.8.9"
 form_urlencoded = "1.2.2"
 futures-util = "0.3.32"
-pg_lens_core = { version = "0.4.0", path = "../pg_lens_core" }
+pg_lens_core = { version = "0.5.0", path = "../pg_lens_core" }
 rust-embed = { version = "8.12.0", features = ["mime-guess"] }
 serde_json = "1.0.150"
 # Constant-time bearer-token comparison (Fase 6 security requirement).

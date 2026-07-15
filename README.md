@@ -199,6 +199,17 @@ curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.2.1/pg-lens-0.
 sudo rpm -i pg-lens-0.2.1-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.2.1-1.x86_64.rpm
 ```
 
+### Cargo (crates.io)
+
+```sh
+cargo install pg_lens_tui          # compiles; installs the `pg_lens` binary
+cargo binstall pg_lens_tui         # fetches the prebuilt release binary, no compile
+```
+
+The published crate carries the built web dashboard, so `cargo install`
+needs no Node toolchain. `cargo binstall` reads the release tarballs
+directly (see `[package.metadata.binstall]`).
+
 ### From source
 
 Requires Rust (edition 2024, tested with cargo 1.93):
