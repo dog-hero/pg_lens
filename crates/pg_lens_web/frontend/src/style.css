@@ -622,6 +622,13 @@ table#statements {
   color: var(--fg-dim);
 }
 
+.empty-row td {
+  text-align: center;
+  color: var(--fg-dim);
+  padding: 20px 10px;
+  font-style: italic;
+}
+
 #token-input:focus {
   outline: none;
   border-color: var(--accent);

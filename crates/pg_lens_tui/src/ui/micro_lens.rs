@@ -33,9 +33,40 @@ const HIGHLIGHT_WIDTH: u16 = 2;
 
 pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     draw_table(app, frame, area);
+    // Empty state: the header/border still render (so the filter term and
+    // count stay visible), but the body gets a centered hint distinguishing
+    // "your filter matches nothing" from "the server is idle".
+    if app.row_order.is_empty() {
+        draw_empty(app, frame, area);
+    }
     if app.detail_open {
         draw_detail(app, frame, area);
     }
+}
+
+/// Centered placeholder drawn inside the table body when no rows show.
+fn draw_empty(app: &App, frame: &mut Frame, area: Rect) {
+    // Inside the border, below the header row.
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 2,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(3),
+    };
+    if inner.height == 0 {
+        return;
+    }
+    let msg = if !app.snapshot.activity.is_empty() && !app.filter.is_empty() {
+        format!("No sessions match \u{201c}{}\u{201d}", app.filter)
+    } else {
+        "No active sessions".to_string()
+    };
+    let para = Paragraph::new(Line::from(Span::styled(
+        msg,
+        Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+    )))
+    .alignment(ratatui::layout::Alignment::Center);
+    frame.render_widget(para, inner);
 }
 
 fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {

@@ -138,8 +138,24 @@ export class ActivityTable {
   }
 
   private renderBody(): void {
+    const rows = this.sorted();
+    if (rows.length === 0) {
+      // Empty state: distinguish "nothing matches your filter" from "the
+      // server is genuinely idle" so the reader knows which lever to pull.
+      const tr = document.createElement("tr");
+      tr.classList.add("empty-row");
+      const td = document.createElement("td");
+      td.colSpan = COLUMNS.length;
+      td.textContent =
+        this.rows.length > 0 && this.filter
+          ? `No sessions match “${this.filter}”`
+          : "No active sessions";
+      tr.append(td);
+      this.tbody.replaceChildren(tr);
+      return;
+    }
     this.tbody.replaceChildren(
-      ...this.sorted().map((row) => {
+      ...rows.map((row) => {
         const isBlocked = this.blocked.has(row.pid);
         const isWaiting = row.wait_event !== null;
         const tr = document.createElement("tr");
