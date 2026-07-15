@@ -600,6 +600,28 @@ table#statements {
   font: inherit;
 }
 
+/* Micro Lens activity filter (mirrors the TUI `/` filter). */
+.filter-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  margin: 0 0 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+}
+
+.filter-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.filter-input::placeholder {
+  color: var(--fg-dim);
+}
+
 #token-input:focus {
   outline: none;
   border-color: var(--accent);

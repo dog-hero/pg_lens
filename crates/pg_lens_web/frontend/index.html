@@ -51,7 +51,15 @@
           </button>
         </nav>
         <section id="activity-panel" class="panel" role="tabpanel">
-          <h2>Activity</h2>
+          <h2>Activity <span id="activity-count" class="panel-note"></span></h2>
+          <input
+            id="activity-filter"
+            class="filter-input"
+            type="search"
+            placeholder="Filter by pid, db, user, app, state, wait or query…"
+            autocomplete="off"
+            spellcheck="false"
+          />
           <div class="table-wrap">
             <table id="activity">
               <thead></thead>

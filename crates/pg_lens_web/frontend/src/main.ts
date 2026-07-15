@@ -33,7 +33,11 @@ const tokenInput = el<HTMLInputElement>("token-input");
 const tokenError = el<HTMLParagraphElement>("token-error");
 
 const chart = new HistoryChart(el<HTMLDivElement>("chart"));
-const table = new ActivityTable(el<HTMLTableElement>("activity"));
+const table = new ActivityTable(
+  el<HTMLTableElement>("activity"),
+  document.getElementById("activity-filter") as HTMLInputElement | null,
+  document.getElementById("activity-count"),
+);
 const vitalsContainer = el<HTMLElement>("vitals");
 const replicationPanel = el<HTMLElement>("replication-panel");
 const replicationBody = el<HTMLElement>("replication");

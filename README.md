@@ -382,7 +382,9 @@ exactly as before: connect directly.
 | `Tab` | Switch between Macro Lens and Micro Lens |
 | `j` / `k` / `↓` / `↑` | Move selection in the activity table |
 | `s` | Cycle sort column (duration / state / pid) |
+| `/` | Filter the activity table (Micro Lens) — type to narrow by pid, database, user, application, client, state, wait or query text; `Enter` applies, `Esc` reverts |
 | `Enter` | Open/close query detail for the selected row |
+| `Space` | Pause / resume the display refresh (freeze for point-in-time analysis) |
 | `+` / `-` | Increase / decrease the poll interval |
 | `c` | Cancel the selected session's query (`pg_cancel_backend`) — asks for confirmation first |
 | `K` | Terminate the selected session's backend (`pg_terminate_backend`, kills the connection) — asks for confirmation first (uppercase on purpose; `k` stays navigation) |

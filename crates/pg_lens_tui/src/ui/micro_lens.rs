@@ -16,7 +16,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap},
 };
 
@@ -110,11 +110,54 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title("Activity"))
+        .block(Block::bordered().title(activity_title(app)))
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol("\u{25b6} ");
 
     frame.render_stateful_widget(table, area, &mut app.table_state);
+}
+
+/// Block title showing the row count and the filter state. Plain
+/// `Activity (N)` when unfiltered; while editing (`/`) it shows the live
+/// term with a cursor block and `shown/total`; a committed filter shows the
+/// term without the cursor.
+fn activity_title(app: &App) -> Line<'static> {
+    let shown = app.row_order.len();
+    let total = app.snapshot.activity.len();
+    let mut spans = vec![Span::styled("Activity", Style::new().bold())];
+    if app.filter_editing {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("/", Style::new().fg(Color::Cyan).bold()));
+        spans.push(Span::styled(
+            app.filter.clone(),
+            Style::new().fg(Color::Cyan),
+        ));
+        // A block cursor makes the edit field obvious in a screenshot.
+        spans.push(Span::styled(
+            "\u{2588}",
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK),
+        ));
+        spans.push(Span::styled(
+            format!("  {shown}/{total}"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    } else if app.filter.is_empty() {
+        spans.push(Span::styled(
+            format!(" ({total})"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    } else {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("filter: {}", app.filter),
+            Style::new().fg(Color::Cyan),
+        ));
+        spans.push(Span::styled(
+            format!("  {shown}/{total}"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// How many characters the Query column can hold at this terminal width:

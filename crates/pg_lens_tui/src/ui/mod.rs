@@ -192,9 +192,11 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             app.statements_sort_mode.label(),
             true,
         ),
+        // Micro Lens counts the FILTERED display order (`row_order`), so the
+        // `row X/N` indicator matches what an active filter shows.
         _ => (
             app.table_state.selected(),
-            app.snapshot.activity.len(),
+            app.row_order.len(),
             app.sort_mode.label(),
             false,
         ),
@@ -203,6 +205,27 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         (Some(i), len) if len > 0 => format!("{}/{len}", i + 1),
         _ => "-".to_string(),
     };
+    // Filter editing takes over the whole statusbar with a focused keymap —
+    // the lens hints are inert while typing anyway.
+    if app.filter_editing {
+        let [k, d] = style::hint("/", format!("{}\u{2588}", app.filter));
+        let sep = Span::styled(" \u{2502} ", style::label_style());
+        let [ek, ed] = style::hint("Enter", ": apply");
+        let [xk, xd] = style::hint("Esc", ": cancel");
+        let spans = vec![
+            Span::raw(" "),
+            k,
+            d,
+            sep.clone(),
+            ek,
+            ed,
+            sep,
+            xk,
+            xd,
+        ];
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     // Keybinding letters in accent, descriptions dim (style::hint), the
     // separators dim — same text as ever, only the styling changed.
     let sep = Span::styled(" \u{2502} ", style::label_style());
@@ -221,6 +244,7 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     // The Micro Lens trades the Enter hint for the admin keys (the open
     // panel titles itself "Enter/Esc: close") — the bar must fit 120 cols.
     if app.active_tab == Tab::MicroLens {
+        push_hint(&mut spans, "/", ": filter".into(), true);
         push_hint(&mut spans, "c", ": cancel".into(), true);
         spans.push(Span::styled(" \u{b7} ", style::label_style()));
         let [k, d] = style::hint("K", ": kill");

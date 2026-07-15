@@ -327,6 +327,17 @@ pub struct App {
     /// arrival replaces the previous one). Resume applies it — the view
     /// jumps straight to the latest data, never replays intermediates.
     pub pending_snapshot: Option<Arc<DbSnapshot>>,
+    /// Micro Lens activity filter (case-insensitive substring over pid, db,
+    /// user, application, client, state, wait and query text). Empty = no
+    /// filter. Applied in [`resort`] before sorting, so the cursor and admin
+    /// actions operate only on visible rows.
+    pub filter: String,
+    /// `true` while the user is typing the filter (`/`): printable keys edit
+    /// [`filter`] live, Enter commits, Esc reverts to [`filter_saved`]. All
+    /// lens keybindings are inert during editing.
+    pub filter_editing: bool,
+    /// The filter value captured when editing began, restored on Esc.
+    pub filter_saved: String,
     pub should_quit: bool,
 }
 
@@ -359,6 +370,9 @@ impl App {
             admin_seen_epoch_ms: None,
             paused: false,
             pending_snapshot: None,
+            filter: String::new(),
+            filter_editing: false,
+            filter_saved: String::new(),
             should_quit: false,
         };
         resort(&mut app);
@@ -547,6 +561,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         handle_confirm_key(app, key);
         return;
     }
+    // Filter editing (`/` on the Micro Lens): printable keys edit the filter
+    // live, so the table narrows as you type; Enter commits, Esc reverts.
+    // Every lens keybinding is inert until then.
+    if app.filter_editing {
+        handle_filter_key(app, key);
+        return;
+    }
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         // Esc closes the detail panel when it is open; quits otherwise.
@@ -582,6 +603,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => {
             app.detail_open = false;
             app.active_tab = app.active_tab.next();
+        }
+        // `/` starts (or resumes) editing the Micro Lens activity filter.
+        // Micro Lens only — the other lenses have their own row sets.
+        KeyCode::Char('/') if app.active_tab == Tab::MicroLens => {
+            app.filter_saved = app.filter.clone();
+            app.filter_editing = true;
         }
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
@@ -693,6 +720,42 @@ fn handle_confirm_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Keymap while editing the Micro Lens filter (`app.filter_editing`): every
+/// printable char edits the filter live (the table re-filters on each
+/// keystroke), Backspace deletes, Enter commits (keeps the text, stops
+/// editing), Esc reverts to what the filter was before editing began. The
+/// selection is re-clamped after each change because the visible row count
+/// can shrink to zero.
+fn handle_filter_key(app: &mut App, key: KeyEvent) {
+    // Ctrl+C is a universal escape hatch — it quits even mid-edit.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.should_quit = true;
+        return;
+    }
+    match key.code {
+        KeyCode::Enter => app.filter_editing = false,
+        KeyCode::Esc => {
+            app.filter = std::mem::take(&mut app.filter_saved);
+            app.filter_editing = false;
+            resort(app);
+            clamp_selection(app);
+        }
+        KeyCode::Backspace => {
+            app.filter.pop();
+            resort(app);
+            clamp_selection(app);
+        }
+        // Ignore control chords (e.g. Ctrl+C is handled by the caller path
+        // only when not editing; here we simply don't type them).
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.filter.push(c);
+            resort(app);
+            clamp_selection(app);
+        }
+        _ => {}
+    }
+}
+
 /// Keymap of the startup service picker: j/k/↑/↓ move (saturating, like
 /// the lens tables), Enter picks the highlighted entry (main.rs then
 /// resolves + spawns the poller), q/Esc/Ctrl+C quit cleanly. Everything
@@ -745,7 +808,9 @@ fn move_selection(app: &mut App, delta: i64) {
                 .as_deref()
                 .map_or(0, |s| s.statements.len()),
         ),
-        _ => (&mut app.table_state, app.snapshot.activity.len()),
+        // Micro Lens navigates the FILTERED display order, not the raw
+        // snapshot — `table_state` indexes `row_order`.
+        _ => (&mut app.table_state, app.row_order.len()),
     };
     move_state(state, len, delta);
 }
@@ -766,7 +831,9 @@ fn move_state(state: &mut TableState, len: usize, delta: i64) {
 
 /// Keeps both selections valid after the row sets change size.
 fn clamp_selection(app: &mut App) {
-    let len = app.snapshot.activity.len();
+    // Micro Lens: clamp against the FILTERED display order, not the raw
+    // snapshot (an active filter can shrink it to fewer — or zero — rows).
+    let len = app.row_order.len();
     if len == 0 {
         app.table_state.select(None);
         // Nothing to detail anymore (only if this lens's detail was open).
@@ -813,11 +880,31 @@ fn clamp_selection(app: &mut App) {
     }
 }
 
-/// Recomputes `row_order` from the current snapshot + sort mode. The view
-/// renders rows in this order; the snapshot itself is never mutated.
+/// Case-insensitive substring match of `needle` (already lowercased) against
+/// the fields a DBA filters activity by. `pid` matches as text so `/123`
+/// finds a backend; every other field is a plain contains.
+fn row_matches(row: &pg_lens_core::ActivityRow, needle: &str) -> bool {
+    row.pid.to_string().contains(needle)
+        || row.database.to_lowercase().contains(needle)
+        || row.username.to_lowercase().contains(needle)
+        || row.application_name.to_lowercase().contains(needle)
+        || row.client.to_lowercase().contains(needle)
+        || row.state.to_lowercase().contains(needle)
+        || row
+            .wait_event
+            .as_deref()
+            .is_some_and(|w| w.to_lowercase().contains(needle))
+        || row.query.to_lowercase().contains(needle)
+}
+
+/// Recomputes `row_order` from the current snapshot + filter + sort mode. The
+/// view renders rows in this order; the snapshot itself is never mutated.
 fn resort(app: &mut App) {
     let rows = &app.snapshot.activity;
-    let mut order: Vec<usize> = (0..rows.len()).collect();
+    let needle = app.filter.to_lowercase();
+    let mut order: Vec<usize> = (0..rows.len())
+        .filter(|&i| needle.is_empty() || row_matches(&rows[i], &needle))
+        .collect();
     match app.sort_mode {
         SortMode::Duration => order.sort_by(|&a, &b| {
             rows[b]
@@ -969,6 +1056,106 @@ mod tests {
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::MacroLens);
         assert!(!app.should_quit);
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            update(app, press(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn slash_filters_activity_live_and_moves_cursor_within_matches() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        let total = app.snapshot.activity.len();
+
+        update(&mut app, press(KeyCode::Char('/')));
+        assert!(app.filter_editing);
+        type_str(&mut app, "bench");
+
+        // Every visible row matches the needle somewhere, and there are fewer
+        // than the full set (the mock has non-bench rows).
+        assert!(!app.row_order.is_empty());
+        assert!(app.row_order.len() < total);
+        let needle = "bench";
+        for &i in &app.row_order {
+            let r = &app.snapshot.activity[i];
+            let hay = format!(
+                "{} {} {} {} {}",
+                r.pid, r.application_name, r.database, r.username, r.query
+            )
+            .to_lowercase();
+            assert!(hay.contains(needle), "row {i} does not match: {hay}");
+        }
+        // Commit, then navigate: the cursor cannot point past the filtered
+        // set (j/k walk `row_order`, not the raw snapshot).
+        update(&mut app, press(KeyCode::Enter));
+        for _ in 0..total + 5 {
+            update(&mut app, press(KeyCode::Char('j')));
+        }
+        assert!(app.table_state.selected().unwrap() < app.row_order.len());
+    }
+
+    #[test]
+    fn filter_enter_commits_esc_reverts() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        let total = app.snapshot.activity.len();
+
+        // Commit a filter with Enter: editing stops, text and narrowing stay.
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "shop");
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.filter_editing);
+        assert_eq!(app.filter, "shop");
+        let narrowed = app.row_order.len();
+        assert!(narrowed < total);
+
+        // Re-enter, type more, then Esc: reverts to the committed "shop".
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "xyz");
+        assert!(app.row_order.is_empty()); // "shopxyz" matches nothing
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.filter_editing);
+        assert_eq!(app.filter, "shop");
+        assert_eq!(app.row_order.len(), narrowed);
+    }
+
+    #[test]
+    fn backspace_widens_the_filter() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        let total = app.snapshot.activity.len();
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "bench");
+        let narrowed = app.row_order.len();
+        for _ in 0..5 {
+            update(&mut app, press(KeyCode::Backspace));
+        }
+        assert_eq!(app.filter, "");
+        assert_eq!(app.row_order.len(), total);
+        assert!(narrowed < total);
+    }
+
+    #[test]
+    fn slash_is_inert_off_the_micro_lens() {
+        let mut app = App::new();
+        app.active_tab = Tab::MacroLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        assert!(!app.filter_editing);
+    }
+
+    #[test]
+    fn ctrl_c_quits_even_while_filtering() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        update(
+            &mut app,
+            Action::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
+        assert!(app.should_quit);
     }
 
     #[test]

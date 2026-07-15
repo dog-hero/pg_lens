@@ -36,17 +36,45 @@ const COLUMNS: Column[] = [
   { key: "query", label: "Query", numeric: false },
 ];
 
+/** Case-insensitive substring match over the fields a DBA filters by —
+ * mirrors the TUI's `row_matches` (pid as text, everything else a contains). */
+function rowMatches(row: ActivityRow, needle: string): boolean {
+  return (
+    String(row.pid).includes(needle) ||
+    row.database.toLowerCase().includes(needle) ||
+    row.username.toLowerCase().includes(needle) ||
+    row.application_name.toLowerCase().includes(needle) ||
+    row.client.toLowerCase().includes(needle) ||
+    row.state.toLowerCase().includes(needle) ||
+    (row.wait_event?.toLowerCase().includes(needle) ?? false) ||
+    row.query.toLowerCase().includes(needle)
+  );
+}
+
 export class ActivityTable {
   private sortKey: SortKey = "duration_secs";
   private sortAsc = false;
   private rows: ActivityRow[] = [];
   private blocked = new Set<number>();
+  private filter = "";
   private readonly thead: HTMLTableSectionElement;
   private readonly tbody: HTMLTableSectionElement;
+  private readonly count: HTMLElement | null;
 
-  constructor(table: HTMLTableElement) {
+  constructor(
+    table: HTMLTableElement,
+    filterInput?: HTMLInputElement | null,
+    count?: HTMLElement | null,
+  ) {
     this.thead = table.tHead ?? table.createTHead();
     this.tbody = table.tBodies[0] ?? table.createTBody();
+    this.count = count ?? null;
+    if (filterInput) {
+      filterInput.addEventListener("input", () => {
+        this.filter = filterInput.value.trim().toLowerCase();
+        this.renderBody();
+      });
+    }
     this.renderHead();
   }
 
@@ -91,7 +119,15 @@ export class ActivityTable {
   private sorted(): ActivityRow[] {
     const key = this.sortKey;
     const dir = this.sortAsc ? 1 : -1;
-    return [...this.rows].sort((a, b) => {
+    const visible = this.filter
+      ? this.rows.filter((r) => rowMatches(r, this.filter))
+      : this.rows;
+    if (this.count) {
+      this.count.textContent = this.filter
+        ? `${visible.length}/${this.rows.length}`
+        : `${this.rows.length}`;
+    }
+    return [...visible].sort((a, b) => {
       const va = a[key] ?? "";
       const vb = b[key] ?? "";
       if (typeof va === "number" && typeof vb === "number") {
