@@ -616,18 +616,15 @@ async fn poll_once(
     deltas: &mut Option<DeltaState>,
     history: &mut SnapshotHistory,
 ) -> Result<DbSnapshot, String> {
-    // Five futures on one client: tokio-postgres pipelines them. The two
-    // replication queries are a few rows each — one is empty depending on the
-    // server's role, and `is_in_recovery` (from server_info) picks which side
-    // to present.
-    let (activity_rows, blocking_rows, info_rows, sender_rows, receiver_rows) = tokio::try_join!(
+    // Essential queries: three futures pipelined on one client. Their
+    // failure is a real fault, so it is fatal to the poll — surfaced with the
+    // actual server message (tokio-postgres's raw Display is just "db error").
+    let (activity_rows, blocking_rows, info_rows) = tokio::try_join!(
         client.query(&stmts.activity, &[]),
         client.query(&stmts.blocking, &[]),
         client.query(&stmts.server_info, &[]),
-        client.query(&stmts.replication, &[]),
-        client.query(&stmts.wal_receiver, &[]),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| db_error_message("poll failed", &e))?;
 
     let mut activity = Vec::with_capacity(activity_rows.len());
     for row in &activity_rows {
@@ -642,21 +639,12 @@ async fn poll_once(
         .ok_or_else(|| "server info query returned no rows".to_string())?;
     let info = db::server_info_from_row(info_row).map_err(|e| e.to_string())?;
 
-    // Role decides which replication view to present. A primary lists its
-    // connected replicas; a standby shows its single WAL receiver.
-    let replication = if info.is_in_recovery {
-        let receiver = match receiver_rows.first() {
-            Some(row) => Some(db::wal_receiver_from_row(row).map_err(|e| e.to_string())?),
-            None => None,
-        };
-        Some(ReplicationInfo::Standby { receiver })
-    } else {
-        let mut senders = Vec::with_capacity(sender_rows.len());
-        for row in &sender_rows {
-            senders.push(db::wal_sender_from_row(row).map_err(|e| e.to_string())?);
-        }
-        Some(ReplicationInfo::Primary { senders })
-    };
+    // Replication is BEST-EFFORT: a restricted or managed server (RDS,
+    // Cloud SQL, …) may forbid the WAL views/functions. A failure here
+    // degrades to "no replication panel" — it must NEVER take the whole poll
+    // (and the dashboard) down. Only the query for the server's actual role
+    // runs.
+    let replication = collect_replication(client, stmts, info.is_in_recovery).await;
 
     let now = Instant::now();
     let xact_total = info.xact_commit + info.xact_rollback;
@@ -815,6 +803,40 @@ async fn collect_statements(
         out.push(db::statement_from_row(row).map_err(|e| e.to_string())?);
     }
     Ok(out)
+}
+
+/// Best-effort replication view for the server's current role. Returns `None`
+/// on ANY query or parse failure — replication is optional (a restricted or
+/// managed server may forbid the WAL views), and its absence must never fail
+/// the poll. Only the query matching the role runs.
+async fn collect_replication(
+    client: &Client,
+    stmts: &Prepared,
+    is_in_recovery: bool,
+) -> Option<ReplicationInfo> {
+    if is_in_recovery {
+        let rows = client.query(&stmts.wal_receiver, &[]).await.ok()?;
+        let receiver = rows.first().and_then(|r| db::wal_receiver_from_row(r).ok());
+        Some(ReplicationInfo::Standby { receiver })
+    } else {
+        let rows = client.query(&stmts.replication, &[]).await.ok()?;
+        let senders = rows
+            .iter()
+            .filter_map(|r| db::wal_sender_from_row(r).ok())
+            .collect();
+        Some(ReplicationInfo::Primary { senders })
+    }
+}
+
+/// Turns a tokio-postgres error into the richest message available. The raw
+/// `Display` is frequently just "db error", which hides the actual server
+/// message — pull it (and the SQLSTATE) out of the `DbError` when present.
+fn db_error_message(context: &str, e: &tokio_postgres::Error) -> String {
+    if let Some(db) = e.as_db_error() {
+        format!("{context}: {} ({})", db.message(), db.code().code())
+    } else {
+        format!("{context}: {e}")
+    }
 }
 
 fn hit_ratio(hit: i64, read: i64) -> f64 {

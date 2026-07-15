@@ -41,5 +41,20 @@ cask "pg_lens" do
   homepage "https://github.com/dog-hero/pg_lens"
 
   binary "pg_lens-v#{version}-#{arch}-apple-darwin/pg_lens"
+
+  # The binary is not yet notarized with an Apple Developer ID, so Gatekeeper
+  # would kill it. Homebrew removed the \`--no-quarantine\` flag, so the cask
+  # clears the quarantine attribute itself on install.
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-dr", "com.apple.quarantine",
+                          "#{staged_path}/pg_lens-v#{version}-#{arch}-apple-darwin/pg_lens"]
+  end
+
+  caveats <<~EOS
+    pg_lens is not yet notarized. If macOS still refuses to run it, clear the
+    quarantine flag once:
+      xattr -d com.apple.quarantine "$(brew --prefix)/bin/pg_lens"
+  EOS
 end
 EOF
