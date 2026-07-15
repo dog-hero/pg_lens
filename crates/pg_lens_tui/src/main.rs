@@ -31,6 +31,7 @@ use pg_lens_core::DbSnapshot;
 use pg_lens_core::settings::{self, ConnSpec, Resolved, ServiceSummary};
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 
 use pg_lens_core::AdminCommand;
 
@@ -305,11 +306,15 @@ fn spawn_poller(
     schema_interval: Duration,
     schema_refresh_rx: watch::Receiver<u64>,
     admin_rx: mpsc::Receiver<AdminCommand>,
-) -> (watch::Receiver<Arc<DbSnapshot>>, String) {
+    shutdown_rx: watch::Receiver<bool>,
+) -> (watch::Receiver<Arc<DbSnapshot>>, String, JoinHandle<()>) {
     match conn {
+        // The mock has no DB queries to cancel on shutdown — a already-done
+        // handle keeps the caller's await uniform.
         None => (
             pg_lens_core::poller::spawn_mock(interval_rx, schema_refresh_rx, admin_rx),
             "mock".to_string(),
+            tokio::spawn(async {}),
         ),
         Some(resolved) => {
             // The label is the only connection info any frontend sees —
@@ -317,7 +322,7 @@ fn spawn_poller(
             // with a password_cmd, the poller re-runs it per (re)connection.
             let label = resolved.label.to_string();
             let history_path = history_file_path(&resolved.config);
-            let snapshots = pg_lens_core::poller::spawn(
+            let (snapshots, handle) = pg_lens_core::poller::spawn(
                 resolved.config,
                 resolved.password_source,
                 interval_rx,
@@ -325,10 +330,25 @@ fn spawn_poller(
                 schema_refresh_rx,
                 admin_rx,
                 history_path,
+                shutdown_rx,
             );
-            (snapshots, label)
+            (snapshots, label, handle)
         }
     }
+}
+
+/// Grace period for the poller to cancel its in-flight query and stop on
+/// shutdown. Cancelling opens a brief new connection to the server; if that
+/// stalls we still exit rather than hang the whole program.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
+/// Signals the poller to shut down and waits (briefly) for it to cancel any
+/// running query and exit. Keeping the runtime alive for this window is what
+/// lets the CancelRequest reach PostgreSQL — otherwise the process would exit
+/// and leave a heavy query (e.g. bloat estimation) running server-side.
+async fn shutdown_poller(shutdown_tx: &watch::Sender<bool>, handle: JoinHandle<()>) {
+    let _ = shutdown_tx.send(true);
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, handle).await;
 }
 
 /// Where to persist this connection's history ring: `<state>/pg_lens/`
@@ -467,12 +487,14 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
     // …and `POST /api/admin/*` (token-gated) sends here. Both feed the same
     // poller channels the TUI uses.
     let (admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
-    let (snapshots, label) = spawn_poller(
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (snapshots, label, poller_handle) = spawn_poller(
         resolved,
         interval_rx,
         conn.schema_interval(&config),
         schema_refresh_rx,
         admin_rx,
+        shutdown_rx,
     );
 
     let router = pg_lens_web::router(snapshots, schema_refresh_tx, admin_tx, token);
@@ -489,7 +511,10 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
             "disabled (loopback bind without PG_LENS_AUTH_TOKEN)"
         }
     );
+    // serve() returns on Ctrl+C — then cancel the poller's in-flight query
+    // before the runtime tears down (same reason as the TUI path).
     pg_lens_web::serve(listener, router).await?;
+    shutdown_poller(&shutdown_tx, poller_handle).await;
     Ok(())
 }
 
@@ -519,6 +544,11 @@ async fn run(
     // the poller (sole owner of the DB client) executes them. Message
     // passing only, like every other TUI↔poller conversation.
     let (admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
+    // Shutdown signal: on quit we set this, and wait for the poller to cancel
+    // its in-flight query (so a heavy bloat estimate does not keep running
+    // server-side) before the runtime tears down.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut poller_handle: Option<JoinHandle<()>> = None;
     // Picker mode enters the loop with NO poller: the channels above exist
     // as usual, but their receivers are parked here until the user picks an
     // entry — the loop then spawns the poller (and its snapshot bridge)
@@ -528,16 +558,19 @@ async fn run(
         watch::Receiver<Duration>,
         watch::Receiver<u64>,
         mpsc::Receiver<AdminCommand>,
+        watch::Receiver<bool>,
     )> = None;
     match startup {
         Startup::Connect(conn) => {
-            let (snapshots, label) = spawn_poller(
+            let (snapshots, label, handle) = spawn_poller(
                 *conn,
                 interval_rx,
                 schema_interval,
                 schema_refresh_rx,
                 admin_rx,
+                shutdown_rx,
             );
+            poller_handle = Some(handle);
             app.host = label;
             // Seed the app with the poller's initial snapshot before the
             // first frame (in real mode this avoids one frame of
@@ -548,7 +581,7 @@ async fn run(
         }
         Startup::Picker(entries) => {
             app.picker = Some(PickerState::new(entries));
-            parked_rx = Some((interval_rx, schema_refresh_rx, admin_rx));
+            parked_rx = Some((interval_rx, schema_refresh_rx, admin_rx, shutdown_rx));
         }
     }
 
@@ -599,7 +632,7 @@ async fn run(
         // Connection failures are NOT errors here: they surface as
         // `PollerStatus::Error` on the splash, retrying with backoff.
         if let Some(entry) = app.picked.clone()
-            && let Some((interval_rx, schema_refresh_rx, admin_rx)) = parked_rx.take()
+            && let Some((interval_rx, schema_refresh_rx, admin_rx, shutdown_rx)) = parked_rx.take()
         {
             // Re-resolve with the chosen service (or none, for the default
             // entry). The file was readable moments ago at trigger time; if
@@ -610,18 +643,27 @@ async fn run(
             spec.dsn = None;
             spec.service = entry.service.clone();
             let resolved = settings::resolve(&spec)?;
-            let (snapshots, label) = spawn_poller(
+            let (snapshots, label, handle) = spawn_poller(
                 Some(resolved),
                 interval_rx,
                 schema_interval,
                 schema_refresh_rx,
                 admin_rx,
+                shutdown_rx,
             );
+            poller_handle = Some(handle);
             update(&mut app, Action::HostLabel(label));
             update(&mut app, Action::Snapshot(snapshots.borrow().clone()));
             // Detaches on drop; the bridge lives as long as its channels.
             let _bridge_task = event::spawn_snapshot_bridge(snapshots, tx.clone());
         }
+    }
+
+    // Graceful stop: cancel any in-flight query BEFORE the runtime tears down,
+    // so a heavy bloat estimate does not keep running on the server after the
+    // user quits. (No-op when picker mode never spawned a poller.)
+    if let Some(handle) = poller_handle {
+        shutdown_poller(&shutdown_tx, handle).await;
     }
 
     Ok(())

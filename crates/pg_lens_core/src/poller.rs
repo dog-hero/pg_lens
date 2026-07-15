@@ -23,7 +23,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
-use tokio_postgres::{Client, Transaction};
+use tokio::task::JoinHandle;
+use tokio_postgres::{Client, NoTls, Transaction};
 
 use crate::history::{DEFAULT_CAP, HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::history_store::HistoryStore;
@@ -263,6 +264,14 @@ fn admin_result(cmd: AdminCommand, signalled: Result<bool, String>) -> AdminActi
     }
 }
 
+/// Resolves once a shutdown has been requested (`true`), or if the sender is
+/// dropped. Returns `()` — the borrowed `watch::Ref` is released before this
+/// returns, so the awaiting future stays `Send` (a `Ref` held across an
+/// `.await` would not be, breaking `tokio::spawn`).
+async fn wait_shutdown(shutdown_rx: &mut watch::Receiver<bool>) {
+    let _ = shutdown_rx.wait_for(|&stop| stop).await;
+}
+
 /// Per-statement safety ceiling, applied as `SET LOCAL` at the start of every
 /// query transaction. A monitoring tool must never run an unbounded query
 /// against a production server: a pathological plan (e.g. the on-demand bloat
@@ -364,6 +373,7 @@ async fn execute_admin(client: &mut Client, q: &queries::QuerySet, cmd: AdminCom
 /// # Panics
 ///
 /// Must be called from within a tokio runtime (it calls `tokio::spawn`).
+#[allow(clippy::too_many_arguments)] // one call site (spawn_poller)
 pub fn spawn(
     config: tokio_postgres::Config,
     password_source: Option<PasswordSource>,
@@ -372,10 +382,11 @@ pub fn spawn(
     schema_refresh_rx: watch::Receiver<u64>,
     admin_rx: mpsc::Receiver<AdminCommand>,
     history_path: Option<std::path::PathBuf>,
-) -> watch::Receiver<Arc<DbSnapshot>> {
+    shutdown_rx: watch::Receiver<bool>,
+) -> (watch::Receiver<Arc<DbSnapshot>>, JoinHandle<()>) {
     let (tx, rx) = watch::channel(Arc::new(DbSnapshot::connecting()));
     let schema = SchemaState::new(schema_interval, schema_refresh_rx);
-    tokio::spawn(run(
+    let handle = tokio::spawn(run(
         config,
         password_source,
         interval_rx,
@@ -383,11 +394,13 @@ pub fn spawn(
         admin_rx,
         tx,
         history_path,
+        shutdown_rx,
     ));
-    rx
+    (rx, handle)
 }
 
 /// Outer reconnect loop: one [`session`] per connection, backoff in between.
+#[allow(clippy::too_many_arguments)] // poller-internal plumbing, one call site
 async fn run(
     config: tokio_postgres::Config,
     password_source: Option<PasswordSource>,
@@ -396,6 +409,7 @@ async fn run(
     mut admin_rx: mpsc::Receiver<AdminCommand>,
     tx: watch::Sender<Arc<DbSnapshot>>,
     history_path: Option<std::path::PathBuf>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut backoff = BACKOFF_INITIAL;
     // Survives reconnects so the sparklines don't reset on a blip.
@@ -418,6 +432,10 @@ async fn run(
     let mut statements = StatementsState::new();
     let mut last_admin: Option<AdminActionResult> = None;
     loop {
+        // Shutdown requested (the app is quitting): stop before reconnecting.
+        if *shutdown_rx.borrow() {
+            return;
+        }
         let mut polled_ok = false;
         let end = session(
             &config,
@@ -432,6 +450,7 @@ async fn run(
             &mut polled_ok,
             store.as_ref(),
             &mut appends_since_compact,
+            &mut shutdown_rx,
         )
         .await;
         match end {
@@ -442,7 +461,12 @@ async fn run(
                     backoff = BACKOFF_INITIAL;
                 }
                 publish_error(&tx, msg);
-                tokio::time::sleep(backoff).await;
+                // Interruptible backoff: a shutdown during the wait ends the
+                // poller immediately instead of after the full delay.
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = wait_shutdown(&mut shutdown_rx) => return,
+                }
                 backoff = (backoff * 2).min(BACKOFF_MAX);
                 if tx.is_closed() {
                     return;
@@ -480,6 +504,7 @@ async fn session(
     polled_ok: &mut bool,
     store: Option<&HistoryStore>,
     appends_since_compact: &mut usize,
+    shutdown_rx: &mut watch::Receiver<bool>,
 ) -> SessionEnd {
     // The base config is never mutated: the resolved password goes into a
     // per-attempt clone (and is dropped with it).
@@ -497,20 +522,34 @@ async fn session(
         Ok(pair) => pair,
         Err(e) => return SessionEnd::Error(format!("connect failed: {e}")),
     };
-    let end = poll_loop(
-        &mut client,
-        interval_rx,
-        tx,
-        history,
-        schema,
-        statements,
-        admin_rx,
-        last_admin,
-        polled_ok,
-        store,
-        appends_since_compact,
-    )
-    .await;
+    // Captured up front (owned — no borrow held), so the shutdown branch can
+    // cancel whatever query poll_loop has in flight without conflicting with
+    // its `&mut client`.
+    let cancel = client.cancel_token();
+    // Race the poll loop against a shutdown request. On shutdown, send a
+    // CancelRequest so a running server-side query (notably the heavy bloat
+    // estimate) stops immediately instead of lingering until it finishes or
+    // hits statement_timeout — the socket dropping alone does NOT cancel it.
+    let end = tokio::select! {
+        biased;
+        _ = wait_shutdown(shutdown_rx) => {
+            let _ = cancel.cancel_query(NoTls).await;
+            SessionEnd::Closed
+        }
+        end = poll_loop(
+            &mut client,
+            interval_rx,
+            tx,
+            history,
+            schema,
+            statements,
+            admin_rx,
+            last_admin,
+            polled_ok,
+            store,
+            appends_since_compact,
+        ) => end,
+    };
     conn_handle.abort();
     end
 }
@@ -1052,6 +1091,14 @@ mod tests {
         rx
     }
 
+    /// A shutdown receiver that never fires (sender leaked): the poller runs
+    /// as if the app is staying open.
+    fn no_shutdown() -> watch::Receiver<bool> {
+        let (tx, rx) = watch::channel(false);
+        std::mem::forget(tx);
+        rx
+    }
+
     /// An admin channel whose sender stays alive (leaked) — the shape every
     /// non-admin test wants: open but silent.
     fn admin_rx() -> mpsc::Receiver<AdminCommand> {
@@ -1154,7 +1201,7 @@ mod tests {
         let config: tokio_postgres::Config = "host=127.0.0.1 port=1 user=nobody connect_timeout=1"
             .parse()
             .expect("test DSN must parse");
-        let mut rx = spawn(
+        let (mut rx, _h) = spawn(
             config,
             None,
             interval_rx(50),
@@ -1162,6 +1209,7 @@ mod tests {
             refresh_rx(),
             admin_rx(),
             None,
+            no_shutdown(),
         );
 
         assert!(matches!(rx.borrow().status, PollerStatus::Connecting));
@@ -1190,7 +1238,7 @@ mod tests {
         let source = PasswordSource::Command(
             "echo topsecret-stdout; echo vault sealed >&2; exit 1".to_string(),
         );
-        let mut rx = spawn(
+        let (mut rx, _h) = spawn(
             config,
             Some(source),
             interval_rx(50),
@@ -1198,6 +1246,7 @@ mod tests {
             refresh_rx(),
             admin_rx(),
             None,
+            no_shutdown(),
         );
 
         tokio::time::timeout(Duration::from_secs(5), rx.changed())
@@ -1232,7 +1281,7 @@ mod tests {
         let config: tokio_postgres::Config = "host=127.0.0.1 port=1 user=nobody connect_timeout=1"
             .parse()
             .expect("test DSN must parse");
-        let _rx = spawn(
+        let (_rx, _h) = spawn(
             config,
             Some(PasswordSource::Command(cmd)),
             interval_rx(50),
@@ -1240,6 +1289,7 @@ mod tests {
             refresh_rx(),
             admin_rx(),
             None,
+            no_shutdown(),
         );
 
         // First attempt at ~0s, second after the 1s backoff. Poll the file
