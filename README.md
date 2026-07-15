@@ -506,14 +506,34 @@ and never expose the server without TLS.
 
 ## Roadmap
 
-- [x] **Web Lens** — `pg_lens serve`: an axum-based web dashboard consuming
-      the same watch channel (SSE streaming, TypeScript + uPlot frontend
-      embedded in the binary, token auth, read-only).
-- [ ] Admin actions (`pg_cancel_backend` / `pg_terminate_backend`)
-- [x] `pg_stat_statements` integration (Query Lens)
-- [ ] Replication / WAL sender views
-- [ ] Prometheus export
-- [ ] Demo gif
+Shipped: Web Lens (`pg_lens serve`), Schema Lens (table stats + on-demand
+bloat), Query Lens (`pg_stat_statements`), replication/WAL panel, admin
+actions (cancel/terminate), services file with `password_cmd`, interactive
+service picker, Homebrew/deb/rpm/crates.io distribution.
+
+**Active (next up):**
+
+- [ ] **Web Lens parity** — bring the web UI closer to the TUI: schema
+      re-collect / bloat refresh trigger, pause, and (behind auth) the same
+      admin actions.
+- [ ] **Persistent history** — the in-memory ring (120 samples) dies with the
+      process; persist it so charts survive restarts and cover hours.
+- [ ] **Activity filtering** — filter/search the Micro Lens by database,
+      user, application or query text.
+- [ ] **Config file** — `~/.config/pg_lens/config.toml` for defaults
+      (interval, schema interval, listen address) instead of flags.
+
+**Backlog (deliberately deprioritized):**
+
+- pg_service.conf / .pgpass compatibility (C3) and TUI service picker for them
+- Apple notarization (removes the cask quarantine postflight; needs a paid
+  Apple Developer account)
+- Prometheus `/metrics` export
+- Multi-instance monitoring (N servers, one screen)
+- Docker/GHCR image re-enable (one-line revert in release.yml; ideally moved
+  to a native arm64 runner first)
+- PgBouncer *transaction* pooling support (requires a `simple_query`
+  protocol rewrite — see [Connection poolers](#connection-poolers-pgbouncer--supavisor--rds-proxy))
 
 ## Contributing
 
