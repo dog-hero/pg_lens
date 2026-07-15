@@ -297,6 +297,21 @@ entry → env var → default (`host=localhost`, `user=postgres`) — the same
 order libpq uses. Empty env values count as unset. The header shows the
 resolved `user@host` — the password never appears anywhere.
 
+#### Connection poolers (PgBouncer / Supavisor / RDS Proxy)
+
+pg_lens connects fine **directly**, through a **session-pooling** proxy, and as
+a restricted non-superuser (managed services like RDS/Aurora/Cloud SQL). Each
+poll runs in a short read-only transaction with its own `statement_timeout`, so
+it is a good citizen on shared servers.
+
+The one unsupported setup is a pooler in **transaction pooling** mode
+(PgBouncer default `pool_mode = transaction`, Supabase's port `6543`,
+Supavisor's transaction mode). There, the driver's prepared statements are
+routed to different backends and fail. For a monitoring tool this is the wrong
+mode anyway — point pg_lens at the **session/direct endpoint** instead
+(Supabase: port `5432`), or run PgBouncer ≥ 1.21 with
+`max_prepared_statements > 0`.
+
 ### Services file
 
 For more than one database, register named services in

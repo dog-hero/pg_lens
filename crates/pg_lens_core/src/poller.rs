@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
-use tokio_postgres::{Client, Statement};
+use tokio_postgres::{Client, Transaction};
 
 use crate::history::{HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::models::{
@@ -262,25 +262,72 @@ fn admin_result(cmd: AdminCommand, signalled: Result<bool, String>) -> AdminActi
     }
 }
 
-/// Runs the prepared `pg_cancel_backend`/`pg_terminate_backend` statement
-/// for `cmd`. Errors (usually privilege) become `AdminOutcome::Error` — an
-/// admin failure must never tear the polling session down; a genuinely dead
-/// connection will surface on the very next poll anyway.
-async fn execute_admin(client: &Client, stmts: &Prepared, cmd: AdminCommand) -> AdminActionResult {
-    let stmt = match cmd {
-        AdminCommand::CancelBackend(_) => &stmts.cancel_backend,
-        AdminCommand::TerminateBackend(_) => &stmts.terminate_backend,
+/// Per-statement safety ceiling, applied as `SET LOCAL` at the start of every
+/// query transaction. A monitoring tool must never run an unbounded query
+/// against a production server: a pathological plan (e.g. the on-demand bloat
+/// estimate on a schema with thousands of relations) would otherwise hang the
+/// poller's connection forever. `LOCAL` (transaction-scoped) is deliberate —
+/// unlike a session `SET`, it survives a transaction-pooling proxy, where the
+/// server backend changes between transactions. Generous: fast-tick queries
+/// finish in milliseconds; anything that trips it degrades gracefully (bloat
+/// and replication are best-effort; an essential query surfaces a clear
+/// timeout instead of a silent stall).
+const SET_LOCAL_TIMEOUT: &str = "SET LOCAL statement_timeout = 60000";
+
+/// Opens a READ ONLY transaction and applies the per-statement timeout.
+///
+/// Every read the poller issues runs inside such a transaction, for two
+/// reasons that both matter behind a transaction-pooling PgBouncer:
+///   * prepare + execute (tokio-postgres's extended protocol) land on the
+///     SAME server backend — a bare `client.query` splits them across two
+///     implicit transactions, so the pooler can route them to different
+///     backends and the second fails with "prepared statement does not
+///     exist";
+///   * `SET LOCAL statement_timeout` takes hold (a session `SET` would be
+///     discarded when the backend is handed back to the pool).
+///
+/// On a direct connection this also gives the fast tick a single consistent
+/// MVCC snapshot across its three queries. The [`Transaction`] rolls back on
+/// drop, so any early return leaves the connection clean.
+async fn begin_read(client: &mut Client) -> Result<Transaction<'_>, tokio_postgres::Error> {
+    let tx = client.build_transaction().read_only(true).start().await?;
+    tx.batch_execute(SET_LOCAL_TIMEOUT).await?;
+    Ok(tx)
+}
+
+/// Opens a read-write transaction (for the admin actions, which call
+/// `pg_cancel_backend`/`pg_terminate_backend`) and applies the same timeout.
+async fn begin_write(client: &mut Client) -> Result<Transaction<'_>, tokio_postgres::Error> {
+    let tx = client.transaction().await?;
+    tx.batch_execute(SET_LOCAL_TIMEOUT).await?;
+    Ok(tx)
+}
+
+/// Runs the `pg_cancel_backend`/`pg_terminate_backend` statement for `cmd`
+/// inside a transaction (pooler-safe). Errors (usually privilege) become
+/// `AdminOutcome::Error` — an admin failure must never tear the polling
+/// session down; a genuinely dead connection will surface on the next poll.
+async fn execute_admin(client: &mut Client, q: &queries::QuerySet, cmd: AdminCommand) -> AdminActionResult {
+    let sql = match cmd {
+        AdminCommand::CancelBackend(_) => q.cancel_backend,
+        AdminCommand::TerminateBackend(_) => q.terminate_backend,
     };
-    let signalled = match client.query_one(stmt, &[&cmd.pid()]).await {
-        Ok(row) => row.try_get::<_, bool>("is_stopped").map_err(|e| e.to_string()),
-        // Prefer the server's own message ("permission denied to ...") over
-        // tokio-postgres's generic "db error" wrapper — this text is the
-        // frontend's feedback line.
-        Err(e) => Err(e
-            .as_db_error()
+    // Map any tokio-postgres error to the server's own message ("permission
+    // denied to ...") over its generic "db error" Display — this text is the
+    // frontend's feedback line.
+    let server_msg = |e: tokio_postgres::Error| {
+        e.as_db_error()
             .map(|db| db.message().to_string())
-            .unwrap_or_else(|| e.to_string())),
+            .unwrap_or_else(|| e.to_string())
     };
+    let signalled = async {
+        let tx = begin_write(client).await.map_err(server_msg)?;
+        let row = tx.query_one(sql, &[&cmd.pid()]).await.map_err(server_msg)?;
+        let stopped = row.try_get::<_, bool>("is_stopped").map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(server_msg)?;
+        Ok(stopped)
+    }
+    .await;
     admin_result(cmd, signalled)
 }
 
@@ -427,12 +474,12 @@ async fn session(
             Err(e) => return SessionEnd::Error(e.to_string()),
         }
     }
-    let (client, conn_handle) = match db::connect(&config).await {
+    let (mut client, conn_handle) = match db::connect(&config).await {
         Ok(pair) => pair,
         Err(e) => return SessionEnd::Error(format!("connect failed: {e}")),
     };
     let end = poll_loop(
-        &client,
+        &mut client,
         interval_rx,
         tx,
         history,
@@ -447,26 +494,9 @@ async fn session(
     end
 }
 
-/// The statements of a session, prepared once (never per tick). The first
-/// three run every fast tick; `table_stats` and the two estimated-bloat
-/// statements only on the slow cadence; the two admin statements only when
-/// an [`AdminCommand`] arrives.
-struct Prepared {
-    activity: Statement,
-    blocking: Statement,
-    server_info: Statement,
-    table_stats: Statement,
-    bloat_tables: Statement,
-    bloat_indexes: Statement,
-    cancel_backend: Statement,
-    terminate_backend: Statement,
-    replication: Statement,
-    wal_receiver: Statement,
-}
-
 #[allow(clippy::too_many_arguments)] // poller-internal plumbing, one call site
 async fn poll_loop(
-    client: &Client,
+    client: &mut Client,
     interval_rx: &mut watch::Receiver<Duration>,
     tx: &watch::Sender<Arc<DbSnapshot>>,
     history: &mut SnapshotHistory,
@@ -476,67 +506,39 @@ async fn poll_loop(
     last_admin: &mut Option<AdminActionResult>,
     polled_ok: &mut bool,
 ) -> SessionEnd {
-    let version_num = match db::server_version_num(client).await {
-        Ok(v) => v,
-        Err(e) => return SessionEnd::Error(format!("version detection failed: {e}")),
+    // Identify our session (application_name). Best-effort and session-level:
+    // it never blocks the dashboard, and behind a pooler it simply won't
+    // persist (harmless — the safety timeout rides SET LOCAL per transaction).
+    let _ = db::configure_session(client).await;
+
+    // Session init, in one read transaction (pooler-safe): the server version
+    // (which picks the SQL variants) and whether the Query Lens is available.
+    // The statements decision is made once per session — so every reconnect
+    // re-checks it — and unavailability is a calm per-lens state, never a
+    // session error: activity polling continues untouched.
+    let (version_num, statements_extversion) = {
+        let init_tx = match begin_read(client).await {
+            Ok(t) => t,
+            Err(e) => return SessionEnd::Error(db_error_message("version detection failed", &e)),
+        };
+        let version_num = match db::server_version_num(&init_tx).await {
+            Ok(v) => v,
+            Err(e) => return SessionEnd::Error(db_error_message("version detection failed", &e)),
+        };
+        let extversion = match db::statements_extension_version(&init_tx).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(db_error_message("pg_stat_statements detection failed", &e)),
+        };
+        (version_num, extversion)
     };
     let query_set = match queries::for_version(version_num) {
         Ok(q) => q,
         Err(msg) => return SessionEnd::Error(msg),
     };
-    let stmts = match tokio::try_join!(
-        client.prepare(query_set.activity),
-        client.prepare(query_set.blocking),
-        client.prepare(query_set.server_info),
-        client.prepare(query_set.table_stats),
-        client.prepare(query_set.bloat_tables),
-        client.prepare(query_set.bloat_indexes),
-        client.prepare(query_set.cancel_backend),
-        client.prepare(query_set.terminate_backend),
-        client.prepare(query_set.replication),
-        client.prepare(query_set.wal_receiver),
-    ) {
-        Ok((
-            activity,
-            blocking,
-            server_info,
-            table_stats,
-            bloat_tables,
-            bloat_indexes,
-            cancel_backend,
-            terminate_backend,
-            replication,
-            wal_receiver,
-        )) => Prepared {
-            activity,
-            blocking,
-            server_info,
-            table_stats,
-            bloat_tables,
-            bloat_indexes,
-            cancel_backend,
-            terminate_backend,
-            replication,
-            wal_receiver,
-        },
-        Err(e) => return SessionEnd::Error(format!("prepare failed: {e}")),
+    let statements_available: Result<(), String> = match statements_extversion {
+        Ok(extversion) => db::statements_availability(extversion.as_deref()),
+        Err(msg) => Err(msg),
     };
-
-    // Query Lens availability, decided once per SESSION (so every reconnect
-    // re-checks it): the statements query is only prepared when the
-    // extension is installed at >= 1.8. Unavailability is a calm per-lens
-    // state, never a session error — activity polling continues untouched.
-    let statements_stmt: Result<Statement, String> =
-        match db::statements_extension_version(client).await {
-            Ok(extversion) => match db::statements_availability(extversion.as_deref()) {
-                Ok(()) => match client.prepare(query_set.statements).await {
-                    Ok(stmt) => Ok(stmt),
-                    Err(e) => Err(format!("failed to prepare the pg_stat_statements query: {e}")),
-                },
-                Err(reason) => Err(reason),
-            },
-            Err(e) => Err(format!("pg_stat_statements detection failed: {e}")),
-        };
 
     let mut deltas: Option<DeltaState> = None;
 
@@ -549,7 +551,7 @@ async fn poll_loop(
         // Publish the fast tick FIRST so the dashboard appears immediately on
         // connect — the slow schema/statements collection never blocks the
         // first (or any) snapshot; its result rides the NEXT tick.
-        let mut snapshot = match poll_once(client, &stmts, &mut deltas, history).await {
+        let mut snapshot = match poll_once(client, &query_set, &mut deltas, history).await {
             Ok(s) => s,
             Err(msg) => return SessionEnd::Error(format!("poll failed: {msg}")),
         };
@@ -573,15 +575,15 @@ async fn poll_loop(
         let now = Instant::now();
         if let Some(with_bloat) = schema.due(now) {
             schema.last_attempt = Some(now);
-            match collect_schema(client, &stmts, with_bloat).await {
+            match collect_schema(client, &query_set, with_bloat).await {
                 Ok(collection) => schema.store(collection),
                 Err(msg) => schema.store_error(format!("schema collection failed: {msg}")),
             }
             // Statements share the SAME slow tick — no third timer. The
             // unavailable decision was made at session start; a failing
             // query keeps the last good rows (status carries the error).
-            match &statements_stmt {
-                Ok(stmt) => match collect_statements(client, stmt).await {
+            match &statements_available {
+                Ok(()) => match collect_statements(client, query_set.statements).await {
                     Ok(rows) => statements.store(rows),
                     Err(msg) => {
                         statements.store_error(format!("statements collection failed: {msg}"));
@@ -591,11 +593,11 @@ async fn poll_loop(
             }
         }
         // The tick sleep doubles as the admin-command listener: a command
-        // wakes it, executes on this session's prepared statements, and
-        // skips the rest of the sleep so the next poll (and the snapshot
-        // carrying the result) happens immediately.
+        // wakes it, executes inside its own transaction, and skips the rest
+        // of the sleep so the next poll (and the snapshot carrying the
+        // result) happens immediately.
         if let Some(cmd) = wait_interval_or_admin(interval_rx, admin_rx).await {
-            *last_admin = Some(execute_admin(client, &stmts, cmd).await);
+            *last_admin = Some(execute_admin(client, &query_set, cmd).await);
         }
     }
 }
@@ -611,20 +613,31 @@ struct DeltaState {
 }
 
 async fn poll_once(
-    client: &Client,
-    stmts: &Prepared,
+    client: &mut Client,
+    q: &queries::QuerySet,
     deltas: &mut Option<DeltaState>,
     history: &mut SnapshotHistory,
 ) -> Result<DbSnapshot, String> {
-    // Essential queries: three futures pipelined on one client. Their
-    // failure is a real fault, so it is fatal to the poll — surfaced with the
-    // actual server message (tokio-postgres's raw Display is just "db error").
-    let (activity_rows, blocking_rows, info_rows) = tokio::try_join!(
-        client.query(&stmts.activity, &[]),
-        client.query(&stmts.blocking, &[]),
-        client.query(&stmts.server_info, &[]),
-    )
-    .map_err(|e| db_error_message("poll failed", &e))?;
+    // Essential queries: three futures pipelined inside ONE read-only
+    // transaction — a single consistent snapshot, and pooler-safe (prepare +
+    // execute stay on the same backend). Their failure is a real fault, so it
+    // is fatal to the poll, surfaced with the actual server message
+    // (tokio-postgres's raw Display is just "db error").
+    let (activity_rows, blocking_rows, info_rows) = {
+        let etx = begin_read(client)
+            .await
+            .map_err(|e| db_error_message("poll failed", &e))?;
+        let rows = tokio::try_join!(
+            etx.query(q.activity, &[]),
+            etx.query(q.blocking, &[]),
+            etx.query(q.server_info, &[]),
+        )
+        .map_err(|e| db_error_message("poll failed", &e))?;
+        etx.commit()
+            .await
+            .map_err(|e| db_error_message("poll failed", &e))?;
+        rows
+    };
 
     let mut activity = Vec::with_capacity(activity_rows.len());
     for row in &activity_rows {
@@ -644,7 +657,7 @@ async fn poll_once(
     // degrades to "no replication panel" — it must NEVER take the whole poll
     // (and the dashboard) down. Only the query for the server's actual role
     // runs.
-    let replication = collect_replication(client, stmts, info.is_in_recovery).await;
+    let replication = collect_replication(client, q, info.is_in_recovery).await;
 
     let now = Instant::now();
     let xact_total = info.xact_commit + info.xact_rollback;
@@ -746,13 +759,15 @@ struct SchemaCollection {
 /// the auto cadence — it is too slow to hold up the dashboard, so it is
 /// on-demand. Called from the tick loop only when the schema cadence grants.
 async fn collect_schema(
-    client: &Client,
-    stmts: &Prepared,
+    client: &mut Client,
+    q: &queries::QuerySet,
     with_bloat: bool,
 ) -> Result<SchemaCollection, String> {
+    // One read-only transaction for the whole collection (pooler-safe).
+    let stx = begin_read(client).await.map_err(|e| e.to_string())?;
     // Table stats are the collection's backbone: their failure fails it all.
-    let table_rows = client
-        .query(&stmts.table_stats, &[])
+    let table_rows = stx
+        .query(q.table_stats, &[])
         .await
         .map_err(|e| e.to_string())?;
     let mut tables = Vec::with_capacity(table_rows.len());
@@ -761,8 +776,8 @@ async fn collect_schema(
     }
     let bloat = if with_bloat {
         let (bloat_table_rows, bloat_index_rows) = tokio::join!(
-            client.query(&stmts.bloat_tables, &[]),
-            client.query(&stmts.bloat_indexes, &[]),
+            stx.query(q.bloat_tables, &[]),
+            stx.query(q.bloat_indexes, &[]),
         );
         Some(
             bloat_table_rows
@@ -778,6 +793,14 @@ async fn collect_schema(
     } else {
         None
     };
+    // A failed bloat query leaves the transaction aborted, so committing would
+    // error — but `tables` were already materialized before it ran, and the
+    // bloat error is captured in `bloat: Some(Err(_))` (partial-failure
+    // semantics). In that case skip the commit and let the transaction roll
+    // back on drop; otherwise commit normally.
+    if !matches!(&bloat, Some(Err(_))) {
+        stx.commit().await.map_err(|e| e.to_string())?;
+    }
     Ok(SchemaCollection { tables, bloat })
 }
 
@@ -794,14 +817,16 @@ fn bloat_rows(rows: &[tokio_postgres::Row]) -> Result<Vec<BloatRow>, String> {
 /// Runs the (slow) statements query — only reachable when the extension was
 /// detected as available at session start, and only on the schema cadence.
 async fn collect_statements(
-    client: &Client,
-    stmt: &Statement,
+    client: &mut Client,
+    sql: &str,
 ) -> Result<Vec<StatementRow>, String> {
-    let rows = client.query(stmt, &[]).await.map_err(|e| e.to_string())?;
+    let tx = begin_read(client).await.map_err(|e| e.to_string())?;
+    let rows = tx.query(sql, &[]).await.map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(db::statement_from_row(row).map_err(|e| e.to_string())?);
     }
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(out)
 }
 
@@ -810,22 +835,26 @@ async fn collect_statements(
 /// managed server may forbid the WAL views), and its absence must never fail
 /// the poll. Only the query matching the role runs.
 async fn collect_replication(
-    client: &Client,
-    stmts: &Prepared,
+    client: &mut Client,
+    q: &queries::QuerySet,
     is_in_recovery: bool,
 ) -> Option<ReplicationInfo> {
-    if is_in_recovery {
-        let rows = client.query(&stmts.wal_receiver, &[]).await.ok()?;
+    let tx = begin_read(client).await.ok()?;
+    let info = if is_in_recovery {
+        let rows = tx.query(q.wal_receiver, &[]).await.ok()?;
         let receiver = rows.first().and_then(|r| db::wal_receiver_from_row(r).ok());
-        Some(ReplicationInfo::Standby { receiver })
+        ReplicationInfo::Standby { receiver }
     } else {
-        let rows = client.query(&stmts.replication, &[]).await.ok()?;
+        let rows = tx.query(q.replication, &[]).await.ok()?;
         let senders = rows
             .iter()
             .filter_map(|r| db::wal_sender_from_row(r).ok())
             .collect();
-        Some(ReplicationInfo::Primary { senders })
-    }
+        ReplicationInfo::Primary { senders }
+    };
+    // Best-effort: a failed commit just means no panel this tick.
+    tx.commit().await.ok()?;
+    Some(info)
 }
 
 /// Turns a tokio-postgres error into the richest message available. The raw

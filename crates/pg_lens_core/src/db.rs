@@ -5,7 +5,7 @@
 //! it into a `PollerStatus::Error`.
 
 use tokio::task::JoinHandle;
-use tokio_postgres::{Client, Config, NoTls, Row};
+use tokio_postgres::{Client, Config, NoTls, Row, Transaction};
 
 use crate::models::{
     ActivityRow, BloatRow, LockRow, StatementRow, TableStatRow, WalReceiverRow, WalSenderRow,
@@ -30,11 +30,26 @@ pub async fn connect(config: &Config) -> Result<(Client, JoinHandle<()>), tokio_
 }
 
 /// `SELECT current_setting('server_version_num')::int` — e.g. `160003`.
-pub async fn server_version_num(client: &Client) -> Result<i32, tokio_postgres::Error> {
-    let row = client
+/// Runs inside the caller's transaction so it is safe behind a
+/// transaction-pooling proxy (a bare prepare+execute would otherwise split
+/// across two server backends).
+pub async fn server_version_num(tx: &Transaction<'_>) -> Result<i32, tokio_postgres::Error> {
+    let row = tx
         .query_one("SELECT current_setting('server_version_num')::int", &[])
         .await?;
     row.try_get(0)
+}
+
+/// Identifies the poller's own session, run once right after connect, so
+/// operators can see who is connected in `pg_stat_activity` instead of an
+/// anonymous backend. This is a session-level `SET` (reverts on disconnect);
+/// behind a transaction-pooling proxy it will not persist, which is harmless
+/// — the per-statement safety timeout is applied as `SET LOCAL` inside each
+/// query transaction instead (see the poller), so it holds in both modes.
+pub async fn configure_session(client: &Client) -> Result<(), tokio_postgres::Error> {
+    client
+        .batch_execute("SET application_name = 'pg_lens'")
+        .await
 }
 
 /// Maps one row of `queries/activity_post_*.sql` onto [`ActivityRow`].
@@ -237,9 +252,9 @@ fn na_gate(
 /// — `None` when the extension is not installed in the connected database.
 /// Run once per session (and therefore re-run on every reconnect).
 pub async fn statements_extension_version(
-    client: &Client,
+    tx: &Transaction<'_>,
 ) -> Result<Option<String>, tokio_postgres::Error> {
-    let rows = client
+    let rows = tx
         .query(
             "SELECT extversion::text FROM pg_extension WHERE extname = 'pg_stat_statements'",
             &[],

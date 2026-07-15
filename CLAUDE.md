@@ -45,7 +45,8 @@ SQL lives in `pg_lens_core/queries/*.sql` (adapted from dalibo/pg_activity), loa
 - No `.await` anywhere under `crates/pg_lens_tui/src/ui/` — the view is 100% synchronous.
 - No `unwrap()` in `pg_lens_core/src/` — DB errors become `PollerStatus`, never panics.
 - No `std::thread::sleep` / `block_on`; no shared `Mutex` between tasks — data crosses via watch/mpsc messages only.
-- The tokio-postgres `Connection` must be `tokio::spawn`ed (done in `db.rs`) — queries silently hang without it. Statements are prepared once per session, not per tick.
+- The tokio-postgres `Connection` must be `tokio::spawn`ed (done in `db.rs`) — queries silently hang without it.
+- Every poll query runs inside a per-tick **read-only transaction** (`begin_read` in `poller.rs`), never a bare `client.query`. This keeps pg_lens working behind a connection pooler (prepare + execute stay on one backend) and lets `SET LOCAL statement_timeout` hold there; it also gives the fast tick a single consistent snapshot. Admin actions use `begin_write`. NOTE: PgBouncer *transaction* pooling still breaks tokio-postgres's named prepared statements (names leak across backends → `prepared statement already exists`); pg_lens works on direct connections, restricted roles, and *session* pooling — transaction pooling needs PgBouncer ≥1.21 `max_prepared_statements>0`. A full `simple_query` (unnamed-protocol) rewrite is the only way to lift that, deliberately deferred.
 
 ## tokio-postgres type traps (learned the hard way in phase 3)
 
