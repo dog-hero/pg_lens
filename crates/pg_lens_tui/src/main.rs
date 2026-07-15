@@ -55,63 +55,66 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the terminal UI (the default when no subcommand is given).
-    Tui(ConnArgs),
+    /// Run the terminal UI (the default when no subcommand is given). The
+    /// connection flags are global (see [`ConnArgs`]), so they live on the
+    /// top-level `Cli` — this variant carries none of its own.
+    Tui,
 
     /// Serve the web UI and JSON/SSE API over HTTP (read-only).
     #[cfg(feature = "web")]
     Serve(ServeArgs),
 }
 
-/// Connection flags shared by every subcommand.
+/// Connection flags shared by every subcommand. Every flag is `global`, so it
+/// works in any position — `pg_lens --service x serve`, `pg_lens serve
+/// --service x`, and the bare `pg_lens --service x` (= `tui`) all resolve the
+/// same value. (Before, a flag placed BEFORE a subcommand bound to the
+/// top-level back-compat copy and was silently ignored by the subcommand.)
 #[derive(Debug, Args)]
 struct ConnArgs {
     /// PostgreSQL connection string (`key=value` DSN or `postgres://` URL).
     /// Fields not set here fall back to the libpq env vars (PGHOST, PGPORT,
     /// PGDATABASE, PGUSER, PGPASSWORD, PGAPPNAME, PGCONNECT_TIMEOUT), then
     /// to `host=localhost user=postgres`.
-    #[arg(long, env = "PG_LENS_DSN")]
+    #[arg(long, env = "PG_LENS_DSN", global = true)]
     dsn: Option<String>,
 
     /// Connect using a named entry from the services file. Also read from
     /// the PG_LENS_SERVICE env var, falling back to PGSERVICE. Mutually
     /// exclusive with --dsn.
-    #[arg(long, value_name = "NAME", conflicts_with = "dsn")]
+    #[arg(long, value_name = "NAME", conflicts_with = "dsn", global = true)]
     service: Option<String>,
 
     /// Path to the services file. Defaults to
     /// $XDG_CONFIG_HOME/pg_lens/services.toml (or
     /// ~/.config/pg_lens/services.toml); also read from the
     /// PG_LENS_SERVICES_FILE env var.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     services_file: Option<PathBuf>,
 
     /// Print the services defined in the services file (names + host/user,
     /// never passwords) and exit.
-    #[arg(long)]
+    #[arg(long, global = true)]
     list_services: bool,
 
     /// Poll interval in seconds (minimum 0.5).
-    #[arg(long, default_value_t = 2.0)]
+    #[arg(long, default_value_t = 2.0, global = true)]
     interval: f64,
 
     /// Schema Lens collection interval in seconds (minimum 5): table stats
     /// and sizes are expensive, so they run on this slow cadence — never on
     /// the fast tick.
-    #[arg(long, value_name = "SECS", default_value_t = 60)]
+    #[arg(long, value_name = "SECS", default_value_t = 60, global = true)]
     schema_interval: u64,
 
     /// Use built-in mock data instead of a real database (dev/demo mode).
-    #[arg(long)]
+    #[arg(long, global = true)]
     mock: bool,
 }
 
 #[cfg(feature = "web")]
 #[derive(Debug, Args)]
 struct ServeArgs {
-    #[command(flatten)]
-    conn: ConnArgs,
-
     /// Address to bind. Non-loopback addresses are refused unless
     /// PG_LENS_AUTH_TOKEN is set (all /api routes then require
     /// `Authorization: Bearer <token>`).
@@ -310,11 +313,12 @@ async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
     match cli.command {
-        // Bare `pg_lens [flags]` = the historical flat CLI = `tui`.
-        None => run_tui(cli.conn).await,
-        Some(Command::Tui(conn)) => run_tui(conn).await,
+        // Bare `pg_lens [flags]` = the historical flat CLI = `tui`. The
+        // connection flags are global, so they always live on `cli.conn`
+        // regardless of whether a subcommand was given or where the flag sat.
+        None | Some(Command::Tui) => run_tui(cli.conn).await,
         #[cfg(feature = "web")]
-        Some(Command::Serve(args)) => run_serve(args).await,
+        Some(Command::Serve(args)) => run_serve(cli.conn, args).await,
     }
 }
 
@@ -346,11 +350,11 @@ async fn run_tui(conn_args: ConnArgs) -> color_eyre::Result<()> {
 /// `pg_lens serve`: same resolution and poller as the TUI, but the watch
 /// channel feeds pg_lens_web's router instead of ratatui. Runs until Ctrl+C.
 #[cfg(feature = "web")]
-async fn run_serve(args: ServeArgs) -> color_eyre::Result<()> {
+async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
     use color_eyre::eyre::eyre;
 
-    if args.conn.list_services {
-        return args.conn.list_services();
+    if conn.list_services {
+        return conn.list_services();
     }
 
     // Empty tokens count as unset: `PG_LENS_AUTH_TOKEN= pg_lens serve`
@@ -362,10 +366,10 @@ async fn run_serve(args: ServeArgs) -> color_eyre::Result<()> {
     pg_lens_web::ensure_listen_allowed(&args.listen, token.is_some()).map_err(|e| eyre!(e))?;
     let auth_enabled = token.is_some();
 
-    let conn = args.conn.resolve()?;
+    let resolved = conn.resolve()?;
     // `serve` has no `+`/`-` keys; the sender only needs to outlive the
     // server so the poller keeps its cadence.
-    let (_interval_tx, interval_rx) = watch::channel(args.conn.interval());
+    let (_interval_tx, interval_rx) = watch::channel(conn.interval());
     // No re-collect endpoint in the read-only web UI (S4 backlog): the
     // sender only has to outlive the server, like the interval one.
     let (_schema_refresh_tx, schema_refresh_rx) = watch::channel(0u64);
@@ -373,9 +377,9 @@ async fn run_serve(args: ServeArgs) -> color_eyre::Result<()> {
     // ever sends an AdminCommand; the sender just outlives the server.
     let (_admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
     let (snapshots, label) = spawn_poller(
-        conn,
+        resolved,
         interval_rx,
-        args.conn.schema_interval(),
+        conn.schema_interval(),
         schema_refresh_rx,
         admin_rx,
     );
@@ -573,6 +577,38 @@ mod tests {
             services_file: Some(file.to_path_buf()),
             env: env(env_pairs),
         }
+    }
+
+    // --- CLI parsing: global connection flags ---------------------------------
+
+    /// The connection flags are global, so `--service` resolves to the same
+    /// place whether it sits before or after the `serve` subcommand. This is
+    /// the regression guard for the bug where `--service X serve` silently
+    /// ignored the service (it bound to a back-compat top-level copy that the
+    /// subcommand never read).
+    #[test]
+    fn service_flag_works_before_and_after_the_serve_subcommand() {
+        let before = Cli::try_parse_from(["pg_lens", "--service", "demo", "serve"])
+            .expect("parse --service before serve");
+        assert_eq!(before.conn.service.as_deref(), Some("demo"));
+        assert!(matches!(before.command, Some(Command::Serve(_))));
+
+        let after = Cli::try_parse_from(["pg_lens", "serve", "--service", "demo"])
+            .expect("parse serve --service");
+        assert_eq!(after.conn.service.as_deref(), Some("demo"));
+        assert!(matches!(after.command, Some(Command::Serve(_))));
+    }
+
+    /// Bare `pg_lens --dsn ...` (no subcommand) still parses as the historical
+    /// flat CLI, and `--dsn`/`--service` stay mutually exclusive everywhere.
+    #[test]
+    fn flat_backcompat_and_dsn_service_conflict_hold() {
+        let flat = Cli::try_parse_from(["pg_lens", "--dsn", "host=x"]).expect("flat --dsn");
+        assert!(flat.command.is_none());
+        assert_eq!(flat.conn.dsn.as_deref(), Some("host=x"));
+
+        // Conflict is enforced regardless of position relative to `serve`.
+        assert!(Cli::try_parse_from(["pg_lens", "--dsn", "host=x", "--service", "y", "serve"]).is_err());
     }
 
     // --- admin command drain ---------------------------------------------------
