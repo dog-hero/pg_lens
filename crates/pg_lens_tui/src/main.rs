@@ -97,15 +97,20 @@ struct ConnArgs {
     #[arg(long, global = true)]
     list_services: bool,
 
-    /// Poll interval in seconds (minimum 0.5).
-    #[arg(long, default_value_t = 2.0, global = true)]
-    interval: f64,
+    /// Poll interval in seconds (minimum 0.5). [default: 2, or config.toml]
+    #[arg(long, env = "PG_LENS_INTERVAL", global = true)]
+    interval: Option<f64>,
 
     /// Schema Lens collection interval in seconds (minimum 5): table stats
     /// and sizes are expensive, so they run on this slow cadence — never on
-    /// the fast tick.
-    #[arg(long, value_name = "SECS", default_value_t = 60, global = true)]
-    schema_interval: u64,
+    /// the fast tick. [default: 60, or config.toml]
+    #[arg(
+        long,
+        value_name = "SECS",
+        env = "PG_LENS_SCHEMA_INTERVAL",
+        global = true
+    )]
+    schema_interval: Option<u64>,
 
     /// Use built-in mock data instead of a real database (dev/demo mode).
     #[arg(long, global = true)]
@@ -117,9 +122,9 @@ struct ConnArgs {
 struct ServeArgs {
     /// Address to bind. Non-loopback addresses are refused unless
     /// PG_LENS_AUTH_TOKEN is set (all /api routes then require
-    /// `Authorization: Bearer <token>`).
-    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
-    listen: std::net::SocketAddr,
+    /// `Authorization: Bearer <token>`). [default: 127.0.0.1:8080, or config.toml]
+    #[arg(long, value_name = "ADDR", env = "PG_LENS_LISTEN")]
+    listen: Option<std::net::SocketAddr>,
 }
 
 impl ConnArgs {
@@ -166,15 +171,49 @@ impl ConnArgs {
         Ok(Some(resolved))
     }
 
-    fn interval(&self) -> Duration {
-        Duration::from_secs_f64(self.interval.max(0.5))
+    /// Loads `config.toml` (best-effort), printing any non-fatal warnings.
+    /// The file supplies defaults for values not given by a flag or env var.
+    fn app_config(&self) -> settings::AppConfig {
+        let (config, warnings) = settings::load_app_config(&self.spec());
+        for warning in &warnings {
+            eprintln!("warning: {warning}");
+        }
+        config
     }
 
-    /// `--schema-interval`, floored at the core's sanity minimum (5s).
-    fn schema_interval(&self) -> Duration {
-        Duration::from_secs(self.schema_interval)
-            .max(pg_lens_core::poller::SCHEMA_INTERVAL_MIN)
+    /// `--interval`, then `PG_LENS_INTERVAL` (both via clap), then
+    /// `config.toml`, then the 2s default — floored at 0.5s.
+    fn interval(&self, config: &settings::AppConfig) -> Duration {
+        let secs = self.interval.or(config.interval).unwrap_or(2.0);
+        Duration::from_secs_f64(secs.max(0.5))
     }
+
+    /// `--schema-interval`, then env, then `config.toml`, then the 60s
+    /// default — floored at the core's sanity minimum (5s).
+    fn schema_interval(&self, config: &settings::AppConfig) -> Duration {
+        let secs = self.schema_interval.or(config.schema_interval).unwrap_or(60);
+        Duration::from_secs(secs).max(pg_lens_core::poller::SCHEMA_INTERVAL_MIN)
+    }
+}
+
+/// The web `serve` bind address: `--listen`, then `PG_LENS_LISTEN` (both via
+/// clap), then `config.toml`, then `127.0.0.1:8080`. A config value that
+/// fails to parse is ignored with a warning.
+#[cfg(feature = "web")]
+fn resolve_listen(
+    flag: Option<std::net::SocketAddr>,
+    config: &settings::AppConfig,
+) -> std::net::SocketAddr {
+    if let Some(addr) = flag {
+        return addr;
+    }
+    if let Some(raw) = config.listen.as_deref() {
+        match raw.parse() {
+            Ok(addr) => return addr,
+            Err(e) => eprintln!("warning: ignoring config listen \"{raw}\": {e}"),
+        }
+    }
+    std::net::SocketAddr::from(([127, 0, 0, 1], 8080))
 }
 
 /// How `run` starts: with a connection already resolved (the classic path),
@@ -341,8 +380,9 @@ async fn run_tui(conn_args: ConnArgs) -> color_eyre::Result<()> {
         _ => Startup::Connect(Box::new(conn_args.resolve()?)),
     };
 
+    let config = conn_args.app_config();
     let terminal = ratatui::init();
-    let result = run(terminal, &conn_args, startup).await;
+    let result = run(terminal, &conn_args, &config, startup).await;
     ratatui::restore();
     result
 }
@@ -357,19 +397,22 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
         return conn.list_services();
     }
 
+    let config = conn.app_config();
+    let listen = resolve_listen(args.listen, &config);
+
     // Empty tokens count as unset: `PG_LENS_AUTH_TOKEN= pg_lens serve`
     // must not silently create a server "protected" by the empty string.
     let token = std::env::var("PG_LENS_AUTH_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());
     // Security gate: non-loopback bind without a token refuses to start.
-    pg_lens_web::ensure_listen_allowed(&args.listen, token.is_some()).map_err(|e| eyre!(e))?;
+    pg_lens_web::ensure_listen_allowed(&listen, token.is_some()).map_err(|e| eyre!(e))?;
     let auth_enabled = token.is_some();
 
     let resolved = conn.resolve()?;
     // `serve` has no `+`/`-` keys; the sender only needs to outlive the
     // server so the poller keeps its cadence.
-    let (_interval_tx, interval_rx) = watch::channel(conn.interval());
+    let (_interval_tx, interval_rx) = watch::channel(conn.interval(&config));
     // No re-collect endpoint in the read-only web UI (S4 backlog): the
     // sender only has to outlive the server, like the interval one.
     let (_schema_refresh_tx, schema_refresh_rx) = watch::channel(0u64);
@@ -379,13 +422,13 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
     let (snapshots, label) = spawn_poller(
         resolved,
         interval_rx,
-        conn.schema_interval(),
+        conn.schema_interval(&config),
         schema_refresh_rx,
         admin_rx,
     );
 
     let router = pg_lens_web::router(snapshots, token);
-    let listener = tokio::net::TcpListener::bind(args.listen).await?;
+    let listener = tokio::net::TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
     // Operator info on stderr: bound address + auth mode + safe label
     // (user@host — never the DSN or password).
@@ -405,9 +448,11 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
 async fn run(
     mut terminal: DefaultTerminal,
     conn_args: &ConnArgs,
+    config: &settings::AppConfig,
     startup: Startup,
 ) -> color_eyre::Result<()> {
-    let interval = conn_args.interval();
+    let interval = conn_args.interval(config);
+    let schema_interval = conn_args.schema_interval(config);
     let mut app = App::new();
     app.refresh_interval = interval;
 
@@ -441,7 +486,7 @@ async fn run(
             let (snapshots, label) = spawn_poller(
                 *conn,
                 interval_rx,
-                conn_args.schema_interval(),
+                schema_interval,
                 schema_refresh_rx,
                 admin_rx,
             );
@@ -520,7 +565,7 @@ async fn run(
             let (snapshots, label) = spawn_poller(
                 Some(resolved),
                 interval_rx,
-                conn_args.schema_interval(),
+                schema_interval,
                 schema_refresh_rx,
                 admin_rx,
             );

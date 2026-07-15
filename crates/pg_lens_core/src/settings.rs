@@ -326,6 +326,21 @@ fn selected_service(spec: &ConnSpec) -> Option<(String, ServiceOrigin)> {
     None
 }
 
+/// The base config directory: `$XDG_CONFIG_HOME`, else `$HOME/.config`
+/// (from the injected env). `None` when neither is set.
+fn xdg_config_dir(spec: &ConnSpec) -> Option<PathBuf> {
+    spec.env
+        .get("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            spec.env
+                .get("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })
+}
+
 /// The services-file path plus whether it was named explicitly (flag/env —
 /// must exist) or is just the XDG default (may quietly not exist).
 pub(crate) fn services_file_path(spec: &ConnSpec) -> Option<(PathBuf, bool)> {
@@ -335,18 +350,61 @@ pub(crate) fn services_file_path(spec: &ConnSpec) -> Option<(PathBuf, bool)> {
     if let Some(path) = spec.env.get("PG_LENS_SERVICES_FILE").filter(|v| !v.is_empty()) {
         return Some((PathBuf::from(path), true));
     }
-    let config_dir = spec
-        .env
-        .get("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            spec.env
-                .get("HOME")
-                .filter(|v| !v.is_empty())
-                .map(|home| PathBuf::from(home).join(".config"))
-        })?;
+    let config_dir = xdg_config_dir(spec)?;
     Some((config_dir.join("pg_lens").join("services.toml"), false))
+}
+
+/// User defaults from `config.toml` (alongside `services.toml`). Every field
+/// is optional and overridden by the matching flag or env var; its own
+/// built-in default applies when all are unset. Unlike the services file it
+/// holds no secrets, so no permission checks — a missing file is simply the
+/// empty config.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppConfig {
+    /// Poll interval in seconds (`--interval` / `PG_LENS_INTERVAL`).
+    pub interval: Option<f64>,
+    /// Schema Lens collection interval in seconds
+    /// (`--schema-interval` / `PG_LENS_SCHEMA_INTERVAL`).
+    pub schema_interval: Option<u64>,
+    /// Web `serve` bind address (`--listen` / `PG_LENS_LISTEN`).
+    pub listen: Option<String>,
+}
+
+/// Locates `config.toml`: `PG_LENS_CONFIG_FILE`, else
+/// `<xdg-config>/pg_lens/config.toml`. `None` when no config dir can be
+/// derived and no override is set.
+fn config_file_path(spec: &ConnSpec) -> Option<PathBuf> {
+    if let Some(path) = spec.env.get("PG_LENS_CONFIG_FILE").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    Some(xdg_config_dir(spec)?.join("pg_lens").join("config.toml"))
+}
+
+/// Loads `config.toml` best-effort: a missing file is the empty config; an
+/// unreadable or unparsable one is ALSO the empty config plus a warning — a
+/// broken config must never stop pg_lens from starting. Returns the parsed
+/// defaults and any non-fatal warnings (for the caller to print to stderr).
+pub fn load_app_config(spec: &ConnSpec) -> (AppConfig, Vec<String>) {
+    let Some(path) = config_file_path(spec) else {
+        return (AppConfig::default(), Vec::new());
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => match toml::from_str::<AppConfig>(&contents) {
+            Ok(config) => (config, Vec::new()),
+            Err(e) => (
+                AppConfig::default(),
+                vec![format!("ignoring {}: {e}", path.display())],
+            ),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            (AppConfig::default(), Vec::new())
+        }
+        Err(e) => (
+            AppConfig::default(),
+            vec![format!("cannot read {}: {e}", path.display())],
+        ),
+    }
 }
 
 /// Copies every service field the DSN did not already pin into `config`
@@ -539,6 +597,51 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    fn config_spec(file: &std::path::Path) -> ConnSpec {
+        ConnSpec {
+            env: env(&[("PG_LENS_CONFIG_FILE", file.to_str().unwrap())]),
+            ..ConnSpec::default()
+        }
+    }
+
+    #[test]
+    fn app_config_parses_all_fields() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            "interval = 5.0\nschema_interval = 120\nlisten = \"0.0.0.0:9000\""
+        )
+        .unwrap();
+        let (cfg, warnings) = load_app_config(&config_spec(f.path()));
+        assert!(warnings.is_empty());
+        assert_eq!(cfg.interval, Some(5.0));
+        assert_eq!(cfg.schema_interval, Some(120));
+        assert_eq!(cfg.listen.as_deref(), Some("0.0.0.0:9000"));
+    }
+
+    #[test]
+    fn app_config_missing_file_is_empty_and_silent() {
+        let spec = ConnSpec {
+            env: env(&[("PG_LENS_CONFIG_FILE", "/no/such/pg_lens_config.toml")]),
+            ..ConnSpec::default()
+        };
+        let (cfg, warnings) = load_app_config(&spec);
+        assert!(cfg.interval.is_none() && cfg.schema_interval.is_none() && cfg.listen.is_none());
+        assert!(warnings.is_empty(), "missing file must be silent: {warnings:?}");
+    }
+
+    #[test]
+    fn app_config_unknown_key_or_bad_toml_warns_but_defaults() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, "bogus_key = 1").unwrap();
+        let (cfg, warnings) = load_app_config(&config_spec(f.path()));
+        assert!(cfg.interval.is_none());
+        assert_eq!(warnings.len(), 1, "unknown key must warn");
+        assert!(warnings[0].contains("ignoring"));
     }
 
     fn resolve_ok(dsn: Option<&str>, env: HashMap<String, String>) -> (Config, ConnLabel) {

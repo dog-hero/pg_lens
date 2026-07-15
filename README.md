@@ -374,6 +374,23 @@ exactly as before: connect directly.
 > group/other read permission. A plaintext `password` works but is
 > discouraged; prefer `password_cmd`.
 
+### Config file
+
+Persistent defaults live in `~/.config/pg_lens/config.toml`
+(`$XDG_CONFIG_HOME/pg_lens/config.toml`, or `PG_LENS_CONFIG_FILE`), next to the
+services file. Every key is optional:
+
+```toml
+interval = 2.0          # poll interval, seconds (--interval)
+schema_interval = 60    # Schema Lens cadence, seconds (--schema-interval)
+listen = "127.0.0.1:8080"  # serve bind address (--listen)
+```
+
+Precedence, highest first: **flag → env var → config.toml → built-in default**
+(`PG_LENS_INTERVAL`, `PG_LENS_SCHEMA_INTERVAL`, `PG_LENS_LISTEN`). A missing
+file is silently the empty config; an unparsable one is ignored with a warning
+on stderr — a broken config never stops pg_lens from starting.
+
 ### Keybindings
 
 | Key | Action |
@@ -522,8 +539,6 @@ service picker, Homebrew/deb/rpm/crates.io distribution.
       process; persist it so charts survive restarts and cover hours.
 - [ ] **Activity filtering** — filter/search the Micro Lens by database,
       user, application or query text.
-- [ ] **Config file** — `~/.config/pg_lens/config.toml` for defaults
-      (interval, schema interval, listen address) instead of flags.
 
 **Backlog (deliberately deprioritized):**
 
