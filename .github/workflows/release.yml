@@ -10,7 +10,7 @@ env:
 
 permissions:
   contents: write
-  packages: write # docker job pushes to GHCR with GITHUB_TOKEN
+  # packages: write # only the docker job needs this; re-add when it is re-enabled
 
 jobs:
   build-linux:
@@ -96,8 +96,13 @@ jobs:
 
   # Builds from source inside the Dockerfile (frontend + musl), so it does
   # not depend on the tarball artifacts — runs in parallel with the builds.
+  # TEMPORARILY DISABLED during active development: the multi-arch build
+  # (arm64 under QEMU) takes 30-60 min per release. Flip `if: false` back
+  # to `if: true` (or delete the guard) and re-add `packages: write` above
+  # to re-enable GHCR publishing.
   docker:
     name: Docker image (GHCR)
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
