@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio_postgres::{Client, Transaction};
 
-use crate::history::{HistoryPoint, SnapshotHistory, epoch_ms_now};
+use crate::history::{DEFAULT_CAP, HistoryPoint, SnapshotHistory, epoch_ms_now};
+use crate::history_store::HistoryStore;
 use crate::models::{
     AdminActionResult, AdminCommand, AdminOutcome, BloatRow, DbSnapshot, PollerStatus,
     ReplicationInfo, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
@@ -370,6 +371,7 @@ pub fn spawn(
     schema_interval: Duration,
     schema_refresh_rx: watch::Receiver<u64>,
     admin_rx: mpsc::Receiver<AdminCommand>,
+    history_path: Option<std::path::PathBuf>,
 ) -> watch::Receiver<Arc<DbSnapshot>> {
     let (tx, rx) = watch::channel(Arc::new(DbSnapshot::connecting()));
     let schema = SchemaState::new(schema_interval, schema_refresh_rx);
@@ -380,6 +382,7 @@ pub fn spawn(
         schema,
         admin_rx,
         tx,
+        history_path,
     ));
     rx
 }
@@ -392,12 +395,24 @@ async fn run(
     mut schema: SchemaState,
     mut admin_rx: mpsc::Receiver<AdminCommand>,
     tx: watch::Sender<Arc<DbSnapshot>>,
+    history_path: Option<std::path::PathBuf>,
 ) {
     let mut backoff = BACKOFF_INITIAL;
     // Survives reconnects so the sparklines don't reset on a blip.
     // (`schema` too: the last collection outlives a connection blip.
     // `last_admin` likewise: the result banner must not vanish on a blip.)
     let mut history = SnapshotHistory::default();
+    // Persistence (best-effort): seed the ring from disk so the chart resumes
+    // after a restart, and append/compact as new points arrive. `None`
+    // (e.g. --mock, or no derivable state dir) simply keeps everything
+    // in-memory as before.
+    let store = history_path.map(HistoryStore::new);
+    if let Some(store) = &store {
+        for point in store.load(DEFAULT_CAP) {
+            history.push(point);
+        }
+    }
+    let mut appends_since_compact: usize = 0;
     // Statements share the schema's slow cadence and, like it, outlive a
     // connection blip (the last collection stays on screen).
     let mut statements = StatementsState::new();
@@ -415,6 +430,8 @@ async fn run(
             &mut admin_rx,
             &mut last_admin,
             &mut polled_ok,
+            store.as_ref(),
+            &mut appends_since_compact,
         )
         .await;
         match end {
@@ -461,6 +478,8 @@ async fn session(
     admin_rx: &mut mpsc::Receiver<AdminCommand>,
     last_admin: &mut Option<AdminActionResult>,
     polled_ok: &mut bool,
+    store: Option<&HistoryStore>,
+    appends_since_compact: &mut usize,
 ) -> SessionEnd {
     // The base config is never mutated: the resolved password goes into a
     // per-attempt clone (and is dropped with it).
@@ -488,6 +507,8 @@ async fn session(
         admin_rx,
         last_admin,
         polled_ok,
+        store,
+        appends_since_compact,
     )
     .await;
     conn_handle.abort();
@@ -505,6 +526,8 @@ async fn poll_loop(
     admin_rx: &mut mpsc::Receiver<AdminCommand>,
     last_admin: &mut Option<AdminActionResult>,
     polled_ok: &mut bool,
+    store: Option<&HistoryStore>,
+    appends_since_compact: &mut usize,
 ) -> SessionEnd {
     // Identify our session (application_name). Best-effort and session-level:
     // it never blocks the dashboard, and behind a pooler it simply won't
@@ -564,6 +587,19 @@ async fn poll_loop(
         *polled_ok = true;
         if tx.send(Arc::new(snapshot)).is_err() {
             return SessionEnd::Closed;
+        }
+        // Persist this tick's point (best-effort). Compact every DEFAULT_CAP
+        // appends so a long-running session's file stays bounded to ~2× the
+        // ring; the rewrite keeps exactly the current ring.
+        if let Some(store) = store
+            && let Some(point) = history.latest()
+        {
+            store.append(point);
+            *appends_since_compact += 1;
+            if *appends_since_compact >= DEFAULT_CAP {
+                store.compact(&history.iter().cloned().collect::<Vec<_>>());
+                *appends_since_compact = 0;
+            }
         }
 
         // Slow collection AFTER the fast snapshot is out. `due` returns
@@ -1125,6 +1161,7 @@ mod tests {
             SCHEMA_INTERVAL_DEFAULT,
             refresh_rx(),
             admin_rx(),
+            None,
         );
 
         assert!(matches!(rx.borrow().status, PollerStatus::Connecting));
@@ -1160,6 +1197,7 @@ mod tests {
             SCHEMA_INTERVAL_DEFAULT,
             refresh_rx(),
             admin_rx(),
+            None,
         );
 
         tokio::time::timeout(Duration::from_secs(5), rx.changed())
@@ -1201,6 +1239,7 @@ mod tests {
             SCHEMA_INTERVAL_DEFAULT,
             refresh_rx(),
             admin_rx(),
+            None,
         );
 
         // First attempt at ~0s, second after the 1s backoff. Poll the file

@@ -391,6 +391,17 @@ Precedence, highest first: **flag → env var → config.toml → built-in defau
 file is silently the empty config; an unparsable one is ignored with a warning
 on stderr — a broken config never stops pg_lens from starting.
 
+### Persistent history
+
+The TPS / active-sessions chart is backed by a ring that now **survives
+restarts**: each sample is appended to
+`~/.local/state/pg_lens/history-<host>_<port>_<db>.jsonl`
+(`$XDG_STATE_HOME` if set), per connection target, and reloaded on start so
+the chart resumes with prior data instead of a blank canvas. The default ring
+holds an hour at the 2s poll. Persistence is entirely best-effort — a
+read-only or full state directory just falls back to in-memory only, and the
+file self-compacts so it never grows without bound.
+
 ### Keybindings
 
 | Key | Action |
@@ -535,8 +546,6 @@ service picker, Homebrew/deb/rpm/crates.io distribution.
 - [ ] **Web Lens parity** — bring the web UI closer to the TUI: schema
       re-collect / bloat refresh trigger, pause, and (behind auth) the same
       admin actions.
-- [ ] **Persistent history** — the in-memory ring (120 samples) dies with the
-      process; persist it so charts survive restarts and cover hours.
 - [ ] **Activity filtering** — filter/search the Micro Lens by database,
       user, application or query text.
 

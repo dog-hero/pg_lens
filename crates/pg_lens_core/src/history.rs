@@ -12,10 +12,13 @@
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-/// Default ring capacity (~120 samples = 4 minutes at the 2s default poll).
-pub const DEFAULT_CAP: usize = 120;
+/// Default ring capacity: 1800 samples = 1 hour at the 2s default poll (and
+/// proportionally longer at slower cadences). Large enough that the chart
+/// spans hours; combined with [`crate::history_store`] the series also
+/// survives restarts. ~36 KB per snapshot clone — trivial at one clone/tick.
+pub const DEFAULT_CAP: usize = 1800;
 
 /// Wall-clock timestamp for a new [`HistoryPoint`], in Unix epoch
 /// milliseconds. Falls back to `0` if the system clock predates the epoch.
@@ -27,7 +30,8 @@ pub fn epoch_ms_now() -> u64 {
 }
 
 /// One time-series sample, taken by the poller as it publishes a snapshot.
-#[derive(Clone, Debug, Serialize)]
+/// `Deserialize` too, so [`crate::history_store`] can reload persisted points.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoryPoint {
     /// When the sample was taken (Unix epoch milliseconds).
     pub epoch_ms: u64,
@@ -118,7 +122,8 @@ mod tests {
     fn default_cap_matches_plan() {
         let h = SnapshotHistory::default();
         assert_eq!(h.cap, DEFAULT_CAP);
-        assert_eq!(DEFAULT_CAP, 120);
+        // 1 hour at the 2s default poll.
+        assert_eq!(DEFAULT_CAP, 1800);
     }
 
     #[test]

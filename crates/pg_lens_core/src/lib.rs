@@ -6,6 +6,7 @@
 
 pub mod db;
 pub mod history;
+pub mod history_store;
 pub mod models;
 pub mod poller;
 pub mod queries;

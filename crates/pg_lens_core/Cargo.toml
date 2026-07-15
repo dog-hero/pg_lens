@@ -22,8 +22,9 @@ tokio = { version = "1.52.3", features = ["macros", "process", "rt", "sync", "ti
 tokio-postgres = "0.7.18"
 # Services file parsing (Fase C2). Default features = "parse" + "serde".
 toml = "1.1.2"
+# History persistence as JSONL (Fase #25) and general (de)serialization.
+serde_json = "1.0.150"
 
 [dev-dependencies]
-serde_json = "1.0.150"
 tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["macros"] }

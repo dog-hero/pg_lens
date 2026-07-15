@@ -316,6 +316,7 @@ fn spawn_poller(
             // host and user, never the password. When the resolution came
             // with a password_cmd, the poller re-runs it per (re)connection.
             let label = resolved.label.to_string();
+            let history_path = history_file_path(&resolved.config);
             let snapshots = pg_lens_core::poller::spawn(
                 resolved.config,
                 resolved.password_source,
@@ -323,10 +324,58 @@ fn spawn_poller(
                 schema_interval,
                 schema_refresh_rx,
                 admin_rx,
+                history_path,
             );
             (snapshots, label)
         }
     }
+}
+
+/// Where to persist this connection's history ring: `<state>/pg_lens/`
+/// (`$XDG_STATE_HOME`, else `$HOME/.local/state`) with a per-target filename
+/// so distinct servers keep distinct series. `None` when no state directory
+/// can be derived — persistence is then simply off (in-memory only).
+fn history_file_path(config: &pg_lens_core::tokio_postgres::Config) -> Option<PathBuf> {
+    let state_dir = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".local").join("state"))
+        })?;
+    Some(
+        state_dir
+            .join("pg_lens")
+            .join(format!("history-{}.jsonl", history_key(config))),
+    )
+}
+
+/// A stable, filesystem-safe key for one connection target (host_port_db),
+/// so `pg_lens` against different servers doesn't cross-contaminate history.
+fn history_key(config: &pg_lens_core::tokio_postgres::Config) -> String {
+    use pg_lens_core::tokio_postgres::config::Host;
+    let host = config
+        .get_hosts()
+        .first()
+        .map(|h| match h {
+            Host::Tcp(s) => s.clone(),
+            Host::Unix(p) => p.to_string_lossy().into_owned(),
+        })
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = config.get_ports().first().copied().unwrap_or(5432);
+    let db = config
+        .get_dbname()
+        .or_else(|| config.get_user())
+        .unwrap_or("postgres");
+    format!("{host}_{port}_{db}")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Forwards admin commands queued by `update()` (the `y` of the confirm
