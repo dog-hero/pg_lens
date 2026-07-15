@@ -7,6 +7,7 @@
 import type { ActivityRow, LockRow } from "./types";
 import { humanDuration } from "./format";
 import { renderSqlInto } from "./sql";
+import type { AdminKind } from "./actions";
 
 type SortKey =
   | "pid"
@@ -60,15 +61,25 @@ export class ActivityTable {
   private readonly thead: HTMLTableSectionElement;
   private readonly tbody: HTMLTableSectionElement;
   private readonly count: HTMLElement | null;
+  /** True when admin actions are available (a token is active). */
+  private readonly adminEnabled: () => boolean;
+  /** Invoked when a row's Cancel/Kill button is pressed. */
+  private readonly onAdmin: ((kind: AdminKind, row: ActivityRow) => void) | null;
 
   constructor(
     table: HTMLTableElement,
     filterInput?: HTMLInputElement | null,
     count?: HTMLElement | null,
+    opts?: {
+      adminEnabled?: () => boolean;
+      onAdmin?: (kind: AdminKind, row: ActivityRow) => void;
+    },
   ) {
     this.thead = table.tHead ?? table.createTHead();
     this.tbody = table.tBodies[0] ?? table.createTBody();
     this.count = count ?? null;
+    this.adminEnabled = opts?.adminEnabled ?? (() => false);
+    this.onAdmin = opts?.onAdmin ?? null;
     if (filterInput) {
       filterInput.addEventListener("input", () => {
         this.filter = filterInput.value.trim().toLowerCase();
@@ -81,7 +92,14 @@ export class ActivityTable {
   update(activity: ActivityRow[], locks: LockRow[]): void {
     this.rows = activity;
     this.blocked = new Set(locks.map((lock) => lock.pid));
+    // Re-render the head too: the Actions column appears once a token makes
+    // admin available (it may become enabled after the first render).
+    this.renderHead();
     this.renderBody();
+  }
+
+  private showActions(): boolean {
+    return this.onAdmin !== null && this.adminEnabled();
   }
 
   private setSort(key: SortKey): void {
@@ -111,6 +129,11 @@ export class ActivityTable {
         th.addEventListener("click", () => this.setSort(key));
       }
       if (col.numeric) th.classList.add("num");
+      tr.append(th);
+    }
+    if (this.showActions()) {
+      const th = document.createElement("th");
+      th.textContent = "Actions";
       tr.append(th);
     }
     this.thead.replaceChildren(tr);
@@ -145,7 +168,7 @@ export class ActivityTable {
       const tr = document.createElement("tr");
       tr.classList.add("empty-row");
       const td = document.createElement("td");
-      td.colSpan = COLUMNS.length;
+      td.colSpan = COLUMNS.length + (this.showActions() ? 1 : 0);
       td.textContent =
         this.rows.length > 0 && this.filter
           ? `No sessions match “${this.filter}”`
@@ -185,8 +208,30 @@ export class ActivityTable {
         query.title = row.query;
         renderSqlInto(query, row.query);
         tr.append(query);
+        if (this.showActions()) {
+          tr.append(this.actionsCell(row));
+        }
         return tr;
       }),
     );
+  }
+
+  /** Cancel / Kill buttons for one row (only rendered when admin is on). */
+  private actionsCell(row: ActivityRow): HTMLTableCellElement {
+    const td = document.createElement("td");
+    td.classList.add("actions");
+    const button = (kind: AdminKind, label: string, cls: string): HTMLButtonElement => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.classList.add("action-btn", cls);
+      b.addEventListener("click", () => this.onAdmin?.(kind, row));
+      return b;
+    };
+    td.append(
+      button("cancel", "Cancel", "cancel"),
+      button("terminate", "Kill", "kill"),
+    );
+    return td;
   }
 }

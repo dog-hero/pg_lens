@@ -11,6 +11,10 @@
       <header id="topbar">
         <span class="brand">pg_lens</span>
         <span id="server-info" class="server-info"></span>
+        <span id="toast" class="toast" hidden></span>
+        <button id="pause-btn" class="ghost-btn" type="button" title="Freeze the live view (Space)">
+          Pause
+        </button>
         <span id="conn-state" class="conn-state" data-state="connecting">connecting…</span>
       </header>
       <div id="status-banner" hidden></div>
@@ -68,7 +72,17 @@
           </div>
         </section>
         <section id="schema-panel" class="panel" role="tabpanel" hidden>
-          <h2>Schema <span class="panel-note">estimated bloat</span></h2>
+          <h2>
+            Schema <span class="panel-note">estimated bloat</span>
+            <button
+              id="schema-refresh-btn"
+              class="ghost-btn"
+              type="button"
+              title="Recollect table stats + estimated bloat now"
+            >
+              Refresh
+            </button>
+          </h2>
           <p id="schema-staleness" class="staleness"></p>
           <p id="schema-warning" class="inline-warning" hidden></p>
           <p id="schema-placeholder" class="placeholder">collecting…</p>

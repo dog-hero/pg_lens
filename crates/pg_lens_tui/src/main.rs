@@ -462,12 +462,11 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
     // `serve` has no `+`/`-` keys; the sender only needs to outlive the
     // server so the poller keeps its cadence.
     let (_interval_tx, interval_rx) = watch::channel(conn.interval(&config));
-    // No re-collect endpoint in the read-only web UI (S4 backlog): the
-    // sender only has to outlive the server, like the interval one.
-    let (_schema_refresh_tx, schema_refresh_rx) = watch::channel(0u64);
-    // The web stays read-only by design (plan's security posture): no route
-    // ever sends an AdminCommand; the sender just outlives the server.
-    let (_admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
+    // Web parity (Fase #24): `POST /api/schema/refresh` bumps this counter…
+    let (schema_refresh_tx, schema_refresh_rx) = watch::channel(0u64);
+    // …and `POST /api/admin/*` (token-gated) sends here. Both feed the same
+    // poller channels the TUI uses.
+    let (admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
     let (snapshots, label) = spawn_poller(
         resolved,
         interval_rx,
@@ -476,7 +475,7 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
         admin_rx,
     );
 
-    let router = pg_lens_web::router(snapshots, token);
+    let router = pg_lens_web::router(snapshots, schema_refresh_tx, admin_tx, token);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
     // Operator info on stderr: bound address + auth mode + safe label

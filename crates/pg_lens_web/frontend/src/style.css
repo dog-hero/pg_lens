@@ -629,6 +629,68 @@ table#statements {
   font-style: italic;
 }
 
+/* Small header/panel buttons (pause, schema refresh). */
+.ghost-btn {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+.ghost-btn:hover {
+  border-color: var(--accent);
+}
+.ghost-btn.active {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+h2 .ghost-btn {
+  float: right;
+  margin-top: -2px;
+}
+
+/* Transient action feedback in the topbar. */
+.toast {
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 0.85em;
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-panel));
+  border: 1px solid var(--accent);
+  color: var(--fg);
+}
+.toast[data-kind="error"] {
+  background: color-mix(in srgb, var(--bad) 20%, var(--bg-panel));
+  border-color: var(--bad);
+}
+
+/* Per-row admin buttons (only shown when a token is active). */
+td.actions {
+  white-space: nowrap;
+}
+.action-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  border-radius: 5px;
+  padding: 1px 8px;
+  margin-right: 4px;
+  font: inherit;
+  font-size: 0.8em;
+  cursor: pointer;
+}
+.action-btn.cancel:hover {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.action-btn.kill:hover {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
 #token-input:focus {
   outline: none;
   border-color: var(--accent);

@@ -476,10 +476,13 @@ See [CLAUDE.md](CLAUDE.md) for architecture invariants and
 ## Web Lens
 
 `pg_lens serve` hosts the same Macro/Micro Lens as a live web dashboard —
-vitals cards, a TPS/active-sessions chart (uPlot), and a sortable activity
-table with blocked/waiting row highlighting — streamed over Server-Sent
-Events from the same poller the TUI uses. Read-only by design: no
-cancel/terminate actions are exposed over HTTP.
+vitals cards, a TPS/active-sessions chart (uPlot), and a sortable, filterable
+activity table with blocked/waiting row highlighting — streamed over
+Server-Sent Events from the same poller the TUI uses. It has near-parity with
+the TUI: **pause** the live view, **refresh** the Schema Lens on demand, and
+**cancel/terminate** backends. Admin actions are only exposed when the server
+is started with `PG_LENS_AUTH_TOKEN` (the server answers `403` otherwise) — the
+unauthenticated path stays read-only.
 
 <!-- TODO: screenshot of the web dashboard -->
 
@@ -536,18 +539,12 @@ and never expose the server without TLS.
 
 ## Roadmap
 
-Shipped: Web Lens (`pg_lens serve`), Schema Lens (table stats + on-demand
-bloat), Query Lens (`pg_stat_statements`), replication/WAL panel, admin
-actions (cancel/terminate), services file with `password_cmd`, interactive
-service picker, Homebrew/deb/rpm/crates.io distribution.
-
-**Active (next up):**
-
-- [ ] **Web Lens parity** — bring the web UI closer to the TUI: schema
-      re-collect / bloat refresh trigger, pause, and (behind auth) the same
-      admin actions.
-- [ ] **Activity filtering** — filter/search the Micro Lens by database,
-      user, application or query text.
+Shipped: Web Lens (`pg_lens serve`, with TUI parity — pause, schema refresh,
+token-gated admin), Schema Lens (table stats + on-demand bloat), Query Lens
+(`pg_stat_statements`), replication/WAL panel, admin actions
+(cancel/terminate), activity filtering, persistent history, `config.toml`
+defaults, services file with `password_cmd`, interactive service picker,
+Homebrew/deb/rpm/crates.io distribution.
 
 **Backlog (deliberately deprioritized):**
 

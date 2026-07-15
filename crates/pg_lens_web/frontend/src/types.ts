@@ -180,6 +180,16 @@ export type ReplicationInfo =
   | { Primary: { senders: WalSenderRow[] } }
   | { Standby: { receiver: WalReceiverRow | null } };
 
+/** Result of an admin action, stamped by the poller inside every snapshot
+ * until superseded; frontends dedupe by `at_epoch_ms`. Serde shapes:
+ * kind = "Cancel"|"Terminate", outcome = {Signalled:bool}|{Error:string}. */
+export interface AdminActionResult {
+  kind: "Cancel" | "Terminate";
+  pid: number;
+  outcome: { Signalled: boolean } | { Error: string };
+  at_epoch_ms: number;
+}
+
 export interface DbSnapshot {
   vitals: ServerVitals;
   activity: ActivityRow[];
@@ -189,4 +199,5 @@ export interface DbSnapshot {
   statements: StatementsSnapshot | null;
   replication: ReplicationInfo | null;
   status: PollerStatus;
+  last_admin_action: AdminActionResult | null;
 }

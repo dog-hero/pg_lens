@@ -29,18 +29,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use futures_util::stream::Stream;
-use pg_lens_core::DbSnapshot;
+use pg_lens_core::{AdminCommand, DbSnapshot};
 use subtle::ConstantTimeEq;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
-/// Shared state: the snapshot channel plus the (optional) bearer token.
+/// Shared state: the snapshot channel, the (optional) bearer token, and the
+/// two control channels into the poller (Fase #24 web parity).
 ///
 /// The token lives in an `Arc<str>` so cloning the state per-request is
 /// cheap and the secret is never `Debug`-printed (no derive on purpose).
@@ -48,6 +49,12 @@ use tokio::sync::watch;
 struct WebState {
     snapshots: watch::Receiver<Arc<DbSnapshot>>,
     token: Option<Arc<str>>,
+    /// Bumped by `POST /api/schema/refresh` — the poller recollects the
+    /// Schema Lens on its next tick (the web twin of the TUI's `R`).
+    schema_refresh: watch::Sender<u64>,
+    /// Admin commands (cancel/terminate) go here; the poller (sole DB owner)
+    /// executes them. Only reachable when a token is configured.
+    admin: mpsc::Sender<AdminCommand>,
 }
 
 /// Refuses non-loopback binds without an auth token (Fase 6 requirement:
@@ -87,14 +94,29 @@ pub async fn serve(listener: tokio::net::TcpListener, router: Router) -> std::io
 
 /// Builds the full router. `auth_token` comes from the CLI (which reads
 /// `PG_LENS_AUTH_TOKEN`); when `Some`, every `/api/*` route demands it.
-pub fn router(snapshots: watch::Receiver<Arc<DbSnapshot>>, auth_token: Option<String>) -> Router {
+/// `schema_refresh` and `admin` are the control channels into the poller;
+/// admin routes additionally require a configured token (see [`admin`]).
+pub fn router(
+    snapshots: watch::Receiver<Arc<DbSnapshot>>,
+    schema_refresh: watch::Sender<u64>,
+    admin: mpsc::Sender<AdminCommand>,
+    auth_token: Option<String>,
+) -> Router {
     let state = WebState {
         snapshots,
         token: auth_token.map(Arc::from),
+        schema_refresh,
+        admin,
     };
     let api = Router::new()
         .route("/snapshot", get(snapshot))
         .route("/stream", get(stream))
+        // Web parity with the TUI: recollect the Schema Lens (like `R`) and
+        // signal backends (like `c`/`K`). Admin is gated a second time inside
+        // the handler — it must never work without an auth token.
+        .route("/schema/refresh", post(schema_refresh_handler))
+        .route("/admin/cancel/{pid}", post(admin_cancel))
+        .route("/admin/terminate/{pid}", post(admin_terminate))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
         .nest("/api", api)
@@ -207,6 +229,47 @@ async fn stream(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+/// `POST /api/schema/refresh` — bump the schema-refresh counter so the poller
+/// recollects the Schema Lens (estimated bloat included) on its next tick.
+/// The web twin of the TUI's `R`. Gated by [`require_auth`] like any `/api`
+/// route; harmless enough to allow on open loopback.
+async fn schema_refresh_handler(State(state): State<WebState>) -> Response {
+    state.schema_refresh.send_modify(|n| *n += 1);
+    (StatusCode::ACCEPTED, "schema refresh requested").into_response()
+}
+
+async fn admin_cancel(state: State<WebState>, pid: Path<i32>) -> Response {
+    admin(state.0, AdminCommand::CancelBackend(pid.0)).await
+}
+
+async fn admin_terminate(state: State<WebState>, pid: Path<i32>) -> Response {
+    admin(state.0, AdminCommand::TerminateBackend(pid.0)).await
+}
+
+/// Queues an admin command for the poller. **Requires a configured token**
+/// even on loopback: signalling backends is destructive, so the web never
+/// exposes it unauthenticated (the TUI, a local interactive tool, is the
+/// unauthenticated path). The command's RESULT travels back in the normal
+/// snapshot stream as `last_admin_action`, which the frontend surfaces.
+async fn admin(state: WebState, command: AdminCommand) -> Response {
+    if state.token.is_none() {
+        return (
+            StatusCode::FORBIDDEN,
+            "admin actions require PG_LENS_AUTH_TOKEN to be set",
+        )
+            .into_response();
+    }
+    match state.admin.try_send(command) {
+        Ok(()) => (StatusCode::ACCEPTED, "admin action queued").into_response(),
+        // Channel full or the poller is gone — never block the request.
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "poller unavailable; try again",
+        )
+            .into_response(),
+    }
+}
+
 /// The Vite-built frontend (`frontend/dist`), embedded at compile time.
 /// `build.rs` guarantees the folder exists with a clear error otherwise.
 /// In release builds the files live inside the binary (the Fase 6
@@ -253,15 +316,37 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    /// Router over a fresh mock snapshot; returns the sender so tests keep
-    /// the channel alive (and could publish updates if needed).
-    fn mock_router(token: Option<&str>) -> (watch::Sender<Arc<DbSnapshot>>, Router) {
-        let (tx, rx) = watch::channel(Arc::new(DbSnapshot::mock()));
-        (tx, router(rx, token.map(str::to_string)))
+    /// Router over a fresh mock snapshot; returns the snapshot sender plus the
+    /// two control-channel ends so tests keep them alive AND can observe what
+    /// the handlers pushed (the admin receiver, the schema-refresh counter).
+    struct Harness {
+        _snap_tx: watch::Sender<Arc<DbSnapshot>>,
+        schema_refresh: watch::Receiver<u64>,
+        admin_rx: mpsc::Receiver<AdminCommand>,
+        router: Router,
     }
 
-    async fn get_response(router: Router, uri: &str, bearer: Option<&str>) -> Response {
-        let mut request = Request::builder().uri(uri);
+    fn mock_harness(token: Option<&str>) -> Harness {
+        let (snap_tx, snap_rx) = watch::channel(Arc::new(DbSnapshot::mock()));
+        let (schema_tx, schema_rx) = watch::channel(0u64);
+        let (admin_tx, admin_rx) = mpsc::channel(8);
+        let router = router(snap_rx, schema_tx, admin_tx, token.map(str::to_string));
+        Harness {
+            _snap_tx: snap_tx,
+            schema_refresh: schema_rx,
+            admin_rx,
+            router,
+        }
+    }
+
+    /// Back-compat shim for the read-only tests: just the sender + router.
+    fn mock_router(token: Option<&str>) -> (watch::Sender<Arc<DbSnapshot>>, Router) {
+        let h = mock_harness(token);
+        (h._snap_tx, h.router)
+    }
+
+    async fn send(router: Router, method: &str, uri: &str, bearer: Option<&str>) -> Response {
+        let mut request = Request::builder().method(method).uri(uri);
         if let Some(token) = bearer {
             request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
@@ -269,6 +354,10 @@ mod tests {
             .oneshot(request.body(Body::empty()).expect("request builds"))
             .await
             .expect("infallible service")
+    }
+
+    async fn get_response(router: Router, uri: &str, bearer: Option<&str>) -> Response {
+        send(router, "GET", uri, bearer).await
     }
 
     #[tokio::test]
@@ -419,6 +508,58 @@ mod tests {
             let path = &candidate[..end];
             path.ends_with(ext).then(|| path.to_string())
         })
+    }
+
+    #[tokio::test]
+    async fn schema_refresh_bumps_the_counter() {
+        let mut h = mock_harness(None);
+        assert_eq!(*h.schema_refresh.borrow_and_update(), 0);
+        let response = send(h.router.clone(), "POST", "/api/schema/refresh", None).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert!(h.schema_refresh.has_changed().unwrap());
+        assert_eq!(*h.schema_refresh.borrow_and_update(), 1);
+    }
+
+    #[tokio::test]
+    async fn admin_requires_a_configured_token() {
+        // Open server (no token): admin is refused even though /api is open.
+        let mut h = mock_harness(None);
+        let response = send(h.router.clone(), "POST", "/api/admin/cancel/4242", None).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        // Nothing was queued.
+        assert!(h.admin_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn admin_queues_command_with_token() {
+        let mut h = mock_harness(Some("sekret"));
+        // Wrong/no token is rejected by require_auth before the handler.
+        let denied = send(h.router.clone(), "POST", "/api/admin/terminate/50", None).await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let ok = send(
+            h.router.clone(),
+            "POST",
+            "/api/admin/terminate/50",
+            Some("sekret"),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::ACCEPTED);
+        match h.admin_rx.try_recv() {
+            Ok(AdminCommand::TerminateBackend(pid)) => assert_eq!(pid, 50),
+            other => panic!("expected TerminateBackend(50), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_cancel_carries_the_pid() {
+        let mut h = mock_harness(Some("k"));
+        let ok = send(h.router.clone(), "POST", "/api/admin/cancel/777", Some("k")).await;
+        assert_eq!(ok.status(), StatusCode::ACCEPTED);
+        assert!(matches!(
+            h.admin_rx.try_recv(),
+            Ok(AdminCommand::CancelBackend(777))
+        ));
     }
 
     #[test]

@@ -2,7 +2,8 @@
 // cards, the uPlot history chart, and the sortable activity table.
 
 import "./style.css";
-import type { DbSnapshot, PollerStatus } from "./types";
+import type { AdminActionResult, ActivityRow, DbSnapshot, PollerStatus } from "./types";
+import { requestAdmin, requestSchemaRefresh, type AdminKind } from "./actions";
 import { renderVitals } from "./vitals";
 import { HistoryChart } from "./chart";
 import { ActivityTable } from "./table";
@@ -32,11 +33,23 @@ const tokenForm = el<HTMLFormElement>("token-form");
 const tokenInput = el<HTMLInputElement>("token-input");
 const tokenError = el<HTMLParagraphElement>("token-error");
 
+const toast = el<HTMLSpanElement>("toast");
+const pauseBtn = el<HTMLButtonElement>("pause-btn");
+const schemaRefreshBtn = el<HTMLButtonElement>("schema-refresh-btn");
+
+// The token in use for the live connection (null = open server). Admin
+// controls only appear when it is set.
+let activeToken: string | null = null;
+
 const chart = new HistoryChart(el<HTMLDivElement>("chart"));
 const table = new ActivityTable(
   el<HTMLTableElement>("activity"),
   document.getElementById("activity-filter") as HTMLInputElement | null,
   document.getElementById("activity-count"),
+  {
+    adminEnabled: () => activeToken !== null,
+    onAdmin: (kind, row) => void onAdmin(kind, row),
+  },
 );
 const vitalsContainer = el<HTMLElement>("vitals");
 const replicationPanel = el<HTMLElement>("replication-panel");
@@ -91,6 +104,34 @@ function renderStatus(status: PollerStatus): void {
   }
 }
 
+// UI-side freeze (the web twin of the TUI's Space): while paused, incoming
+// snapshots are parked (last-wins) and applied on resume — the poller keeps
+// running, this is purely a display freeze.
+let paused = false;
+let pending: DbSnapshot | null = null;
+// Dedupe key for admin-action feedback (the poller re-stamps its latest
+// result on every snapshot).
+let lastAdminSeen = 0;
+
+let toastTimer: number | undefined;
+function showToast(message: string, isError = false): void {
+  toast.textContent = message;
+  toast.dataset["kind"] = isError ? "error" : "ok";
+  toast.hidden = false;
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toast.hidden = true;
+  }, 5000);
+}
+
+function onSnapshot(snapshot: DbSnapshot): void {
+  if (paused) {
+    pending = snapshot;
+    return;
+  }
+  renderSnapshot(snapshot);
+}
+
 function renderSnapshot(snapshot: DbSnapshot): void {
   renderStatus(snapshot.status);
   renderVitals(vitalsContainer, snapshot.vitals);
@@ -99,15 +140,71 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   table.update(snapshot.activity, snapshot.locks);
   schemaLens.update(snapshot.schema, snapshot.vitals.database);
   statementsLens.update(snapshot.statements, snapshot.vitals.database);
+  announceAdmin(snapshot.last_admin_action);
   const v = snapshot.vitals;
   serverInfo.textContent = `PG ${v.server_version} · ${v.connections_total}/${v.max_connections} conns`;
 }
 
+/** Surface an admin action's outcome once (deduped by at_epoch_ms). */
+function announceAdmin(result: AdminActionResult | null): void {
+  if (result === null || result.at_epoch_ms === lastAdminSeen) return;
+  lastAdminSeen = result.at_epoch_ms;
+  const verb = result.kind === "Cancel" ? "cancel" : "terminate";
+  if ("Signalled" in result.outcome) {
+    if (result.outcome.Signalled) {
+      showToast(`${verb} succeeded (PID ${result.pid})`);
+    } else {
+      showToast(
+        `PID ${result.pid} not signalled — gone or insufficient privilege`,
+        true,
+      );
+    }
+  } else {
+    showToast(`${verb} PID ${result.pid} failed: ${result.outcome.Error}`, true);
+  }
+}
+
+pauseBtn.addEventListener("click", () => {
+  paused = !paused;
+  pauseBtn.textContent = paused ? "Resume" : "Pause";
+  pauseBtn.classList.toggle("active", paused);
+  connState.dataset["paused"] = String(paused);
+  if (!paused && pending !== null) {
+    renderSnapshot(pending);
+    pending = null;
+  }
+});
+
+schemaRefreshBtn.addEventListener("click", () => {
+  void requestSchemaRefresh(activeToken).then((ok) => {
+    showToast(
+      ok ? "Schema refresh requested" : "Schema refresh failed",
+      !ok,
+    );
+  });
+});
+
+async function onAdmin(kind: AdminKind, row: ActivityRow): Promise<void> {
+  const verb = kind === "cancel" ? "Cancel query on" : "Terminate backend";
+  if (!window.confirm(`${verb} PID ${row.pid} (${row.username}@${row.database})?`)) {
+    return;
+  }
+  const result = await requestAdmin(activeToken, kind, row.pid);
+  if (result.status === 403) {
+    showToast("Admin actions require the server to have a token set", true);
+  } else if (!result.ok) {
+    showToast(`Admin request failed (HTTP ${result.status || "network"})`, true);
+  } else {
+    showToast(`${kind} sent to PID ${row.pid}…`);
+  }
+}
+
 function connect(token: string | null): void {
   stream?.close();
+  activeToken = token;
   setConnState("connecting");
   stream = openStream(token, {
-    onSnapshot: renderSnapshot,
+    onSnapshot,
     onStateChange: setConnState,
     onUnauthorized: () => {
       clearToken();
