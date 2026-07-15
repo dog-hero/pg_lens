@@ -19,7 +19,8 @@ pub use tokio_postgres;
 pub use history::{HistoryPoint, SnapshotHistory};
 pub use models::{
     ActivityRow, AdminActionResult, AdminCommand, AdminKind, AdminOutcome, BloatRow, DbSnapshot,
-    LockRow, PollerStatus, SchemaSnapshot, SchemaStatus, ServerVitals, TableStatRow,
+    LockRow, PollerStatus, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow,
+    StatementsSnapshot, StatementsStatus, TableStatRow,
 };
 pub use services::PasswordSource;
 pub use settings::{ConnLabel, ConnSpec, Resolved, SettingsError};

@@ -47,6 +47,17 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
   unavoidable alignment padding; rows the estimator flags as `is_na`
   (e.g. `name`-typed columns, missing statistics) carry no numbers at all
   and are shown with a marker instead.
+- **Query Lens (`pg_stat_statements`)** — top normalized statements by
+  total execution time: calls, total/mean time, rows, and shared-buffer
+  hit%, with SQL-highlighted query text and an `Enter` detail panel.
+  Requires the `pg_stat_statements` **extension at version 1.8+** (the
+  `total_exec_time` schema, shipped with PostgreSQL 13); when it is missing
+  or too old the lens shows a friendly explainer with the exact
+  `CREATE EXTENSION` / `shared_preload_libraries` steps instead of an
+  error. Scope is the **current database only** (the extension is
+  cluster-wide); collection shares the Schema Lens slow cadence, and `R`
+  force-refreshes both. `queryid` is exposed as a string in the JSON API —
+  the raw int8 can exceed JavaScript's safe-integer range.
 - **Version-aware queries** — dedicated query sets for PostgreSQL 13, 14+,
   and 16+, following pg_activity's versioning convention.
 - **Single static binary** — no runtime, no dependencies; musl builds run
@@ -458,7 +469,7 @@ and never expose the server without TLS.
       the same watch channel (SSE streaming, TypeScript + uPlot frontend
       embedded in the binary, token auth, read-only).
 - [ ] Admin actions (`pg_cancel_backend` / `pg_terminate_backend`)
-- [ ] `pg_stat_statements` integration
+- [x] `pg_stat_statements` integration (Query Lens)
 - [ ] Replication / WAL sender views
 - [ ] Prometheus export
 - [ ] Demo gif

@@ -28,7 +28,8 @@ use tokio_postgres::{Client, Statement};
 use crate::history::{HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::models::{
     AdminActionResult, AdminCommand, AdminOutcome, BloatRow, DbSnapshot, PollerStatus,
-    SchemaSnapshot, SchemaStatus, ServerVitals,
+    SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
+    StatementsStatus,
 };
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
@@ -117,6 +118,63 @@ impl SchemaState {
             table_bloat: previous.map(|p| p.table_bloat.clone()).unwrap_or_default(),
             index_bloat: previous.map(|p| p.index_bloat.clone()).unwrap_or_default(),
             status: SchemaStatus::Error(msg),
+        }));
+    }
+}
+
+/// Query Lens (pg_stat_statements) collection state, owned by the poller
+/// task like [`SchemaState`] — but WITHOUT a timer of its own: statements
+/// are collected in the same slow tick `SchemaState::due` grants (one shared
+/// cadence; `R` force-refreshes both). Survives reconnects like the schema.
+struct StatementsState {
+    /// Last collection (or unavailable/error envelope), reused by every
+    /// fast tick in between at `Arc` cost.
+    current: Option<Arc<StatementsSnapshot>>,
+}
+
+impl StatementsState {
+    fn new() -> Self {
+        Self { current: None }
+    }
+
+    /// Stores a successful collection.
+    fn store(&mut self, statements: Vec<StatementRow>) {
+        self.current = Some(Arc::new(StatementsSnapshot {
+            collected_at_epoch_ms: epoch_ms_now(),
+            statements,
+            status: StatementsStatus::Ok,
+        }));
+    }
+
+    /// Stores the calm per-lens Unavailable state (extension missing / too
+    /// old). No last-good data is kept: unavailable means the rows would be
+    /// stale forever. Fresh `collected_at` — the decision just re-ran.
+    fn store_unavailable(&mut self, reason: String) {
+        self.current = Some(Arc::new(StatementsSnapshot {
+            collected_at_epoch_ms: epoch_ms_now(),
+            statements: Vec::new(),
+            status: StatementsStatus::Unavailable(reason),
+        }));
+    }
+
+    /// Stores a failed collection: last good rows (and their original
+    /// `collected_at`, so staleness stays honest) are kept, only the status
+    /// flips — mirroring [`SchemaState::store_error`]. Exception: the
+    /// tell-tale "shared_preload_libraries" execution error (extension
+    /// CREATEd but not preloaded) is really an unavailability, not a fault.
+    fn store_error(&mut self, msg: String) {
+        if msg.contains("shared_preload_libraries") {
+            self.store_unavailable(format!(
+                "pg_stat_statements is installed but not loaded \u{2014} add it to \
+                 shared_preload_libraries and restart the server ({msg})"
+            ));
+            return;
+        }
+        let previous = self.current.as_deref();
+        self.current = Some(Arc::new(StatementsSnapshot {
+            collected_at_epoch_ms: previous.map_or_else(epoch_ms_now, |p| p.collected_at_epoch_ms),
+            statements: previous.map(|p| p.statements.clone()).unwrap_or_default(),
+            status: StatementsStatus::Error(msg),
         }));
     }
 }
@@ -279,6 +337,9 @@ async fn run(
     // (`schema` too: the last collection outlives a connection blip.
     // `last_admin` likewise: the result banner must not vanish on a blip.)
     let mut history = SnapshotHistory::default();
+    // Statements share the schema's slow cadence and, like it, outlive a
+    // connection blip (the last collection stays on screen).
+    let mut statements = StatementsState::new();
     let mut last_admin: Option<AdminActionResult> = None;
     loop {
         let mut polled_ok = false;
@@ -289,6 +350,7 @@ async fn run(
             &tx,
             &mut history,
             &mut schema,
+            &mut statements,
             &mut admin_rx,
             &mut last_admin,
             &mut polled_ok,
@@ -334,6 +396,7 @@ async fn session(
     tx: &watch::Sender<Arc<DbSnapshot>>,
     history: &mut SnapshotHistory,
     schema: &mut SchemaState,
+    statements: &mut StatementsState,
     admin_rx: &mut mpsc::Receiver<AdminCommand>,
     last_admin: &mut Option<AdminActionResult>,
     polled_ok: &mut bool,
@@ -360,6 +423,7 @@ async fn session(
         tx,
         history,
         schema,
+        statements,
         admin_rx,
         last_admin,
         polled_ok,
@@ -391,6 +455,7 @@ async fn poll_loop(
     tx: &watch::Sender<Arc<DbSnapshot>>,
     history: &mut SnapshotHistory,
     schema: &mut SchemaState,
+    statements: &mut StatementsState,
     admin_rx: &mut mpsc::Receiver<AdminCommand>,
     last_admin: &mut Option<AdminActionResult>,
     polled_ok: &mut bool,
@@ -435,6 +500,22 @@ async fn poll_loop(
         Err(e) => return SessionEnd::Error(format!("prepare failed: {e}")),
     };
 
+    // Query Lens availability, decided once per SESSION (so every reconnect
+    // re-checks it): the statements query is only prepared when the
+    // extension is installed at >= 1.8. Unavailability is a calm per-lens
+    // state, never a session error — activity polling continues untouched.
+    let statements_stmt: Result<Statement, String> =
+        match db::statements_extension_version(client).await {
+            Ok(extversion) => match db::statements_availability(extversion.as_deref()) {
+                Ok(()) => match client.prepare(query_set.statements).await {
+                    Ok(stmt) => Ok(stmt),
+                    Err(e) => Err(format!("failed to prepare the pg_stat_statements query: {e}")),
+                },
+                Err(reason) => Err(reason),
+            },
+            Err(e) => Err(format!("pg_stat_statements detection failed: {e}")),
+        };
+
     let mut deltas: Option<DeltaState> = None;
 
     // First iteration polls immediately (right after connecting); every
@@ -454,6 +535,18 @@ async fn poll_loop(
                 Ok(collection) => schema.store(collection),
                 Err(msg) => schema.store_error(format!("schema collection failed: {msg}")),
             }
+            // Statements share the SAME slow tick — no third timer. The
+            // unavailable decision was made at session start; a failing
+            // query keeps the last good rows (status carries the error).
+            match &statements_stmt {
+                Ok(stmt) => match collect_statements(client, stmt).await {
+                    Ok(rows) => statements.store(rows),
+                    Err(msg) => {
+                        statements.store_error(format!("statements collection failed: {msg}"));
+                    }
+                },
+                Err(reason) => statements.store_unavailable(reason.clone()),
+            }
         }
         let mut snapshot = match poll_once(client, &stmts, &mut deltas, history).await {
             Ok(s) => s,
@@ -461,6 +554,7 @@ async fn poll_loop(
         };
         // Ticks in between reuse the last collection at Arc-clone cost.
         snapshot.schema = schema.current.clone();
+        snapshot.statements = statements.current.clone();
         // The most recent admin result rides in every envelope from then
         // on; frontends dedupe on its `at_epoch_ms`.
         snapshot.last_admin_action = last_admin.clone();
@@ -585,8 +679,9 @@ async fn poll_once(
         activity,
         locks,
         history: history.clone(),
-        // Both stamped by the caller from poller-owned state.
+        // All three stamped by the caller from poller-owned state.
         schema: None,
+        statements: None,
         last_admin_action: None,
         status: PollerStatus::Ok,
     })
@@ -635,6 +730,20 @@ fn bloat_rows(rows: &[tokio_postgres::Row]) -> Result<Vec<BloatRow>, String> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         out.push(db::bloat_from_row(row).map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+/// Runs the (slow) statements query — only reachable when the extension was
+/// detected as available at session start, and only on the schema cadence.
+async fn collect_statements(
+    client: &Client,
+    stmt: &Statement,
+) -> Result<Vec<StatementRow>, String> {
+    let rows = client.query(stmt, &[]).await.map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        out.push(db::statement_from_row(row).map_err(|e| e.to_string())?);
     }
     Ok(out)
 }
@@ -698,9 +807,11 @@ pub fn spawn_mock(
     let mut history = SnapshotHistory::default();
     let mut first = DbSnapshot::mock();
     record_history(&mut history, &mut first);
-    // DbSnapshot::mock() builds a fresh schema per call; the poller retains
-    // one and re-stamps it so the slow cadence is observable (same Arc).
+    // DbSnapshot::mock() builds a fresh schema (and statements) per call;
+    // the poller retains one of each and re-stamps them so the shared slow
+    // cadence is observable (same Arc between slow ticks).
     let mut schema = first.schema.clone();
+    let mut statements = first.statements.clone();
     let (tx, rx) = watch::channel(Arc::new(first));
 
     tokio::spawn(async move {
@@ -729,8 +840,10 @@ pub fn spawn_mock(
             }
             if forced || ticks.is_multiple_of(MOCK_SCHEMA_EVERY_TICKS) {
                 schema = snapshot.schema.clone(); // fresh collection
+                statements = snapshot.statements.clone(); // same shared tick
             } else {
                 snapshot.schema = schema.clone(); // reuse, like real ticks
+                snapshot.statements = statements.clone();
             }
             if tx.send(Arc::new(snapshot)).is_err() {
                 // All receivers dropped: nobody is watching, stop polling.
@@ -1159,6 +1272,106 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&schema, &initial),
             "tick 1 would normally reuse the Arc; the bump must swap it"
+        );
+    }
+
+    // --- Query Lens (pg_stat_statements) --------------------------------------
+
+    /// A failed statements collection keeps the last good rows (and their
+    /// original collected_at) — only the status flips. Same resilience
+    /// contract as the schema.
+    #[test]
+    fn statements_error_keeps_last_good_rows() {
+        let mut state = StatementsState::new();
+        let good = StatementsSnapshot::mock();
+        state.store(good.statements.clone());
+        let stored = state.current.clone().expect("stored");
+        let collected_at = stored.collected_at_epoch_ms;
+
+        state.store_error("permission denied for view pg_stat_statements".to_string());
+        let after = state.current.clone().expect("still present");
+        assert_eq!(after.statements.len(), good.statements.len(), "data kept");
+        assert_eq!(after.collected_at_epoch_ms, collected_at, "staleness honest");
+        assert!(matches!(after.status, StatementsStatus::Error(ref m)
+            if m.contains("permission denied")));
+    }
+
+    /// The tell-tale not-preloaded execution error becomes the calm
+    /// Unavailable state (with the preload hint), not an error banner.
+    #[test]
+    fn statements_preload_error_degrades_to_unavailable() {
+        let mut state = StatementsState::new();
+        state.store(StatementsSnapshot::mock().statements.clone());
+        state.store_error(
+            "pg_stat_statements must be loaded via \"shared_preload_libraries\"".to_string(),
+        );
+        let after = state.current.clone().expect("present");
+        assert!(after.statements.is_empty(), "no stale rows behind an explainer");
+        assert!(matches!(after.status, StatementsStatus::Unavailable(ref m)
+            if m.contains("shared_preload_libraries")));
+    }
+
+    #[test]
+    fn statements_unavailable_carries_the_reason() {
+        let mut state = StatementsState::new();
+        state.store_unavailable("extension missing".to_string());
+        let current = state.current.clone().expect("present");
+        assert!(current.statements.is_empty());
+        assert!(current.collected_at_epoch_ms > 0);
+        assert!(matches!(current.status, StatementsStatus::Unavailable(ref m)
+            if m == "extension missing"));
+    }
+
+    /// The mock poller swaps the statements Arc on the SAME slow tick as the
+    /// schema (one shared cadence — no third timer) and reuses it otherwise.
+    #[tokio::test]
+    async fn spawn_mock_refreshes_statements_on_the_shared_schema_cadence() {
+        let mut rx = spawn_mock_default(10);
+        let initial_schema = rx.borrow().schema.clone().expect("schema");
+        let initial_statements = rx.borrow().statements.clone().expect("statements");
+
+        for tick in 1..=MOCK_SCHEMA_EVERY_TICKS {
+            tokio::time::timeout(Duration::from_secs(2), rx.changed())
+                .await
+                .expect("poller must publish within 2s")
+                .expect("sender alive");
+            let snap = rx.borrow_and_update().clone();
+            let schema = snap.schema.clone().expect("schema in every envelope");
+            let statements = snap.statements.clone().expect("statements too");
+            let schema_swapped = !Arc::ptr_eq(&schema, &initial_schema);
+            let statements_swapped = !Arc::ptr_eq(&statements, &initial_statements);
+            assert_eq!(
+                schema_swapped, statements_swapped,
+                "tick {tick}: statements must swap exactly when the schema does"
+            );
+            if tick < MOCK_SCHEMA_EVERY_TICKS {
+                assert!(!statements_swapped, "tick {tick}: reuse between slow ticks");
+            } else {
+                assert!(statements_swapped, "slow tick swaps both");
+            }
+        }
+    }
+
+    /// The R force-refresh rebuilds statements together with the schema.
+    #[tokio::test]
+    async fn spawn_mock_force_refresh_rebuilds_statements_with_the_schema() {
+        let (refresh_tx, refresh_rx) = watch::channel(0u64);
+        let mut rx = spawn_mock(interval_rx(10), refresh_rx, admin_rx());
+        let initial = rx.borrow().statements.clone().expect("statements");
+
+        refresh_tx.send(1).expect("poller alive");
+        tokio::time::timeout(Duration::from_secs(2), rx.changed())
+            .await
+            .expect("poller must publish within 2s")
+            .expect("sender alive");
+        let statements = rx
+            .borrow_and_update()
+            .statements
+            .clone()
+            .expect("statements present");
+        assert!(
+            !Arc::ptr_eq(&statements, &initial),
+            "the bump must swap the statements Arc too"
         );
     }
 

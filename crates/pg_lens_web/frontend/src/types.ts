@@ -117,11 +117,48 @@ export interface SchemaSnapshot {
   status: SchemaStatus;
 }
 
+/**
+ * Same serde external tagging; `Unavailable` is the calm "extension
+ * missing / too old" state (its string is the human-readable reason/hint).
+ */
+export type StatementsStatus =
+  | "Ok"
+  | { Unavailable: string }
+  | { Error: string };
+
+/** One pg_stat_statements row (Query Lens), current database only. */
+export interface StatementRow {
+  /**
+   * queryid as a STRING: the raw int8 can exceed Number.MAX_SAFE_INTEGER,
+   * so the core ships it as text. null = NULL queryid.
+   */
+  query_id: string | null;
+  query: string;
+  username: string;
+  calls: number;
+  total_exec_ms: number;
+  mean_exec_ms: number;
+  rows: number;
+  shared_blks_hit: number;
+  shared_blks_read: number;
+}
+
+/**
+ * Slow-cadence statements collection (shares the schema tick); null until
+ * the first one lands.
+ */
+export interface StatementsSnapshot {
+  collected_at_epoch_ms: number;
+  statements: StatementRow[];
+  status: StatementsStatus;
+}
+
 export interface DbSnapshot {
   vitals: ServerVitals;
   activity: ActivityRow[];
   locks: LockRow[];
   history: SnapshotHistory;
   schema: SchemaSnapshot | null;
+  statements: StatementsSnapshot | null;
   status: PollerStatus;
 }

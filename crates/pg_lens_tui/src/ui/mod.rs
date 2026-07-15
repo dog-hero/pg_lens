@@ -5,6 +5,7 @@ mod confirm;
 mod macro_lens;
 mod micro_lens;
 mod picker;
+mod query_lens;
 mod schema_lens;
 mod splash;
 mod sql;
@@ -69,6 +70,7 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         Tab::MacroLens => macro_lens::draw(app, frame, body_area),
         Tab::MicroLens => micro_lens::draw(app, frame, body_area),
         Tab::SchemaLens => schema_lens::draw(app, frame, body_area),
+        Tab::QueryLens => query_lens::draw(app, frame, body_area),
     }
     draw_statusbar(app, frame, statusbar_area);
     // The admin confirmation modal draws over everything else, last.
@@ -172,11 +174,22 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     // Row counter and sort label follow the active lens (the Schema Lens
     // keeps its own selection and sort mode); `R: recollect` is a Schema
     // Lens hint (the key itself works from any lens).
-    let (selected, len, sort_label, schema_extra) = match app.active_tab {
+    let (selected, len, sort_label, slow_lens_extra) = match app.active_tab {
         Tab::SchemaLens => (
             app.schema_table_state.selected(),
             app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len()),
             app.schema_sort_mode.label(),
+            true,
+        ),
+        // The Query Lens shares the slow cadence (and the R hint) with the
+        // Schema Lens — one recollect refreshes both.
+        Tab::QueryLens => (
+            app.statements_table_state.selected(),
+            app.snapshot
+                .statements
+                .as_deref()
+                .map_or(0, |s| s.statements.len()),
+            app.statements_sort_mode.label(),
             true,
         ),
         _ => (
@@ -217,7 +230,7 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         push_hint(&mut spans, "Enter", ": detail".into(), true);
     }
     push_hint(&mut spans, "s", format!(": sort={sort_label}"), true);
-    if schema_extra {
+    if slow_lens_extra {
         push_hint(&mut spans, "R", ": recollect".into(), true);
     }
     push_hint(
@@ -350,6 +363,99 @@ mod tests {
         assert!(screen.contains("mod since analyze"));
         assert!(screen.contains("order_items_pkey"), "index bloat listed: {screen}");
         assert!(screen.contains("35.0%"), "index bloat pct shown");
+    }
+
+    #[test]
+    fn query_lens_renders_table_footer_and_highlighted_queries() {
+        let mut app = App::new();
+        app.active_tab = Tab::QueryLens;
+        let screen = render(&mut app);
+        for header in ["Query", "Calls", "Total", "Mean", "Rows", "Hit%"] {
+            assert!(screen.contains(header), "missing column {header}: {screen}");
+        }
+        // Mock rows: the heaviest statement (pgbench UPDATE) is present...
+        assert!(screen.contains("UPDATE pgbench_accounts"), "{screen}");
+        // ...the zero-blocks row renders the Hit% dash, not a number...
+        assert!(screen.contains("\u{2014}"), "zero-division dash: {screen}");
+        // ...and the footer names the db, the scope and the shared refresh.
+        assert!(screen.contains("db: shop"));
+        assert!(screen.contains("8 statements"));
+        assert!(screen.contains("current database only"));
+        assert!(screen.contains("R: recollect"));
+        assert!(screen.contains("sort=total"));
+    }
+
+    #[test]
+    fn query_lens_without_collection_shows_placeholder() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        app.active_tab = Tab::QueryLens;
+        let mut snap = app.snapshot.as_ref().clone();
+        snap.statements = None;
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
+        let screen = render(&mut app);
+        assert!(screen.contains("collecting statement stats"));
+    }
+
+    #[test]
+    fn query_lens_unavailable_renders_the_friendly_explainer() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        app.active_tab = Tab::QueryLens;
+        let mut snap = app.snapshot.as_ref().clone();
+        snap.statements = Some(Arc::new(pg_lens_core::StatementsSnapshot {
+            collected_at_epoch_ms: 1,
+            statements: Vec::new(),
+            status: pg_lens_core::StatementsStatus::Unavailable(
+                "the pg_stat_statements extension is not installed in this database."
+                    .to_string(),
+            ),
+        }));
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
+        let screen = render(&mut app);
+        assert!(screen.contains("pg_stat_statements not available"), "{screen}");
+        assert!(screen.contains("CREATE EXTENSION pg_stat_statements;"));
+        assert!(screen.contains("shared_preload_libraries"));
+        // Calm state: no table columns behind the explainer, no error text.
+        assert!(!screen.contains("Hit%"));
+        assert!(!screen.contains("showing last collection"));
+    }
+
+    #[test]
+    fn query_lens_error_status_renders_inline_banner_and_keeps_rows() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        app.active_tab = Tab::QueryLens;
+        let mut snap = app.snapshot.as_ref().clone();
+        let mut statements = snap.statements.as_deref().expect("mock statements").clone();
+        statements.status =
+            pg_lens_core::StatementsStatus::Error("permission denied".to_string());
+        snap.statements = Some(Arc::new(statements));
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
+        let screen = render(&mut app);
+        assert!(screen.contains("statements: permission denied"));
+        assert!(screen.contains("showing last collection"));
+        assert!(screen.contains("UPDATE pgbench_accounts"), "last data kept");
+    }
+
+    #[test]
+    fn query_lens_detail_shows_queryid_and_full_metrics() {
+        let mut app = App::new();
+        app.active_tab = Tab::QueryLens;
+        app.detail_open = true;
+        let screen = render(&mut app);
+        // Default sort=total puts the pgbench UPDATE (queryid
+        // 3004918872215881003) under the cursor at display index 0.
+        assert!(
+            screen.contains("Statement \u{2014} queryid 3004918872215881003"),
+            "{screen}"
+        );
+        assert!(screen.contains("Enter/Esc: close"));
+        assert!(screen.contains("shared blocks:"));
+        assert!(screen.contains("per call"));
     }
 
     #[test]

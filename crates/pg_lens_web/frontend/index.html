@@ -37,6 +37,14 @@
           >
             Schema
           </button>
+          <button
+            id="tab-queries"
+            role="tab"
+            aria-selected="false"
+            aria-controls="queries-panel"
+          >
+            Queries
+          </button>
         </nav>
         <section id="activity-panel" class="panel" role="tabpanel">
           <h2>Activity</h2>
@@ -54,6 +62,19 @@
           <p id="schema-placeholder" class="placeholder">collecting…</p>
           <div class="table-wrap">
             <table id="schema">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+        <section id="queries-panel" class="panel" role="tabpanel" hidden>
+          <h2>Queries <span class="panel-note">pg_stat_statements</span></h2>
+          <p id="statements-staleness" class="staleness"></p>
+          <p id="statements-warning" class="inline-warning" hidden></p>
+          <p id="statements-placeholder" class="placeholder">collecting…</p>
+          <div id="statements-unavailable" class="unavailable" hidden></div>
+          <div class="table-wrap">
+            <table id="statements">
               <thead></thead>
               <tbody></tbody>
             </table>

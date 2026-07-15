@@ -7,7 +7,7 @@
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, Config, NoTls, Row};
 
-use crate::models::{ActivityRow, BloatRow, LockRow, TableStatRow};
+use crate::models::{ActivityRow, BloatRow, LockRow, StatementRow, TableStatRow};
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
 /// the `Connection` onto its own task: it performs the actual I/O, and no
@@ -200,6 +200,81 @@ fn na_gate(
     }
 }
 
+/// `SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_statements'`
+/// — `None` when the extension is not installed in the connected database.
+/// Run once per session (and therefore re-run on every reconnect).
+pub async fn statements_extension_version(
+    client: &Client,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "SELECT extversion::text FROM pg_extension WHERE extname = 'pg_stat_statements'",
+            &[],
+        )
+        .await?;
+    match rows.first() {
+        Some(row) => Ok(Some(row.try_get(0)?)),
+        None => Ok(None),
+    }
+}
+
+/// The Query Lens availability rule, pure and unit-testable: the extension
+/// must be installed AND at version >= 1.8 — the release that renamed
+/// `total_time` to `total_exec_time` (shipped with PG 13). The decision
+/// follows the EXTENSION version, never the server version: an upgraded
+/// cluster can carry an older extension. `Err` carries the human-readable
+/// reason/hint frontends show as the calm `StatementsStatus::Unavailable`.
+pub fn statements_availability(extversion: Option<&str>) -> Result<(), String> {
+    match extversion {
+        None => Err(
+            "the pg_stat_statements extension is not installed in this database. \
+             Run: CREATE EXTENSION pg_stat_statements; \
+             (requires shared_preload_libraries = 'pg_stat_statements' \
+             and a server restart)"
+                .to_string(),
+        ),
+        Some(version) => match parse_extension_version(version) {
+            Some((major, minor)) if (major, minor) >= (1, 8) => Ok(()),
+            Some(_) => Err(format!(
+                "pg_stat_statements extension version {version} is too old \u{2014} \
+                 pg_lens needs 1.8+ (the total_exec_time columns, shipped with \
+                 PostgreSQL 13). Run: ALTER EXTENSION pg_stat_statements UPDATE;"
+            )),
+            None => Err(format!(
+                "could not parse pg_stat_statements extension version {version:?} \
+                 \u{2014} pg_lens needs 1.8+"
+            )),
+        },
+    }
+}
+
+/// `"1.8"` → `(1, 8)`; `"1.10"` → `(1, 10)`. Tolerates a patch component
+/// (`"1.8.1"`); anything not starting `major.minor` is `None`.
+fn parse_extension_version(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Maps one row of `queries/statements.sql` onto [`StatementRow`]. The
+/// queryid arrives already `::text` (JS-safe across the JSON boundary);
+/// NULLs collapse per column semantics (`query`/`usename` to `""`,
+/// `queryid` kept as `None`).
+pub fn statement_from_row(row: &Row) -> Result<StatementRow, tokio_postgres::Error> {
+    Ok(StatementRow {
+        query_id: row.try_get("queryid")?,
+        query: opt_text(row, "query")?,
+        username: opt_text(row, "usename")?,
+        calls: row.try_get("calls")?,
+        total_exec_ms: row.try_get("total_exec_time")?,
+        mean_exec_ms: row.try_get("mean_exec_time")?,
+        rows: row.try_get("rows")?,
+        shared_blks_hit: row.try_get("shared_blks_hit")?,
+        shared_blks_read: row.try_get("shared_blks_read")?,
+    })
+}
+
 /// `try_get` an optional text column, defaulting NULL to `""`.
 fn opt_text(row: &Row, column: &str) -> Result<String, tokio_postgres::Error> {
     Ok(row.try_get::<_, Option<String>>(column)?.unwrap_or_default())
@@ -211,6 +286,34 @@ mod tests {
 
     /// The plan's hard rule: `is_na = true` → both estimates are `None`
     /// (never 0.0 / 0), even when the SQL produced numbers for the row.
+    /// The availability decision maps extension versions (not server
+    /// versions) to Ok / Unavailable-with-hint.
+    #[test]
+    fn statements_availability_requires_extension_1_8_plus() {
+        // Missing: Unavailable with the CREATE EXTENSION + preload hint.
+        let err = statements_availability(None).expect_err("missing = unavailable");
+        assert!(err.contains("CREATE EXTENSION pg_stat_statements"));
+        assert!(err.contains("shared_preload_libraries"));
+
+        // Too old (pre-1.8 schema, e.g. an upgraded cluster on PG 13+ that
+        // never ran ALTER EXTENSION ... UPDATE): says so.
+        for old in ["1.6", "1.7"] {
+            let err = statements_availability(Some(old)).expect_err("old = unavailable");
+            assert!(err.contains("too old"), "got: {err}");
+            assert!(err.contains("ALTER EXTENSION pg_stat_statements UPDATE"));
+        }
+
+        // 1.8 (PG 13) through 1.11/1.12 (PG 17/18), incl. two-digit minors
+        // — "1.10" must compare as (1,10) > (1,8), not lexicographically.
+        for ok in ["1.8", "1.9", "1.10", "1.11", "1.12", "2.0", "1.8.1"] {
+            assert!(statements_availability(Some(ok)).is_ok(), "{ok} must be ok");
+        }
+
+        // Garbage: refused with a clear message, never a panic.
+        let err = statements_availability(Some("banana")).expect_err("unparsable");
+        assert!(err.contains("could not parse"));
+    }
+
     #[test]
     fn na_gate_nulls_unreliable_estimates() {
         assert_eq!(na_gate(true, Some(1_048_576), Some(42.5)), (None, None));

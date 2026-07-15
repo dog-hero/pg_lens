@@ -77,6 +77,24 @@ pub fn human_count(n: i64) -> String {
     n.to_string()
 }
 
+/// Human execution time from MILLISECONDS (pg_stat_statements ships times
+/// in ms): `0.05ms`, `12.4ms`, then delegates to [`human_duration`] from one
+/// second up (`12s`, `4m32s`, ...). Sub-millisecond precision matters here —
+/// a hot OLTP statement's mean is routinely far below 1ms. Negative/NaN
+/// inputs clamp to `0ms`.
+pub fn human_ms(ms: f64) -> String {
+    if !ms.is_finite() || ms <= 0.0 {
+        return "0ms".to_string();
+    }
+    if ms < 1.0 {
+        format!("{ms:.2}ms")
+    } else if ms < 1_000.0 {
+        format!("{ms:.1}ms")
+    } else {
+        human_duration(ms / 1_000.0)
+    }
+}
+
 /// "Time ago" for the vacuum/analyze timestamps: `4m32s ago`, or `—` when
 /// the event never happened (NULL epoch). `now_epoch_secs` is passed in so
 /// the function stays a pure value mapping.
@@ -149,6 +167,19 @@ mod tests {
         assert_eq!(human_count(48_211_390), "48.2M");
         assert_eq!(human_count(3_400_000_000), "3.4B");
         assert_eq!(human_count(-5), "0");
+    }
+
+    #[test]
+    fn ms_covers_all_magnitudes() {
+        assert_eq!(human_ms(0.05), "0.05ms");
+        assert_eq!(human_ms(0.999), "1.00ms");
+        assert_eq!(human_ms(12.44), "12.4ms");
+        assert_eq!(human_ms(999.9), "999.9ms");
+        assert_eq!(human_ms(12_700.0), "12s");
+        assert_eq!(human_ms(272_000.0), "4m32s");
+        assert_eq!(human_ms(3_840_000.0), "1h04m");
+        assert_eq!(human_ms(-3.0), "0ms");
+        assert_eq!(human_ms(f64::NAN), "0ms");
     }
 
     #[test]

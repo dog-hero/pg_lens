@@ -176,6 +176,16 @@ def main():
         snaps["s6_after_R"] = screen.snapshot()
         m = stale_re.search(snaps["s6_after_R"])
         after = int(m.group(1)) if m else None
+    # Query Lens (pg_stat_statements): third Tab reaches it (also in BASIC,
+    # proving the 80x24 layout doesn't panic).
+    send("\t"); pump(0.9); snaps["q1_query_lens"] = screen.snapshot()
+    if not BASIC:
+        # s: total (default) -> calls; order may change, label must.
+        send("s");  pump(0.6); snaps["q2_query_sorted"] = screen.snapshot()
+        send("s");  pump(0.6); snaps["q3_query_sorted_mean"] = screen.snapshot()
+        # Enter: statement detail with the highlighted full query + queryid.
+        send("\r"); pump(0.6); snaps["q4_query_detail"] = screen.snapshot()
+        send("\r"); pump(0.6); snaps["q5_detail_closed"] = screen.snapshot()
     send("q");  pump(1.0)
 
     try:
@@ -280,6 +290,36 @@ def main():
               "despite 2.8s more elapsing)",
               before is not None and after is not None and after < before
               and after <= 3)
+    # --- Query Lens (pg_stat_statements) -----------------------------------
+    check("Tab x3 reached the Query Lens (Statements + Hit% columns)",
+          "Statements" in snaps["q1_query_lens"] and "Hit%" in snaps["q1_query_lens"])
+    check("query lens footer: db + count + scope + staleness",
+          "db: shop" in snaps["q1_query_lens"]
+          and "8 statements" in snaps["q1_query_lens"]
+          and "current database only" in snaps["q1_query_lens"]
+          and re.search(r"collected \d+s ago", snaps["q1_query_lens"]))
+    if not BASIC:
+        def first_data_row_query(snap):
+            for line in snap.splitlines():
+                if "SELECT" in line or "UPDATE" in line or "INSERT" in line:
+                    return line
+            return ""
+        check("default sort=total puts the pgbench UPDATE on top",
+              "sort=total" in snaps["q1_query_lens"]
+              and "UPDATE pgbench_accounts" in first_data_row_query(snaps["q1_query_lens"]))
+        check("Hit% dash rendered for the zero-blocks row",
+              "—" in snaps["q1_query_lens"])
+        check("s cycled statements sort (sort=calls)",
+              "sort=calls" in snaps["q2_query_sorted"])
+        check("s cycled statements sort again (sort=mean, pg_sleep on top)",
+              "sort=mean" in snaps["q3_query_sorted_mean"]
+              and "pg_sleep" in first_data_row_query(snaps["q3_query_sorted_mean"]))
+        check("Enter opened the statement detail with its queryid",
+              "Statement — queryid" in snaps["q4_query_detail"]
+              and "shared blocks:" in snaps["q4_query_detail"]
+              and "pg_sleep" in snaps["q4_query_detail"])
+        check("Enter closed the statement detail again",
+              "Statement — queryid" not in snaps["q5_detail_closed"])
     check("q exited cleanly (EXIT_CODE=0)", code == 0)
     print(f"EXIT_CODE={code}")
     sys.exit(0 if ok else 1)

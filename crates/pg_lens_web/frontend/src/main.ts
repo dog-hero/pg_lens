@@ -7,6 +7,7 @@ import { renderVitals } from "./vitals";
 import { HistoryChart } from "./chart";
 import { ActivityTable } from "./table";
 import { SchemaLens } from "./schema";
+import { StatementsLens } from "./statements";
 import {
   clearToken,
   openStream,
@@ -39,12 +40,20 @@ const schemaLens = new SchemaLens(
   el<HTMLParagraphElement>("schema-warning"),
   el<HTMLParagraphElement>("schema-placeholder"),
 );
+const statementsLens = new StatementsLens(
+  el<HTMLTableElement>("statements"),
+  el<HTMLParagraphElement>("statements-staleness"),
+  el<HTMLParagraphElement>("statements-warning"),
+  el<HTMLParagraphElement>("statements-placeholder"),
+  el<HTMLDivElement>("statements-unavailable"),
+);
 
 // Tab switcher: vitals cards + chart stay visible on both tabs; only the
 // bottom panel (Activity table vs Schema table) swaps.
 const tabs: Array<[HTMLButtonElement, HTMLElement]> = [
   [el<HTMLButtonElement>("tab-activity"), el<HTMLElement>("activity-panel")],
   [el<HTMLButtonElement>("tab-schema"), el<HTMLElement>("schema-panel")],
+  [el<HTMLButtonElement>("tab-queries"), el<HTMLElement>("queries-panel")],
 ];
 for (const [button] of tabs) {
   button.addEventListener("click", () => {
@@ -81,6 +90,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   chart.update(snapshot.history);
   table.update(snapshot.activity, snapshot.locks);
   schemaLens.update(snapshot.schema, snapshot.vitals.database);
+  statementsLens.update(snapshot.statements, snapshot.vitals.database);
   const v = snapshot.vitals;
   serverInfo.textContent = `PG ${v.server_version} · ${v.connections_total}/${v.max_connections} conns`;
 }

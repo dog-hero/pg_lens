@@ -412,6 +412,104 @@ table#schema {
   background: var(--bg-raised);
 }
 
+/* ── statements (Queries) table ─────────────────────────────────────── */
+
+table#statements {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+#statements th,
+#statements td {
+  padding: 5px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+#statements th {
+  color: var(--fg-dim);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+#statements th.sortable {
+  cursor: pointer;
+}
+
+#statements th.sortable:hover {
+  color: var(--fg);
+}
+
+#statements th.sorted {
+  color: var(--accent);
+}
+
+#statements th.num,
+#statements td.num {
+  text-align: right;
+}
+
+#statements tbody tr {
+  border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+}
+
+#statements tbody tr.statement-row {
+  cursor: pointer;
+}
+
+#statements tbody tr.statement-row:hover {
+  background: var(--bg-raised);
+}
+
+#statements td.query {
+  max-width: 560px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-dim);
+}
+
+#statements tr.statement-detail td {
+  white-space: pre-line;
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+  padding: 6px 8px 10px 28px;
+  background: var(--bg-raised);
+}
+
+#statements tr.statement-detail pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  color: var(--fg);
+}
+
+/* Calm "extension missing / too old" explainer — never error-red. */
+.unavailable {
+  margin: 8px 0;
+  padding: 14px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+}
+
+.unavailable h3 {
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: 0.9rem;
+}
+
+.unavailable p {
+  margin: 4px 0;
+}
+
+.unavailable code {
+  color: var(--fg);
+}
+
 /* ── token overlay ──────────────────────────────────────────────────── */
 
 /* author `display: flex` would defeat the `hidden` attribute's UA style */

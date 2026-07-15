@@ -13,6 +13,11 @@ pub struct QuerySet {
     pub table_stats: &'static str,
     pub bloat_tables: &'static str,
     pub bloat_indexes: &'static str,
+    /// Query Lens (pg_stat_statements). Only PREPARED when the extension is
+    /// installed at >= 1.8 (see `db::statements_availability`) — the column
+    /// set follows the EXTENSION version, not the server version. Runs on
+    /// the slow schema cadence, never the fast tick.
+    pub statements: &'static str,
     pub cancel_backend: &'static str,
     pub terminate_backend: &'static str,
 }
@@ -20,6 +25,9 @@ pub struct QuerySet {
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
 /// const so the SQL and any future flag stay in sync (asserted by a test).
 pub const TABLE_STATS_LIMIT: usize = 200;
+
+/// Row cap of the statements query (top N by total execution time).
+pub const STATEMENTS_LIMIT: usize = 100;
 
 const ACTIVITY_POST_140000: &str = include_str!("../queries/activity_post_140000.sql");
 const ACTIVITY_POST_130000: &str = include_str!("../queries/activity_post_130000.sql");
@@ -34,6 +42,11 @@ const TABLE_STATS_POST_130000: &str = include_str!("../queries/table_stats_post_
 // on 13 and 16 in the Fase S2 run) — no post_NNNNNN variants needed.
 const BLOAT_TABLES: &str = include_str!("../queries/bloat_tables.sql");
 const BLOAT_INDEXES: &str = include_str!("../queries/bloat_indexes.sql");
+// pg_stat_statements top statements. One file serves 13+ because the lens
+// requires EXTENSION >= 1.8 (the `total_exec_time` schema, shipped with PG
+// 13) and refuses older extensions at detection time instead of carrying a
+// pre-1.8 (`total_time`) variant.
+const STATEMENTS: &str = include_str!("../queries/statements.sql");
 // Admin actions, adapted from dalibo/pg_activity's do_pg_cancel_backend.sql /
 // do_pg_terminate_backend.sql. Version-independent (both functions predate
 // PG 13), so one file each serves the whole supported range.
@@ -51,6 +64,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             table_stats: TABLE_STATS_POST_130000,
             bloat_tables: BLOAT_TABLES,
             bloat_indexes: BLOAT_INDEXES,
+            statements: STATEMENTS,
             cancel_backend: DO_CANCEL_BACKEND,
             terminate_backend: DO_TERMINATE_BACKEND,
         })
@@ -62,6 +76,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             table_stats: TABLE_STATS_POST_130000,
             bloat_tables: BLOAT_TABLES,
             bloat_indexes: BLOAT_INDEXES,
+            statements: STATEMENTS,
             cancel_backend: DO_CANCEL_BACKEND,
             terminate_backend: DO_TERMINATE_BACKEND,
         })
@@ -138,6 +153,24 @@ mod tests {
             // Attribution to the pg_activity originals must survive edits.
             assert!(q.cancel_backend.contains("do_pg_cancel_backend.sql"));
             assert!(q.terminate_backend.contains("do_pg_terminate_backend.sql"));
+        }
+    }
+
+    #[test]
+    fn statements_query_serves_pg13_and_up_with_cap_and_conventions() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            // Extension-1.8+ column names (never the pre-1.8 total_time).
+            assert!(q.statements.contains("total_exec_time"));
+            assert!(q.statements.contains("mean_exec_time"));
+            assert!(!q.statements.contains("s.total_time"));
+            // queryid ships as text (JS-safe) and the lens is current-db.
+            assert!(q.statements.contains("queryid::text"));
+            assert!(q.statements.contains("current_database()"));
+            assert!(
+                q.statements.contains(&format!("LIMIT {STATEMENTS_LIMIT}")),
+                "SQL row cap must match STATEMENTS_LIMIT"
+            );
         }
     }
 

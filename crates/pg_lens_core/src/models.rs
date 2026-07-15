@@ -372,6 +372,181 @@ impl SchemaSnapshot {
     }
 }
 
+/// One row of the Query Lens statements query (`queries/statements.sql`):
+/// cumulative per-normalized-query counters from `pg_stat_statements`,
+/// filtered to the connected database (the extension is cluster-wide).
+#[derive(Clone, Debug, Serialize)]
+pub struct StatementRow {
+    /// `queryid::text` — shipped as TEXT on purpose: the raw int8 can exceed
+    /// JavaScript's `Number.MAX_SAFE_INTEGER` (2^53-1), and the web frontend
+    /// consumes this field from JSON. `None` = NULL queryid.
+    pub query_id: Option<String>,
+    /// Normalized query text (constants replaced by `$n`).
+    pub query: String,
+    /// Role that executed the statement (`pg_roles.rolname`).
+    pub username: String,
+    pub calls: i64,
+    /// Total execution time, milliseconds (`total_exec_time`, ext >= 1.8).
+    pub total_exec_ms: f64,
+    /// Mean execution time, milliseconds.
+    pub mean_exec_ms: f64,
+    /// Total rows retrieved or affected.
+    pub rows: i64,
+    pub shared_blks_hit: i64,
+    pub shared_blks_read: i64,
+}
+
+/// Health of the Query Lens collection. `Unavailable` is NOT an error: the
+/// extension simply is not usable on this server (missing, or older than
+/// 1.8 — the version that introduced `total_exec_time`, shipped with PG 13).
+/// The string carries the human-readable reason/hint frontends render as a
+/// calm per-lens explainer, never an error banner.
+#[derive(Clone, Debug, Serialize)]
+pub enum StatementsStatus {
+    Ok,
+    /// Extension missing or too old; the payload says why and what to do.
+    Unavailable(String),
+    /// The collection query failed (last good data retained, like schema).
+    Error(String),
+}
+
+/// The Query Lens payload: top statements by total execution time of the
+/// connected database. Collected on the SAME slow cadence as the Schema
+/// Lens (one shared timer — `R` force-refreshes both) and wrapped in an
+/// `Arc` inside [`DbSnapshot`] so fast ticks reuse it at pointer cost.
+#[derive(Clone, Debug, Serialize)]
+pub struct StatementsSnapshot {
+    /// When this collection ran (Unix epoch ms) — staleness indicator.
+    pub collected_at_epoch_ms: u64,
+    /// Top statements by `total_exec_time` (the query caps at 100 rows).
+    pub statements: Vec<StatementRow>,
+    pub status: StatementsStatus,
+}
+
+impl StatementsSnapshot {
+    /// Plausible fake data (same contract as [`DbSnapshot::mock`]): a mix of
+    /// SELECT/UPDATE/INSERT with realistic timings, calls climbing between
+    /// collections so the slow cadence is observable in `--mock`.
+    pub fn mock() -> Self {
+        let seq = MOCK_CALLS.load(Ordering::Relaxed);
+        let churn = (seq as i64) * 211;
+        let row = |query_id: i64,
+                   query: &str,
+                   username: &str,
+                   calls: i64,
+                   total_exec_ms: f64,
+                   rows: i64,
+                   hit: i64,
+                   read: i64| StatementRow {
+            query_id: Some(query_id.to_string()),
+            query: query.to_string(),
+            username: username.to_string(),
+            calls,
+            total_exec_ms,
+            mean_exec_ms: if calls > 0 {
+                total_exec_ms / calls as f64
+            } else {
+                0.0
+            },
+            rows,
+            shared_blks_hit: hit,
+            shared_blks_read: read,
+        };
+        let statements = vec![
+            row(
+                3_004_918_872_215_881_003,
+                "UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2",
+                "bench",
+                1_204_388 + churn,
+                189_442.7 + churn as f64 * 0.16,
+                1_204_388 + churn,
+                44_212_190,
+                122_408,
+            ),
+            row(
+                -8_231_734_902_117_431_882,
+                "SELECT o.id, o.total FROM orders o WHERE o.customer_id = $1 ORDER BY \
+                 o.created_at DESC LIMIT $2",
+                "app_rw",
+                488_210 + churn,
+                92_881.4 + churn as f64 * 0.19,
+                9_522_101,
+                18_309_441,
+                2_205_118,
+            ),
+            row(
+                551_202_998_310_442_781,
+                "SELECT date_trunc($1, created_at) AS day, count(*) FROM events GROUP BY \
+                 $2 ORDER BY $3",
+                "analytics_ro",
+                42,
+                61_204.9,
+                18_230,
+                1_202_312,
+                8_814_209,
+            ),
+            row(
+                7_113_940_012_385_720_114,
+                "INSERT INTO order_items (order_id, product_id, qty, price) VALUES \
+                 ($1, $2, $3, $4)",
+                "app_rw",
+                240_119 + churn,
+                12_407.1 + churn as f64 * 0.05,
+                240_119 + churn,
+                4_401_202,
+                18_411,
+            ),
+            row(
+                -1_400_233_881_002_117_555,
+                "UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2",
+                "bench",
+                1_204_388 + churn,
+                9_302.6 + churn as f64 * 0.01,
+                1_204_388 + churn,
+                6_020_101,
+                0,
+            ),
+            row(
+                6_882_004_113_902_778_231,
+                "SELECT p.sku, p.price FROM products p JOIN categories c ON c.id = \
+                 p.category_id WHERE c.slug = $1",
+                "app_ro",
+                88_204,
+                4_411.9,
+                1_764_080,
+                9_213_808,
+                44_021,
+            ),
+            row(
+                2_004_113_679_120_881_442,
+                "INSERT INTO events (kind, payload, created_at) VALUES ($1, $2, now())",
+                "collector",
+                730_112 + churn,
+                3_209.4 + churn as f64 * 0.02,
+                730_112 + churn,
+                2_204_119,
+                1_202,
+            ),
+            // Zero shared blocks touched: exercises the Hit% "—" path.
+            row(
+                -3_310_224_887_664_190_007,
+                "SELECT pg_sleep($1)",
+                "leonardo",
+                3,
+                45_002.1,
+                3,
+                0,
+                0,
+            ),
+        ];
+        Self {
+            collected_at_epoch_ms: epoch_ms_now(),
+            statements,
+            status: StatementsStatus::Ok,
+        }
+    }
+}
+
 /// An administrative request a frontend sends TO the poller task (which owns
 /// the DB client) over a `tokio::sync::mpsc` channel — the reverse direction
 /// of the snapshot `watch`, same message-passing-only rule. TUI-only today:
@@ -458,6 +633,10 @@ pub struct DbSnapshot {
     /// `Arc`: fast ticks that don't recollect reuse the last collection at
     /// pointer-clone cost.
     pub schema: Option<Arc<SchemaSnapshot>>,
+    /// Query Lens payload (`pg_stat_statements`), collected on the SAME
+    /// slow cadence as `schema` (one shared timer). `None` until the first
+    /// slow collection ran; `Arc` for the same reuse-at-pointer-cost reason.
+    pub statements: Option<Arc<StatementsSnapshot>>,
     /// Result of the most recent [`AdminCommand`] this poller executed
     /// (cancel/terminate), stamped on every snapshot from then on. `None`
     /// until the first admin action of the session. Frontends that expose
@@ -624,6 +803,9 @@ impl DbSnapshot {
             // staleness UI is exercisable); a bare mock() carries a fresh
             // collection so `--mock` always has schema data to render.
             schema: Some(Arc::new(SchemaSnapshot::mock())),
+            // Same contract as `schema`: the mock poller re-stamps it on
+            // its own slow cadence; a bare mock() carries a fresh one.
+            statements: Some(Arc::new(StatementsSnapshot::mock())),
             // Stamped by the (mock) poller after it executes a command.
             last_admin_action: None,
             status: PollerStatus::Ok,
@@ -656,6 +838,7 @@ impl DbSnapshot {
             locks: Vec::new(),
             history: SnapshotHistory::default(),
             schema: None,
+            statements: None,
             last_admin_action: None,
             status: PollerStatus::Connecting,
         }
@@ -774,6 +957,86 @@ mod tests {
         // `connecting` (pre-first-collection) serializes schema as null.
         let json = serde_json::to_value(DbSnapshot::connecting()).expect("serialize");
         assert!(json["schema"].is_null());
+    }
+
+    #[test]
+    fn mock_snapshot_carries_statements() {
+        let snapshot = DbSnapshot::mock();
+        let statements = snapshot.statements.as_ref().expect("mock statements");
+        assert!(statements.statements.len() >= 8, "several statements");
+        assert!(matches!(statements.status, StatementsStatus::Ok));
+        assert!(statements.collected_at_epoch_ms > 0);
+        // A mix of SELECT/UPDATE/INSERT is present.
+        for verb in ["SELECT", "UPDATE", "INSERT"] {
+            assert!(
+                statements.statements.iter().any(|s| s.query.starts_with(verb)),
+                "mock must carry a {verb} statement"
+            );
+        }
+        // The Hit% zero-division path is exercisable from --mock alone.
+        assert!(
+            statements
+                .statements
+                .iter()
+                .any(|s| s.shared_blks_hit + s.shared_blks_read == 0),
+            "one row with zero shared blocks"
+        );
+        // mean is consistent with total/calls.
+        for s in &statements.statements {
+            assert!(s.calls > 0);
+            assert!((s.mean_exec_ms - s.total_exec_ms / s.calls as f64).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn statements_serialize_with_queryid_as_string() {
+        let snapshot = DbSnapshot::mock();
+        let json = serde_json::to_value(&snapshot).expect("serialize");
+        let statements = json["statements"]["statements"]
+            .as_array()
+            .expect("statements array");
+        assert!(!statements.is_empty());
+        // The hard rule: query_id crosses the JSON boundary as a STRING —
+        // the raw int8 can exceed JS Number.MAX_SAFE_INTEGER.
+        for s in statements {
+            assert!(
+                s["query_id"].is_string(),
+                "query_id must be a JSON string: {s}"
+            );
+        }
+        assert_eq!(json["statements"]["status"], serde_json::json!("Ok"));
+
+        // `connecting` (pre-first-collection) serializes statements as null.
+        let json = serde_json::to_value(DbSnapshot::connecting()).expect("serialize");
+        assert!(json["statements"].is_null());
+    }
+
+    #[test]
+    fn statements_unavailable_status_serializes_with_its_reason() {
+        let snapshot = StatementsSnapshot {
+            collected_at_epoch_ms: 1,
+            statements: Vec::new(),
+            status: StatementsStatus::Unavailable(
+                "pg_stat_statements is not installed".to_string(),
+            ),
+        };
+        let json = serde_json::to_value(&snapshot).expect("serialize");
+        assert_eq!(
+            json["status"]["Unavailable"],
+            serde_json::json!("pg_stat_statements is not installed")
+        );
+        assert!(json["statements"].as_array().is_some_and(Vec::is_empty));
+
+        let err = StatementsSnapshot {
+            collected_at_epoch_ms: 1,
+            statements: Vec::new(),
+            status: StatementsStatus::Error("permission denied".to_string()),
+        };
+        let json = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(
+            json["status"]["Error"],
+            serde_json::json!("permission denied")
+        );
     }
 
     #[test]

@@ -29,16 +29,19 @@ pub enum Tab {
     MacroLens,
     MicroLens,
     SchemaLens,
+    QueryLens,
 }
 
 impl Tab {
-    pub const TITLES: [&'static str; 3] = ["Macro Lens", "Micro Lens", "Schema Lens"];
+    pub const TITLES: [&'static str; 4] =
+        ["Macro Lens", "Micro Lens", "Schema Lens", "Query Lens"];
 
     pub fn index(self) -> usize {
         match self {
             Tab::MacroLens => 0,
             Tab::MicroLens => 1,
             Tab::SchemaLens => 2,
+            Tab::QueryLens => 3,
         }
     }
 
@@ -46,7 +49,8 @@ impl Tab {
         match self {
             Tab::MacroLens => Tab::MicroLens,
             Tab::MicroLens => Tab::SchemaLens,
-            Tab::SchemaLens => Tab::MacroLens,
+            Tab::SchemaLens => Tab::QueryLens,
+            Tab::QueryLens => Tab::MacroLens,
         }
     }
 }
@@ -113,6 +117,42 @@ impl SchemaSortMode {
             SchemaSortMode::DeadTuples => "dead",
             SchemaSortMode::BloatPct => "bloat%",
             SchemaSortMode::SeqScans => "seq",
+        }
+    }
+}
+
+/// Sort column of the Query Lens table; `s` cycles through the variants
+/// while that lens is active (each lens keeps its own sort mode).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatementsSortMode {
+    /// Highest total execution time first (the lens's default — matches
+    /// the SQL's ORDER BY).
+    #[default]
+    TotalTime,
+    /// Most calls first.
+    Calls,
+    /// Highest mean execution time first.
+    Mean,
+    /// Most rows first.
+    Rows,
+}
+
+impl StatementsSortMode {
+    pub fn next(self) -> Self {
+        match self {
+            StatementsSortMode::TotalTime => StatementsSortMode::Calls,
+            StatementsSortMode::Calls => StatementsSortMode::Mean,
+            StatementsSortMode::Mean => StatementsSortMode::Rows,
+            StatementsSortMode::Rows => StatementsSortMode::TotalTime,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StatementsSortMode::TotalTime => "total",
+            StatementsSortMode::Calls => "calls",
+            StatementsSortMode::Mean => "mean",
+            StatementsSortMode::Rows => "rows",
         }
     }
 }
@@ -219,6 +259,12 @@ pub struct App {
     /// Schema Lens selection, independent from the Micro Lens one so
     /// switching lenses never loses either cursor.
     pub schema_table_state: TableState,
+    /// Indices into `snapshot.statements.statements` in display order
+    /// (Query Lens twin of `row_order`; see `statements_sort_mode`).
+    pub statements_row_order: Vec<usize>,
+    pub statements_sort_mode: StatementsSortMode,
+    /// Query Lens selection, independent like the schema one.
+    pub statements_table_state: TableState,
     /// Whether the detail panel is open (Micro Lens: full query of the
     /// selected session; Schema Lens: full vacuum/analyze stats + index
     /// bloat of the selected table). While open: `j`/`k` still move the
@@ -295,6 +341,9 @@ impl App {
             schema_row_order: Vec::new(),
             schema_sort_mode: SchemaSortMode::default(),
             schema_table_state: TableState::default().with_selected(0),
+            statements_row_order: Vec::new(),
+            statements_sort_mode: StatementsSortMode::default(),
+            statements_table_state: TableState::default().with_selected(0),
             detail_open: false,
             schema_refresh_requests: 0,
             host: "localhost".to_string(),
@@ -314,6 +363,7 @@ impl App {
         };
         resort(&mut app);
         resort_schema(&mut app);
+        resort_statements(&mut app);
         app
     }
 }
@@ -347,6 +397,14 @@ impl App {
         let display_idx = self.schema_table_state.selected()?;
         let snapshot_idx = *self.schema_row_order.get(display_idx)?;
         schema.tables.get(snapshot_idx)
+    }
+
+    /// The Query Lens statement currently under the cursor, in display order.
+    pub fn selected_statement(&self) -> Option<&pg_lens_core::StatementRow> {
+        let statements = self.snapshot.statements.as_deref()?;
+        let display_idx = self.statements_table_state.selected()?;
+        let snapshot_idx = *self.statements_row_order.get(display_idx)?;
+        statements.statements.get(snapshot_idx)
     }
 }
 
@@ -398,6 +456,7 @@ fn apply_snapshot(app: &mut App, snapshot: Arc<DbSnapshot>) {
     note_admin_result(app);
     resort(app);
     resort_schema(app);
+    resort_statements(app);
     clamp_selection(app);
 }
 
@@ -515,6 +574,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 app.detail_open = false;
             } else if (app.active_tab == Tab::MicroLens && app.table_state.selected().is_some())
                 || (app.active_tab == Tab::SchemaLens && app.selected_table().is_some())
+                || (app.active_tab == Tab::QueryLens && app.selected_statement().is_some())
             {
                 app.detail_open = true;
             }
@@ -527,15 +587,20 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
         // `s` cycles the sort of whichever lens is active (each keeps its
         // own mode, so tabbing away and back never loses the choice).
-        KeyCode::Char('s') => {
-            if app.active_tab == Tab::SchemaLens {
+        KeyCode::Char('s') => match app.active_tab {
+            Tab::SchemaLens => {
                 app.schema_sort_mode = app.schema_sort_mode.next();
                 resort_schema(app);
-            } else {
+            }
+            Tab::QueryLens => {
+                app.statements_sort_mode = app.statements_sort_mode.next();
+                resort_statements(app);
+            }
+            _ => {
                 app.sort_mode = app.sort_mode.next();
                 resort(app);
             }
-        }
+        },
         // Space: pause/resume the display refresh (UI-side freeze; the
         // poller keeps its cadence — see `App::paused`). Works in all three
         // lenses AND with a detail panel open (point-in-time analysis is
@@ -673,6 +738,13 @@ fn move_selection(app: &mut App, delta: i64) {
             &mut app.schema_table_state,
             app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len()),
         ),
+        Tab::QueryLens => (
+            &mut app.statements_table_state,
+            app.snapshot
+                .statements
+                .as_deref()
+                .map_or(0, |s| s.statements.len()),
+        ),
         _ => (&mut app.table_state, app.snapshot.activity.len()),
     };
     move_state(state, len, delta);
@@ -719,6 +791,25 @@ fn clamp_selection(app: &mut App) {
             .unwrap_or(0)
             .min(schema_len - 1);
         app.schema_table_state.select(Some(clamped));
+    }
+
+    let statements_len = app
+        .snapshot
+        .statements
+        .as_deref()
+        .map_or(0, |s| s.statements.len());
+    if statements_len == 0 {
+        app.statements_table_state.select(None);
+        if app.active_tab == Tab::QueryLens {
+            app.detail_open = false;
+        }
+    } else {
+        let clamped = app
+            .statements_table_state
+            .selected()
+            .unwrap_or(0)
+            .min(statements_len - 1);
+        app.statements_table_state.select(Some(clamped));
     }
 }
 
@@ -790,6 +881,52 @@ fn resort_schema(app: &mut App) {
     app.schema_row_order = order;
 }
 
+/// Recomputes `statements_row_order` from the current snapshot + sort mode
+/// (the Query Lens twin of [`resort`]). All modes are descending — the lens
+/// answers "what is the heaviest" — with ties broken by calls descending,
+/// then query text ascending, so the order is deterministic.
+fn resort_statements(app: &mut App) {
+    let Some(statements) = app.snapshot.statements.as_deref() else {
+        app.statements_row_order = Vec::new();
+        return;
+    };
+    let rows = &statements.statements;
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    let tiebreak = |a: usize, b: usize| {
+        rows[b]
+            .calls
+            .cmp(&rows[a].calls)
+            .then_with(|| rows[a].query.cmp(&rows[b].query))
+    };
+    match app.statements_sort_mode {
+        StatementsSortMode::TotalTime => order.sort_by(|&a, &b| {
+            rows[b]
+                .total_exec_ms
+                .total_cmp(&rows[a].total_exec_ms)
+                .then_with(|| tiebreak(a, b))
+        }),
+        StatementsSortMode::Calls => order.sort_by(|&a, &b| {
+            rows[b]
+                .calls
+                .cmp(&rows[a].calls)
+                .then_with(|| rows[a].query.cmp(&rows[b].query))
+        }),
+        StatementsSortMode::Mean => order.sort_by(|&a, &b| {
+            rows[b]
+                .mean_exec_ms
+                .total_cmp(&rows[a].mean_exec_ms)
+                .then_with(|| tiebreak(a, b))
+        }),
+        StatementsSortMode::Rows => order.sort_by(|&a, &b| {
+            rows[b]
+                .rows
+                .cmp(&rows[a].rows)
+                .then_with(|| tiebreak(a, b))
+        }),
+    }
+    app.statements_row_order = order;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,13 +957,15 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_the_three_lenses() {
+    fn tab_cycles_the_four_lenses() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::MacroLens);
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::MicroLens);
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::SchemaLens);
+        update(&mut app, press(KeyCode::Tab));
+        assert_eq!(app.active_tab, Tab::QueryLens);
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::MacroLens);
         assert!(!app.should_quit);
@@ -1115,6 +1254,127 @@ mod tests {
         lost.status = pg_lens_core::PollerStatus::Error("connection refused".into());
         update(&mut app, Action::Snapshot(Arc::new(lost)));
         assert!(!app.show_splash(), "post-first-data errors use the banner");
+    }
+
+    // --- Query Lens (pg_stat_statements) --------------------------------------
+
+    /// App on the Query Lens (three Tabs from Macro).
+    fn query_lens_app() -> App {
+        let mut app = App::new();
+        for _ in 0..3 {
+            update(&mut app, press(KeyCode::Tab));
+        }
+        assert_eq!(app.active_tab, Tab::QueryLens);
+        app
+    }
+
+    /// Rows of the Query Lens in display order, projected by `field`.
+    fn statements_displayed<'a, T>(
+        app: &'a App,
+        field: impl Fn(&'a pg_lens_core::StatementRow) -> T,
+    ) -> Vec<T> {
+        let statements = app.snapshot.statements.as_deref().expect("mock statements");
+        app.statements_row_order
+            .iter()
+            .map(|&i| field(&statements.statements[i]))
+            .collect()
+    }
+
+    #[test]
+    fn statements_sort_cycles_and_reorders_rows() {
+        let mut app = query_lens_app();
+
+        // Default: total execution time descending.
+        assert_eq!(app.statements_sort_mode, StatementsSortMode::TotalTime);
+        let totals = statements_displayed(&app, |s| s.total_exec_ms);
+        assert!(totals.windows(2).all(|w| w[0] >= w[1]));
+
+        // s → calls descending.
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.statements_sort_mode, StatementsSortMode::Calls);
+        let calls = statements_displayed(&app, |s| s.calls);
+        assert!(calls.windows(2).all(|w| w[0] >= w[1]));
+
+        // s → mean descending (mock's slowest-per-call: pg_sleep).
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.statements_sort_mode, StatementsSortMode::Mean);
+        let means = statements_displayed(&app, |s| s.mean_exec_ms);
+        assert!(means.windows(2).all(|w| w[0] >= w[1]));
+        assert!(
+            statements_displayed(&app, |s| s.query.clone())[0].contains("pg_sleep"),
+            "pg_sleep has the highest mean in the mock"
+        );
+
+        // s → rows descending.
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.statements_sort_mode, StatementsSortMode::Rows);
+        let rows = statements_displayed(&app, |s| s.rows);
+        assert!(rows.windows(2).all(|w| w[0] >= w[1]));
+
+        // s → back to total; the other lenses' sorts were never touched.
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.statements_sort_mode, StatementsSortMode::TotalTime);
+        assert_eq!(app.sort_mode, SortMode::Duration);
+        assert_eq!(app.schema_sort_mode, SchemaSortMode::TotalSize);
+
+        // Every mode shows every statement exactly once.
+        let mut seen = app.statements_row_order.clone();
+        seen.sort_unstable();
+        let n = app
+            .snapshot
+            .statements
+            .as_deref()
+            .expect("statements")
+            .statements
+            .len();
+        assert_eq!(seen, (0..n).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn query_lens_has_its_own_selection_and_detail() {
+        let mut app = query_lens_app();
+
+        // j moves the STATEMENTS selection only.
+        assert_eq!(app.statements_table_state.selected(), Some(0));
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_eq!(app.statements_table_state.selected(), Some(1));
+        assert_eq!(app.table_state.selected(), Some(0), "micro cursor untouched");
+        assert_eq!(
+            app.schema_table_state.selected(),
+            Some(0),
+            "schema cursor untouched"
+        );
+
+        // Enter opens the statement detail; Enter closes it.
+        let selected = app
+            .selected_statement()
+            .expect("selection")
+            .query
+            .clone();
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        assert_eq!(app.selected_statement().expect("selection").query, selected);
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.detail_open);
+
+        // Esc closes the panel first, quits second (same as the others).
+        update(&mut app, press(KeyCode::Enter));
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.detail_open);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn query_lens_without_statements_has_no_selection_or_detail() {
+        let mut app = query_lens_app();
+        let mut snap = app.snapshot.as_ref().clone();
+        snap.statements = None;
+        update(&mut app, Action::Snapshot(Arc::new(snap)));
+        assert!(app.statements_row_order.is_empty());
+        assert_eq!(app.statements_table_state.selected(), None);
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.detail_open, "no data, nothing to detail");
+        update(&mut app, press(KeyCode::Char('j'))); // must not panic
     }
 
     // --- startup service picker ---------------------------------------------
