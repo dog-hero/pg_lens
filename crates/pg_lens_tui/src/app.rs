@@ -271,6 +271,16 @@ pub struct App {
     /// the poller re-stamps its most recent result on every snapshot, so
     /// feedback must fire once per result, not once per snapshot.
     pub admin_seen_epoch_ms: Option<u64>,
+    /// UI-side freeze (`Space`): while true, incoming snapshots park in
+    /// `pending_snapshot` instead of replacing `snapshot`, so every surface
+    /// (tables, sparklines, detail panels, schema) renders point-in-time
+    /// data. The poller keeps running untouched — DB load is unchanged;
+    /// this is purely a display freeze.
+    pub paused: bool,
+    /// The newest snapshot that arrived while paused (last-wins: each
+    /// arrival replaces the previous one). Resume applies it — the view
+    /// jumps straight to the latest data, never replays intermediates.
+    pub pending_snapshot: Option<Arc<DbSnapshot>>,
     pub should_quit: bool,
 }
 
@@ -298,6 +308,8 @@ impl App {
             pending_admin: Vec::new(),
             admin_feedback: None,
             admin_seen_epoch_ms: None,
+            paused: false,
+            pending_snapshot: None,
             should_quit: false,
         };
         resort(&mut app);
@@ -343,17 +355,15 @@ pub fn update(app: &mut App, action: Action) {
     match action {
         Action::Key(key) => handle_key(app, key),
         Action::Snapshot(snapshot) => {
-            app.snapshot = snapshot;
-            app.last_snapshot_at = Some(Instant::now());
-            // First Ok snapshot ever: leave the splash for the dashboard,
-            // permanently (see `App::show_splash`).
-            if app.first_data_at.is_none() && matches!(app.snapshot.status, PollerStatus::Ok) {
-                app.first_data_at = Some(Instant::now());
+            if app.paused {
+                // Frozen: park the newest arrival (last-wins) instead of
+                // applying it. `last_snapshot_at` stays put on purpose —
+                // the statusbar staleness keeps counting up, telling the
+                // user exactly how old the frozen picture is.
+                app.pending_snapshot = Some(snapshot);
+            } else {
+                apply_snapshot(app, snapshot);
             }
-            note_admin_result(app);
-            resort(app);
-            resort_schema(app);
-            clamp_selection(app);
         }
         // The next draw reads the new terminal size from the frame itself.
         Action::Resize => {}
@@ -370,6 +380,44 @@ pub fn update(app: &mut App, action: Action) {
             }
         }
         Action::Quit => app.should_quit = true,
+    }
+}
+
+/// Makes `snapshot` the one on screen: freshness stamp, splash gate,
+/// admin-result feedback, re-sorts and selection clamps. Shared by the
+/// live path (`Action::Snapshot` while not paused) and [`resume`] (which
+/// applies the parked `pending_snapshot`).
+fn apply_snapshot(app: &mut App, snapshot: Arc<DbSnapshot>) {
+    app.snapshot = snapshot;
+    app.last_snapshot_at = Some(Instant::now());
+    // First Ok snapshot ever: leave the splash for the dashboard,
+    // permanently (see `App::show_splash`).
+    if app.first_data_at.is_none() && matches!(app.snapshot.status, PollerStatus::Ok) {
+        app.first_data_at = Some(Instant::now());
+    }
+    note_admin_result(app);
+    resort(app);
+    resort_schema(app);
+    clamp_selection(app);
+}
+
+/// `Space`: freeze the view for point-in-time analysis, or thaw it. Resume
+/// jumps to the newest parked snapshot (if any) — see [`resume`].
+fn toggle_pause(app: &mut App) {
+    if app.paused {
+        resume(app);
+    } else {
+        app.paused = true;
+    }
+}
+
+/// Unfreezes the view: applies the parked `pending_snapshot` (the LATEST
+/// arrival while paused — intermediates were already superseded) so the
+/// screen jumps straight to current data.
+fn resume(app: &mut App) {
+    app.paused = false;
+    if let Some(snapshot) = app.pending_snapshot.take() {
+        apply_snapshot(app, snapshot);
     }
 }
 
@@ -488,9 +536,25 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 resort(app);
             }
         }
+        // Space: pause/resume the display refresh (UI-side freeze; the
+        // poller keeps its cadence — see `App::paused`). Works in all three
+        // lenses AND with a detail panel open (point-in-time analysis is
+        // exactly when a detail is being read); inert on the connection
+        // splash — there is no data to freeze yet, and pausing there would
+        // silently swallow the first snapshot with no indicator on screen.
+        // Picker/confirm-modal inertness falls out of their own keymaps
+        // (both return before this match).
+        KeyCode::Char(' ') => {
+            if !app.show_splash() {
+                toggle_pause(app);
+            }
+        }
         // `R` (uppercase, deliberately distinct from the lowercase keys):
         // request an immediate schema re-collection. Allowed from any lens —
         // it is harmless, and the fresh data is ready when the user tabs in.
+        // While paused the signal still goes out (the poller recollects as
+        // usual) but the result stays parked in `pending_snapshot` until
+        // resume — a deliberate, documented freeze-wins choice.
         KeyCode::Char('R') => {
             app.schema_refresh_requests += 1;
         }
@@ -550,6 +614,14 @@ fn handle_confirm_key(app: &mut App, key: KeyEvent) {
                 expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
             });
             app.confirm = None;
+            // Design decision: confirming an admin action while paused
+            // auto-resumes (apply the parked snapshot + unfreeze). The
+            // action's RESULT travels inside the snapshot envelope — on a
+            // frozen screen the outcome would never appear; resuming is
+            // the simplest behavior that always shows it.
+            if app.paused {
+                resume(app);
+            }
         }
         KeyCode::Char('n') | KeyCode::Esc => app.confirm = None,
         _ => {}
@@ -1398,6 +1470,190 @@ mod tests {
         // The deadline tick clears it (≈10s at the 250ms tick cadence).
         update(&mut app, Action::Tick);
         assert!(app.admin_feedback.is_none(), "faded");
+    }
+
+    // --- pause / freeze (Space) ------------------------------------------------
+
+    #[test]
+    fn space_toggles_pause_in_every_lens() {
+        let mut app = App::new();
+        // Macro Lens.
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert!(app.paused);
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert!(!app.paused);
+
+        // Micro and Schema Lens too.
+        for _ in 0..2 {
+            update(&mut app, press(KeyCode::Tab));
+            update(&mut app, press(KeyCode::Char(' ')));
+            assert!(app.paused, "space pauses on {:?}", app.active_tab);
+            update(&mut app, press(KeyCode::Char(' ')));
+            assert!(!app.paused);
+        }
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn paused_snapshots_park_in_pending_last_wins_and_staleness_keeps_counting() {
+        let mut app = App::new();
+        update(&mut app, Action::Snapshot(Arc::new(DbSnapshot::mock())));
+        let frozen = Arc::clone(&app.snapshot);
+        let stamped_at = app.last_snapshot_at;
+
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert!(app.paused);
+
+        // Incoming snapshots do NOT replace the frozen one...
+        let first = Arc::new(DbSnapshot::mock());
+        update(&mut app, Action::Snapshot(Arc::clone(&first)));
+        assert!(Arc::ptr_eq(&app.snapshot, &frozen), "display stays frozen");
+        assert!(Arc::ptr_eq(
+            app.pending_snapshot.as_ref().expect("parked"),
+            &first
+        ));
+        // ...the freshness stamp stays put (staleness keeps growing)...
+        assert_eq!(app.last_snapshot_at, stamped_at);
+
+        // ...and a second arrival supersedes the first (last-wins).
+        let second = Arc::new(DbSnapshot::mock());
+        update(&mut app, Action::Snapshot(Arc::clone(&second)));
+        assert!(Arc::ptr_eq(&app.snapshot, &frozen));
+        assert!(Arc::ptr_eq(
+            app.pending_snapshot.as_ref().expect("parked"),
+            &second
+        ));
+    }
+
+    #[test]
+    fn resume_applies_the_pending_snapshot_and_clears_it() {
+        let mut app = App::new();
+        update(&mut app, Action::Snapshot(Arc::new(DbSnapshot::mock())));
+        update(&mut app, press(KeyCode::Char(' ')));
+        let parked = Arc::new(DbSnapshot::mock());
+        update(&mut app, Action::Snapshot(Arc::clone(&parked)));
+
+        update(&mut app, press(KeyCode::Char(' '))); // resume
+        assert!(!app.paused);
+        assert!(Arc::ptr_eq(&app.snapshot, &parked), "jumped to latest");
+        assert!(app.pending_snapshot.is_none());
+        assert!(app.last_snapshot_at.is_some());
+        // The derived state was rebuilt for the applied snapshot.
+        assert_eq!(app.row_order.len(), parked.activity.len());
+    }
+
+    #[test]
+    fn resume_without_a_pending_snapshot_just_unfreezes() {
+        let mut app = App::new();
+        let frozen = Arc::clone(&app.snapshot);
+        update(&mut app, press(KeyCode::Char(' ')));
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert!(!app.paused);
+        assert!(Arc::ptr_eq(&app.snapshot, &frozen), "nothing to apply");
+    }
+
+    #[test]
+    fn navigation_sort_and_detail_keep_working_on_the_frozen_data() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert!(app.paused);
+
+        // Tab still switches lens.
+        update(&mut app, press(KeyCode::Tab)); // → Micro Lens
+        assert_eq!(app.active_tab, Tab::MicroLens);
+
+        // j/k still move the selection over the frozen rows.
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_eq!(app.table_state.selected(), Some(1));
+
+        // s still re-sorts the frozen snapshot.
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.sort_mode, SortMode::State);
+        let states = displayed(&app, |r| r.state.clone());
+        assert!(states.windows(2).all(|w| w[0] <= w[1]));
+
+        // Enter still opens the detail panel of a frozen row.
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+
+        // None of that thawed the freeze.
+        assert!(app.paused);
+    }
+
+    #[test]
+    fn space_is_inert_in_picker_mode() {
+        let mut app = picker_app();
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert!(!app.paused, "space must not pause from the picker");
+        assert!(app.picker.is_some());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn space_is_inert_while_the_confirm_modal_is_open() {
+        let (mut app, pid) = micro_app();
+        update(&mut app, press(KeyCode::Char('c')));
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert!(!app.paused, "space inert like every non-y/n/Esc key");
+        let confirm = app.confirm.as_ref().expect("modal still open");
+        assert_eq!(confirm.command, AdminCommand::CancelBackend(pid));
+    }
+
+    #[test]
+    fn space_is_inert_on_the_connection_splash() {
+        let mut app = App::new();
+        update(
+            &mut app,
+            Action::Snapshot(Arc::new(DbSnapshot::connecting())),
+        );
+        assert!(app.show_splash());
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert!(!app.paused, "no data to freeze yet");
+        // The first Ok snapshot must land normally afterwards.
+        update(&mut app, Action::Snapshot(Arc::new(DbSnapshot::mock())));
+        assert!(!app.show_splash());
+    }
+
+    #[test]
+    fn space_works_with_the_detail_panel_open() {
+        let (mut app, _) = micro_app();
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert!(app.paused, "analysis time IS detail time");
+        assert!(app.detail_open, "the panel stays open");
+    }
+
+    /// Design decision under test: confirming an admin action while paused
+    /// auto-resumes, because the action's result arrives inside the (frozen)
+    /// snapshot envelope — the outcome must be visible.
+    #[test]
+    fn confirming_an_admin_action_while_paused_auto_resumes() {
+        let (mut app, pid) = micro_app();
+        update(&mut app, press(KeyCode::Char(' ')));
+        let parked = Arc::new(DbSnapshot::mock());
+        update(&mut app, Action::Snapshot(Arc::clone(&parked)));
+
+        update(&mut app, press(KeyCode::Char('c')));
+        update(&mut app, press(KeyCode::Char('y')));
+        assert!(!app.paused, "y while paused unfreezes");
+        assert!(Arc::ptr_eq(&app.snapshot, &parked), "pending applied");
+        assert!(app.pending_snapshot.is_none());
+        assert_eq!(app.pending_admin, vec![AdminCommand::CancelBackend(pid)]);
+        // Aborting (n/Esc) must NOT resume: only a confirmed action does.
+        update(&mut app, press(KeyCode::Char(' ')));
+        update(&mut app, press(KeyCode::Char('K')));
+        update(&mut app, press(KeyCode::Esc));
+        assert!(app.paused, "abort keeps the freeze");
+    }
+
+    #[test]
+    fn r_still_counts_requests_while_paused() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char(' ')));
+        update(&mut app, press(KeyCode::Char('R')));
+        assert_eq!(app.schema_refresh_requests, 1, "signal still goes out");
+        assert!(app.paused, "data stays frozen regardless");
     }
 
     #[test]

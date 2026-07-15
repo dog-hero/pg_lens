@@ -119,7 +119,39 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
         vitals.max_connections,
     ))
     .bold();
-    frame.render_widget(Paragraph::new(header), area);
+    // Right side: the pause control. The hint lives HERE, not in the
+    // statusbar — that bar was fought down to a ~4-column margin at 120
+    // cols and cannot take another 15 characters on any lens. While frozen
+    // the hint grows into the loud PAUSED indicator (yellow: the staleness
+    // that follows is deliberate, not a fault).
+    let pause = pause_indicator(app);
+    let pause_width = pause.width() as u16;
+    let [left_area, pause_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(pause_width)]).areas(area);
+    frame.render_widget(Paragraph::new(header), left_area);
+    frame.render_widget(Paragraph::new(pause), pause_area);
+}
+
+/// The header's right-side pause control: `Space: pause` while live,
+/// `▮▮ PAUSED · Space: resume` (yellow, loud) while frozen.
+fn pause_indicator(app: &App) -> Line<'static> {
+    let mut spans: Vec<Span> = Vec::new();
+    if app.paused {
+        spans.push(Span::styled(
+            "\u{25ae}\u{25ae} PAUSED",
+            Style::new().fg(Color::Yellow).bold(),
+        ));
+        spans.push(Span::styled(" \u{b7} ", style::label_style()));
+        let [k, d] = style::hint("Space", ": resume");
+        spans.push(k);
+        spans.push(d);
+    } else {
+        let [k, d] = style::hint("Space", ": pause");
+        spans.push(k);
+        spans.push(d);
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
 }
 
 fn draw_tabs(app: &App, frame: &mut Frame, area: Rect) {
@@ -195,10 +227,15 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         true,
     );
     spans.push(sep.clone());
-    spans.push(Span::styled(
-        format!("data: {staleness}"),
-        style::label_style(),
-    ));
+    // While paused the staleness turns yellow: it grows on purpose (the
+    // freeze holds `last_snapshot_at` still) and doubles as the "how old is
+    // this frozen picture" readout next to the header's PAUSED indicator.
+    let staleness_style = if app.paused {
+        Style::new().fg(Color::Yellow).bold()
+    } else {
+        style::label_style()
+    };
+    spans.push(Span::styled(format!("data: {staleness}"), staleness_style));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -499,6 +536,79 @@ mod tests {
         }
         let screen = render(&mut app);
         assert!(!screen.contains("cancel sent to PID"), "faded: {screen}");
+    }
+
+    // --- pause / freeze (Space) -----------------------------------------------
+
+    #[test]
+    fn header_hint_switches_between_pause_and_resume() {
+        let mut app = App::new();
+        let screen = render(&mut app);
+        assert!(screen.contains("Space: pause"), "live hint: {screen}");
+        assert!(!screen.contains("PAUSED"));
+
+        press(&mut app, crossterm::event::KeyCode::Char(' '));
+        let screen = render(&mut app);
+        assert!(
+            screen.contains("\u{25ae}\u{25ae} PAUSED"),
+            "indicator: {screen}"
+        );
+        assert!(screen.contains("Space: resume"), "resume hint: {screen}");
+        assert!(!screen.contains("Space: pause"));
+        // The header's left side survived the split.
+        assert!(screen.contains("pg_lens v"));
+    }
+
+    /// Frozen render proof at the TestBackend level: a new snapshot arriving
+    /// while paused must not change a single cell except the tick-driven
+    /// staleness counter (held constant here by not ticking).
+    #[test]
+    fn paused_screen_ignores_incoming_snapshots_until_resume() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        press(&mut app, crossterm::event::KeyCode::Char(' '));
+        let frozen = render(&mut app);
+
+        // Distinguishable new snapshot: one activity row dropped.
+        let mut snap = app.snapshot.as_ref().clone();
+        snap.activity.truncate(2);
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Snapshot(Arc::new(snap)),
+        );
+        assert_eq!(render(&mut app), frozen, "display frozen while paused");
+
+        // Resume: the parked snapshot applies (row counter now 6 → 2).
+        press(&mut app, crossterm::event::KeyCode::Char(' '));
+        let live = render(&mut app);
+        assert_ne!(live, frozen);
+        assert!(live.contains("row 1/2"), "pending applied: {live}");
+        assert!(!live.contains("PAUSED"));
+    }
+
+    /// 80x24: the PAUSED indicator renders without panicking and without
+    /// breaking the layout (dashboard chrome still present).
+    #[test]
+    fn paused_indicator_fits_a_small_terminal() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Char(' '));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("\u{25ae}\u{25ae} PAUSED"), "indicator: {screen}");
+        assert!(screen.contains("pg_lens v"), "header left intact");
+        assert!(screen.contains("Connections"), "body intact");
+        assert!(screen.contains("q/Esc: quit"), "statusbar intact");
     }
 
     #[test]

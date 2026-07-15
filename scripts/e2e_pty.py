@@ -122,6 +122,23 @@ def main():
         # Esc aborts it cleanly (no command, no quit).
         send("K");  pump(0.6); snaps["a3_kill_modal"] = screen.snapshot()
         send("\x1b"); pump(0.6); snaps["a4_kill_aborted"] = screen.snapshot()
+        # Pause (Space): UI-side freeze on the Micro Lens. First wait for
+        # the admin feedback line above to fade (~10s TTL) — otherwise its
+        # expiry mid-pause would shift the layout and break the
+        # frozen-screen comparison. Then: two captures 3.2s apart must be
+        # identical (mock data changes every 2s) except the statusbar
+        # staleness, which keeps counting up ON PURPOSE — mask it.
+        fade_deadline = time.time() + 14
+        while time.time() < fade_deadline and (
+                "query cancelled (PID" in screen.snapshot()
+                or "cancel sent to PID" in screen.snapshot()):
+            pump(0.5)
+        stale_data_re = re.compile(r"data: (\d+)s ago")
+        def masked(snap):
+            return stale_data_re.sub("data: Xs ago", snap)
+        send(" "); pump(0.5); snaps["p1_paused"] = screen.snapshot()
+        pump(3.2);            snaps["p2_still_paused"] = screen.snapshot()
+        send(" "); pump(2.5); snaps["p3_resumed"] = screen.snapshot()
         # Fase 4: '-' three times: 2.0s -> 0.5s, live through the watch
         # channel. Two snapshots 0.9s apart must differ (at the old 2.0s
         # cadence they could not have both refreshed).
@@ -207,6 +224,23 @@ def main():
         check("Esc aborted the terminate modal cleanly (no quit)",
               "Terminate backend PID" not in snaps["a4_kill_aborted"]
               and "Activity" in snaps["a4_kill_aborted"])
+        # --- pause / freeze (Space) ----------------------------------------
+        check("header shows the Space: pause hint while live",
+              "Space: pause" in snaps["t3_after_tab"])
+        check("Space froze the screen (PAUSED indicator + resume hint)",
+              "PAUSED" in snaps["p1_paused"]
+              and "Space: resume" in snaps["p1_paused"])
+        check("data stopped changing while paused (masked screens 3.2s apart identical)",
+              masked(snaps["p1_paused"]) == masked(snaps["p2_still_paused"])
+              and "PAUSED" in snaps["p2_still_paused"])
+        p1_stale = stale_data_re.search(snaps["p1_paused"])
+        p2_stale = stale_data_re.search(snaps["p2_still_paused"])
+        check("staleness kept counting up while paused",
+              p1_stale is not None and p2_stale is not None
+              and int(p2_stale.group(1)) > int(p1_stale.group(1)))
+        check("Space again resumed (PAUSED gone, data changed)",
+              "PAUSED" not in snaps["p3_resumed"]
+              and masked(snaps["p3_resumed"]) != masked(snaps["p2_still_paused"]))
         check("'-' x3 shows refresh=0.5s in the statusbar",
               "refresh=0.5s" in snaps["t8_fast_a"])
         check("snapshots arrive at the faster cadence (screens 0.9s apart differ)",
