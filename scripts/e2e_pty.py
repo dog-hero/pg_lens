@@ -113,6 +113,15 @@ def main():
         # Fase 4: Enter opens the detail panel; Enter closes it again.
         send("\r"); pump(0.6); snaps["t6_detail_open"] = screen.snapshot()
         send("\r"); pump(0.6); snaps["t7_detail_closed"] = screen.snapshot()
+        # Admin actions: c opens the cancel confirmation modal; y confirms —
+        # the statusbar feedback appears ("sent…" then the mock's immediate
+        # re-poll carries "query cancelled (PID …)").
+        send("c");  pump(0.6); snaps["a1_cancel_modal"] = screen.snapshot()
+        send("y");  pump(0.9); snaps["a2_after_confirm"] = screen.snapshot()
+        # K opens the terminate modal (red variant with the kill warning);
+        # Esc aborts it cleanly (no command, no quit).
+        send("K");  pump(0.6); snaps["a3_kill_modal"] = screen.snapshot()
+        send("\x1b"); pump(0.6); snaps["a4_kill_aborted"] = screen.snapshot()
         # Fase 4: '-' three times: 2.0s -> 0.5s, live through the watch
         # channel. Two snapshots 0.9s apart must differ (at the old 2.0s
         # cadence they could not have both refreshed).
@@ -180,6 +189,24 @@ def main():
               and "Enter/Esc: close" in snaps["t6_detail_open"])
         check("Enter closed the detail panel again",
               "Enter/Esc: close" not in snaps["t7_detail_closed"])
+        # --- admin actions (cancel/terminate) ------------------------------
+        check("Micro Lens statusbar shows the admin hints",
+              "c: cancel" in snaps["t3_after_tab"] and "K: kill" in snaps["t3_after_tab"])
+        check("c opened the cancel confirmation modal",
+              "Cancel query on PID" in snaps["a1_cancel_modal"]
+              and "y: confirm" in snaps["a1_cancel_modal"])
+        check("y confirmed: modal closed, statusbar feedback appeared",
+              "y: confirm" not in snaps["a2_after_confirm"]
+              and ("cancel sent to PID" in snaps["a2_after_confirm"]
+                   or "query cancelled (PID" in snaps["a2_after_confirm"]))
+        check("mock poller reported the cancel result in the snapshot",
+              "query cancelled (PID" in snaps["a2_after_confirm"])
+        check("K opened the terminate modal (red variant text)",
+              "Terminate backend PID" in snaps["a3_kill_modal"]
+              and "The connection will be killed." in snaps["a3_kill_modal"])
+        check("Esc aborted the terminate modal cleanly (no quit)",
+              "Terminate backend PID" not in snaps["a4_kill_aborted"]
+              and "Activity" in snaps["a4_kill_aborted"])
         check("'-' x3 shows refresh=0.5s in the statusbar",
               "refresh=0.5s" in snaps["t8_fast_a"])
         check("snapshots arrive at the faster cadence (screens 0.9s apart differ)",

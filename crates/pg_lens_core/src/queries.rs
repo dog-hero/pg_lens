@@ -3,7 +3,8 @@
 
 /// The statements one poller session prepares (once). The first three run
 /// per fast tick; `table_stats` + the two estimated-bloat queries run only
-/// on the slow schema cadence.
+/// on the slow schema cadence; the two admin statements run only when a
+/// frontend sends an [`crate::models::AdminCommand`].
 #[derive(Clone, Copy, Debug)]
 pub struct QuerySet {
     pub activity: &'static str,
@@ -12,6 +13,8 @@ pub struct QuerySet {
     pub table_stats: &'static str,
     pub bloat_tables: &'static str,
     pub bloat_indexes: &'static str,
+    pub cancel_backend: &'static str,
+    pub terminate_backend: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -31,6 +34,11 @@ const TABLE_STATS_POST_130000: &str = include_str!("../queries/table_stats_post_
 // on 13 and 16 in the Fase S2 run) — no post_NNNNNN variants needed.
 const BLOAT_TABLES: &str = include_str!("../queries/bloat_tables.sql");
 const BLOAT_INDEXES: &str = include_str!("../queries/bloat_indexes.sql");
+// Admin actions, adapted from dalibo/pg_activity's do_pg_cancel_backend.sql /
+// do_pg_terminate_backend.sql. Version-independent (both functions predate
+// PG 13), so one file each serves the whole supported range.
+const DO_CANCEL_BACKEND: &str = include_str!("../queries/do_cancel_backend.sql");
+const DO_TERMINATE_BACKEND: &str = include_str!("../queries/do_terminate_backend.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -43,6 +51,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             table_stats: TABLE_STATS_POST_130000,
             bloat_tables: BLOAT_TABLES,
             bloat_indexes: BLOAT_INDEXES,
+            cancel_backend: DO_CANCEL_BACKEND,
+            terminate_backend: DO_TERMINATE_BACKEND,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -52,6 +62,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             table_stats: TABLE_STATS_POST_130000,
             bloat_tables: BLOAT_TABLES,
             bloat_indexes: BLOAT_INDEXES,
+            cancel_backend: DO_CANCEL_BACKEND,
+            terminate_backend: DO_TERMINATE_BACKEND,
         })
     } else {
         Err(format!(
@@ -112,6 +124,20 @@ mod tests {
             }
             // The index variant names the owning table (S3 detail join).
             assert!(q.bloat_indexes.contains("tblname::text AS tblname"));
+        }
+    }
+
+    #[test]
+    fn admin_statements_serve_pg13_and_up_with_one_pid_param() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.cancel_backend.contains("pg_cancel_backend($1::int4)"));
+            assert!(q.cancel_backend.contains("AS is_stopped"));
+            assert!(q.terminate_backend.contains("pg_terminate_backend($1::int4)"));
+            assert!(q.terminate_backend.contains("AS is_stopped"));
+            // Attribution to the pg_activity originals must survive edits.
+            assert!(q.cancel_backend.contains("do_pg_cancel_backend.sql"));
+            assert!(q.terminate_backend.contains("do_pg_terminate_backend.sql"));
         }
     }
 

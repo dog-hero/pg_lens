@@ -32,6 +32,8 @@ use pg_lens_core::settings::{self, ConnSpec, Resolved, ServiceSummary};
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, watch};
 
+use pg_lens_core::AdminCommand;
+
 use crate::app::{Action, App, PickerEntry, PickerState, update};
 
 mod app;
@@ -260,10 +262,11 @@ fn spawn_poller(
     interval_rx: watch::Receiver<Duration>,
     schema_interval: Duration,
     schema_refresh_rx: watch::Receiver<u64>,
+    admin_rx: mpsc::Receiver<AdminCommand>,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, String) {
     match conn {
         None => (
-            pg_lens_core::poller::spawn_mock(interval_rx, schema_refresh_rx),
+            pg_lens_core::poller::spawn_mock(interval_rx, schema_refresh_rx, admin_rx),
             "mock".to_string(),
         ),
         Some(resolved) => {
@@ -277,8 +280,26 @@ fn spawn_poller(
                 interval_rx,
                 schema_interval,
                 schema_refresh_rx,
+                admin_rx,
             );
             (snapshots, label)
+        }
+    }
+}
+
+/// Forwards admin commands queued by `update()` (the `y` of the confirm
+/// modal) into the poller's channel. `try_send` on purpose: the UI loop
+/// must never block — on a momentarily full channel the remaining commands
+/// simply go out on the next pass through the loop.
+fn drain_admin(app: &mut App, admin_tx: &mpsc::Sender<AdminCommand>) {
+    while let Some(&cmd) = app.pending_admin.first() {
+        match admin_tx.try_send(cmd) {
+            Ok(()) => {
+                app.pending_admin.remove(0);
+            }
+            // Full: retry next pass. Closed: the poller is gone — the loop
+            // is about to end anyway; dropping the queue is harmless.
+            Err(_) => break,
         }
     }
 }
@@ -348,11 +369,15 @@ async fn run_serve(args: ServeArgs) -> color_eyre::Result<()> {
     // No re-collect endpoint in the read-only web UI (S4 backlog): the
     // sender only has to outlive the server, like the interval one.
     let (_schema_refresh_tx, schema_refresh_rx) = watch::channel(0u64);
+    // The web stays read-only by design (plan's security posture): no route
+    // ever sends an AdminCommand; the sender just outlives the server.
+    let (_admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
     let (snapshots, label) = spawn_poller(
         conn,
         interval_rx,
         args.conn.schema_interval(),
         schema_refresh_rx,
+        admin_rx,
     );
 
     let router = pg_lens_web::router(snapshots, token);
@@ -392,11 +417,21 @@ async fn run(
     // `app.schema_refresh_requests`; the loop below mirrors that counter
     // into this watch channel, and the poller recollects on the next tick.
     let (schema_refresh_tx, schema_refresh_rx) = watch::channel(0u64);
+    // Admin actions (`c`/`K` + confirm): update() queues commands in
+    // `app.pending_admin`; the loop below drains them into this channel and
+    // the poller (sole owner of the DB client) executes them. Message
+    // passing only, like every other TUI↔poller conversation.
+    let (admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
     // Picker mode enters the loop with NO poller: the channels above exist
     // as usual, but their receivers are parked here until the user picks an
     // entry — the loop then spawns the poller (and its snapshot bridge)
     // lazily, reusing the exact same wiring as the classic path below.
-    let mut parked_rx: Option<(watch::Receiver<Duration>, watch::Receiver<u64>)> = None;
+    #[allow(clippy::type_complexity)]
+    let mut parked_rx: Option<(
+        watch::Receiver<Duration>,
+        watch::Receiver<u64>,
+        mpsc::Receiver<AdminCommand>,
+    )> = None;
     match startup {
         Startup::Connect(conn) => {
             let (snapshots, label) = spawn_poller(
@@ -404,6 +439,7 @@ async fn run(
                 interval_rx,
                 conn_args.schema_interval(),
                 schema_refresh_rx,
+                admin_rx,
             );
             app.host = label;
             // Seed the app with the poller's initial snapshot before the
@@ -415,7 +451,7 @@ async fn run(
         }
         Startup::Picker(entries) => {
             app.picker = Some(PickerState::new(entries));
-            parked_rx = Some((interval_rx, schema_refresh_rx));
+            parked_rx = Some((interval_rx, schema_refresh_rx, admin_rx));
         }
     }
 
@@ -453,6 +489,9 @@ async fn run(
                 true
             }
         });
+        // Confirmed admin commands (the modal's `y`) go to the poller task,
+        // which executes them and reports back inside the next snapshot.
+        drain_admin(&mut app, &admin_tx);
 
         // Lazy poller spawn (picker mode): the first pass after Enter sees
         // `app.picked` plus the parked receivers and starts the exact same
@@ -463,7 +502,7 @@ async fn run(
         // Connection failures are NOT errors here: they surface as
         // `PollerStatus::Error` on the splash, retrying with backoff.
         if let Some(entry) = app.picked.clone()
-            && let Some((interval_rx, schema_refresh_rx)) = parked_rx.take()
+            && let Some((interval_rx, schema_refresh_rx, admin_rx)) = parked_rx.take()
         {
             // Re-resolve with the chosen service (or none, for the default
             // entry). The file was readable moments ago at trigger time; if
@@ -479,6 +518,7 @@ async fn run(
                 interval_rx,
                 conn_args.schema_interval(),
                 schema_refresh_rx,
+                admin_rx,
             );
             update(&mut app, Action::HostLabel(label));
             update(&mut app, Action::Snapshot(snapshots.borrow().clone()));
@@ -533,6 +573,62 @@ mod tests {
             services_file: Some(file.to_path_buf()),
             env: env(env_pairs),
         }
+    }
+
+    // --- admin command drain ---------------------------------------------------
+
+    /// update() queues on `y`; the loop's drain forwards the command into
+    /// the poller channel — a test receiver observes exactly what a poller
+    /// would (the "command surfaces on a test mpsc receiver" proof).
+    #[tokio::test]
+    async fn drain_admin_forwards_queued_commands_to_the_channel() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = App::new();
+        // Micro Lens, selected row, open the cancel modal, confirm with y.
+        update(&mut app, Action::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        let pid = app.selected_row().expect("selection").pid;
+        update(
+            &mut app,
+            Action::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+        );
+        update(
+            &mut app,
+            Action::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+        );
+
+        let (admin_tx, mut admin_rx) = mpsc::channel::<AdminCommand>(8);
+        drain_admin(&mut app, &admin_tx);
+        assert!(app.pending_admin.is_empty(), "queue drained");
+        assert_eq!(
+            admin_rx.try_recv().expect("command forwarded"),
+            AdminCommand::CancelBackend(pid)
+        );
+        assert!(admin_rx.try_recv().is_err(), "exactly one command");
+    }
+
+    #[tokio::test]
+    async fn drain_admin_keeps_commands_when_the_channel_is_full() {
+        let mut app = App::new();
+        app.pending_admin = vec![
+            AdminCommand::CancelBackend(1),
+            AdminCommand::TerminateBackend(2),
+        ];
+        // Capacity 1: the second command must survive for the next pass.
+        let (admin_tx, mut admin_rx) = mpsc::channel::<AdminCommand>(1);
+        drain_admin(&mut app, &admin_tx);
+        assert_eq!(app.pending_admin, vec![AdminCommand::TerminateBackend(2)]);
+        assert_eq!(
+            admin_rx.try_recv().expect("first sent"),
+            AdminCommand::CancelBackend(1)
+        );
+        // Next pass (channel drained): the rest goes out.
+        drain_admin(&mut app, &admin_tx);
+        assert!(app.pending_admin.is_empty());
+        assert_eq!(
+            admin_rx.try_recv().expect("second sent"),
+            AdminCommand::TerminateBackend(2)
+        );
     }
 
     // --- picker trigger rule -------------------------------------------------

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use pg_lens_core::{DbSnapshot, PollerStatus};
+use pg_lens_core::{AdminCommand, AdminKind, AdminOutcome, DbSnapshot, PollerStatus};
 use ratatui::widgets::TableState;
 
 /// Default poll interval; `+`/`-` move it in [`REFRESH_STEP`] steps.
@@ -15,6 +15,9 @@ pub const DEFAULT_REFRESH: Duration = Duration::from_secs(2);
 const REFRESH_STEP: Duration = Duration::from_millis(500);
 const REFRESH_MIN: Duration = Duration::from_millis(500);
 const REFRESH_MAX: Duration = Duration::from_secs(10);
+/// How long admin feedback stays on screen: ticks are 250ms, so 40 ≈ 10s.
+/// Tick-based on purpose — the view stays synchronous, no timers in `ui/`.
+pub const ADMIN_FEEDBACK_TICKS: u64 = 40;
 
 /// Which lens (tab) is on screen.
 // The "Lens" postfix is the product vocabulary (Macro/Micro/Schema Lens),
@@ -161,6 +164,28 @@ impl PickerState {
     }
 }
 
+/// State of the admin confirmation modal (`c` = cancel query, `K` =
+/// terminate backend, Micro Lens only). While `App::confirm` is `Some`,
+/// every key except `y` (confirm) and `n`/`Esc` (abort) is inert.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfirmState {
+    pub command: AdminCommand,
+    /// Target row's user/database, shown in the modal ("user@db").
+    pub username: String,
+    pub database: String,
+}
+
+/// Transient admin-action feedback rendered above the body ("cancel sent to
+/// PID 1234…", then the outcome). Expires by tick count — no timers in ui/.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminFeedback {
+    pub text: String,
+    /// Errors (and the returned-false privilege case) render loud/red.
+    pub error: bool,
+    /// The `App::tick_count` at which the message disappears.
+    pub expires_at_tick: u64,
+}
+
 /// Everything that can happen, funneled through one mpsc channel.
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -232,6 +257,20 @@ pub struct App {
     /// The entry chosen in the picker. Set (once, by Enter in [`update`])
     /// and never cleared; `main.rs` watches it to spawn the real poller.
     pub picked: Option<PickerEntry>,
+    /// `Some` while the admin confirmation modal is on screen (`c`/`K` on
+    /// the Micro Lens). All other keys are inert until y/n/Esc resolves it.
+    pub confirm: Option<ConfirmState>,
+    /// Admin commands confirmed by `y` but not yet handed to the poller.
+    /// `update()` only queues (pure state); the main loop drains this into
+    /// the poller's `mpsc::Sender<AdminCommand>` after every update — the
+    /// same mirror pattern as `refresh_interval`/`schema_refresh_requests`.
+    pub pending_admin: Vec<AdminCommand>,
+    /// Transient statusline for admin actions (sent/succeeded/failed).
+    pub admin_feedback: Option<AdminFeedback>,
+    /// `at_epoch_ms` of the last `last_admin_action` already announced —
+    /// the poller re-stamps its most recent result on every snapshot, so
+    /// feedback must fire once per result, not once per snapshot.
+    pub admin_seen_epoch_ms: Option<u64>,
     pub should_quit: bool,
 }
 
@@ -255,6 +294,10 @@ impl App {
             tick_count: 0,
             picker: None,
             picked: None,
+            confirm: None,
+            pending_admin: Vec::new(),
+            admin_feedback: None,
+            admin_seen_epoch_ms: None,
             should_quit: false,
         };
         resort(&mut app);
@@ -307,6 +350,7 @@ pub fn update(app: &mut App, action: Action) {
             if app.first_data_at.is_none() && matches!(app.snapshot.status, PollerStatus::Ok) {
                 app.first_data_at = Some(Instant::now());
             }
+            note_admin_result(app);
             resort(app);
             resort_schema(app);
             clamp_selection(app);
@@ -314,10 +358,69 @@ pub fn update(app: &mut App, action: Action) {
         // The next draw reads the new terminal size from the frame itself.
         Action::Resize => {}
         Action::HostLabel(label) => app.host = label,
-        // Only effect: advance the splash spinner (and force a redraw).
-        Action::Tick => app.tick_count = app.tick_count.wrapping_add(1),
+        // Advance the splash spinner / feedback clock (and force a redraw).
+        Action::Tick => {
+            app.tick_count = app.tick_count.wrapping_add(1);
+            if app
+                .admin_feedback
+                .as_ref()
+                .is_some_and(|f| app.tick_count >= f.expires_at_tick)
+            {
+                app.admin_feedback = None;
+            }
+        }
         Action::Quit => app.should_quit = true,
     }
+}
+
+/// Announces a fresh `last_admin_action` (deduped by `at_epoch_ms` — the
+/// poller re-stamps its latest result on every snapshot) as feedback text.
+fn note_admin_result(app: &mut App) {
+    let Some(result) = app.snapshot.last_admin_action.as_ref() else {
+        return;
+    };
+    if app.admin_seen_epoch_ms == Some(result.at_epoch_ms) {
+        return;
+    }
+    app.admin_seen_epoch_ms = Some(result.at_epoch_ms);
+    let pid = result.pid;
+    let (text, error) = match (&result.kind, &result.outcome) {
+        (AdminKind::Cancel, AdminOutcome::Signalled(true)) => {
+            (format!("query cancelled (PID {pid})"), false)
+        }
+        (AdminKind::Terminate, AdminOutcome::Signalled(true)) => {
+            (format!("backend terminated (PID {pid})"), false)
+        }
+        // pg_cancel/terminate_backend returned false: the PID vanished, or
+        // the connected role may not signal it (needs the same user or
+        // pg_signal_backend membership — see README).
+        (_, AdminOutcome::Signalled(false)) => (
+            format!(
+                "PID {pid} not signalled \u{2014} gone or insufficient privilege \
+                 (needs same user or pg_signal_backend)"
+            ),
+            true,
+        ),
+        (kind, AdminOutcome::Error(msg)) => {
+            let verb = match kind {
+                AdminKind::Cancel => "cancel",
+                AdminKind::Terminate => "terminate",
+            };
+            // Modern PostgreSQL raises "permission denied to ..." instead
+            // of returning false — append the same actionable hint.
+            let hint = if msg.contains("permission denied") || msg.contains("must be a member") {
+                " (needs same user or pg_signal_backend)"
+            } else {
+                ""
+            };
+            (format!("{verb} PID {pid} failed: {msg}{hint}"), true)
+        }
+    };
+    app.admin_feedback = Some(AdminFeedback {
+        text,
+        error,
+        expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+    });
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
@@ -328,6 +431,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     // (Tab/s/R/+/-/Enter-detail) are active while it is on screen.
     if app.picker.is_some() {
         handle_picker_key(app, key);
+        return;
+    }
+    // Admin confirmation modal: y confirms, n/Esc aborts, EVERYTHING else
+    // (including q) is deliberately inert — no accidental double-meaning
+    // while a destructive action awaits confirmation.
+    if app.confirm.is_some() {
+        handle_confirm_key(app, key);
         return;
     }
     match key.code {
@@ -343,6 +453,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
         }
+        // Admin actions (Micro Lens only, on the selected row; they work
+        // with the detail panel open or closed): `c` asks to cancel the
+        // query, `K` (uppercase only — deliberate friction; lowercase k
+        // stays navigation) asks to terminate the backend. Both only OPEN
+        // the confirmation modal; nothing executes before `y`.
+        KeyCode::Char('c') => open_confirm(app, false),
+        KeyCode::Char('K') => open_confirm(app, true),
         // Enter toggles the detail panel of the active lens's selected row
         // (Micro: session query; Schema: table stats + index bloat).
         KeyCode::Enter => {
@@ -386,6 +503,55 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 .saturating_sub(REFRESH_STEP)
                 .max(REFRESH_MIN);
         }
+        _ => {}
+    }
+}
+
+/// Opens the admin confirmation modal for the selected Micro Lens row.
+/// A no-op on any other lens or with no selection — the keys must never
+/// half-work: without a target there is nothing to confirm.
+fn open_confirm(app: &mut App, terminate: bool) {
+    if app.active_tab != Tab::MicroLens {
+        return;
+    }
+    let Some(row) = app.selected_row() else {
+        return;
+    };
+    let command = if terminate {
+        AdminCommand::TerminateBackend(row.pid)
+    } else {
+        AdminCommand::CancelBackend(row.pid)
+    };
+    app.confirm = Some(ConfirmState {
+        command,
+        username: row.username.clone(),
+        database: row.database.clone(),
+    });
+}
+
+/// Keymap of the admin confirmation modal: `y` queues the command (the main
+/// loop forwards it to the poller) and shows the "sent…" feedback; `n`/`Esc`
+/// abort. Anything else is inert while the modal is open.
+fn handle_confirm_key(app: &mut App, key: KeyEvent) {
+    let Some(confirm) = app.confirm.as_ref() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Char('y') => {
+            let command = confirm.command;
+            app.pending_admin.push(command);
+            let verb = match command.kind() {
+                AdminKind::Cancel => "cancel",
+                AdminKind::Terminate => "terminate",
+            };
+            app.admin_feedback = Some(AdminFeedback {
+                text: format!("{verb} sent to PID {}\u{2026}", command.pid()),
+                error: false,
+                expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+            });
+            app.confirm = None;
+        }
+        KeyCode::Char('n') | KeyCode::Esc => app.confirm = None,
         _ => {}
     }
 }
@@ -996,6 +1162,242 @@ mod tests {
             Action::HostLabel("svc@db.prod.internal".to_string()),
         );
         assert_eq!(app.host, "svc@db.prod.internal");
+    }
+
+    // --- admin actions (cancel/terminate) -------------------------------------
+
+    /// App on the Micro Lens with a selected row; returns its pid.
+    fn micro_app() -> (App, i32) {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Tab)); // → Micro Lens
+        let pid = app.selected_row().expect("selection").pid;
+        (app, pid)
+    }
+
+    #[test]
+    fn c_opens_the_cancel_modal_only_on_the_micro_lens() {
+        // Macro Lens: inert.
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char('c')));
+        assert!(app.confirm.is_none());
+
+        // Schema Lens: inert too.
+        update(&mut app, press(KeyCode::Tab));
+        update(&mut app, press(KeyCode::Tab));
+        update(&mut app, press(KeyCode::Char('c')));
+        assert!(app.confirm.is_none());
+
+        // Micro Lens: opens the modal for the selected row.
+        let (mut app, pid) = micro_app();
+        update(&mut app, press(KeyCode::Char('c')));
+        let confirm = app.confirm.as_ref().expect("modal open");
+        assert_eq!(confirm.command, AdminCommand::CancelBackend(pid));
+        assert!(app.pending_admin.is_empty(), "nothing executes before y");
+    }
+
+    #[test]
+    fn uppercase_k_opens_terminate_and_lowercase_k_still_navigates() {
+        let (mut app, _) = micro_app();
+        // Move down first so lowercase-k has room to move back up.
+        update(&mut app, press(KeyCode::Char('j')));
+        let selected = app.table_state.selected();
+
+        // Lowercase k: navigation, no modal.
+        update(&mut app, press(KeyCode::Char('k')));
+        assert!(app.confirm.is_none(), "k must stay navigation");
+        assert_ne!(app.table_state.selected(), selected);
+
+        // Uppercase K: terminate modal for the selected row.
+        let pid = app.selected_row().expect("selection").pid;
+        update(
+            &mut app,
+            Action::Key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT)),
+        );
+        let confirm = app.confirm.as_ref().expect("modal open");
+        assert_eq!(confirm.command, AdminCommand::TerminateBackend(pid));
+    }
+
+    #[test]
+    fn admin_keys_work_with_the_detail_panel_open() {
+        let (mut app, pid) = micro_app();
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        update(&mut app, press(KeyCode::Char('c')));
+        let confirm = app.confirm.as_ref().expect("modal open over detail");
+        assert_eq!(confirm.command, AdminCommand::CancelBackend(pid));
+    }
+
+    #[test]
+    fn y_confirms_queueing_the_command_and_showing_sent_feedback() {
+        let (mut app, pid) = micro_app();
+        update(&mut app, press(KeyCode::Char('c')));
+        update(&mut app, press(KeyCode::Char('y')));
+        assert!(app.confirm.is_none(), "modal closed");
+        assert_eq!(app.pending_admin, vec![AdminCommand::CancelBackend(pid)]);
+        let feedback = app.admin_feedback.as_ref().expect("sent feedback");
+        assert_eq!(feedback.text, format!("cancel sent to PID {pid}\u{2026}"));
+        assert!(!feedback.error);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn n_and_esc_abort_without_queueing() {
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            let (mut app, _) = micro_app();
+            update(
+                &mut app,
+                Action::Key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT)),
+            );
+            assert!(app.confirm.is_some());
+            update(&mut app, press(code));
+            assert!(app.confirm.is_none(), "modal aborted");
+            assert!(app.pending_admin.is_empty(), "nothing queued");
+            assert!(!app.should_quit, "Esc in the modal must not quit");
+        }
+    }
+
+    #[test]
+    fn every_other_key_is_inert_while_the_modal_is_open() {
+        let (mut app, pid) = micro_app();
+        update(&mut app, press(KeyCode::Char('c')));
+        let sort_before = app.sort_mode;
+        let selected_before = app.table_state.selected();
+        for code in [
+            KeyCode::Char('q'),
+            KeyCode::Tab,
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('s'),
+            KeyCode::Char('K'),
+            KeyCode::Enter,
+            KeyCode::Char('+'),
+        ] {
+            update(&mut app, press(code));
+        }
+        assert!(!app.should_quit, "q inert while modal open");
+        assert_eq!(app.active_tab, Tab::MicroLens, "Tab inert");
+        assert_eq!(app.table_state.selected(), selected_before, "j/k inert");
+        assert_eq!(app.sort_mode, sort_before, "s inert");
+        assert!(!app.detail_open, "Enter inert");
+        assert_eq!(app.refresh_interval, DEFAULT_REFRESH, "+ inert");
+        assert!(app.pending_admin.is_empty());
+        // Still the same modal, unresolved.
+        let confirm = app.confirm.as_ref().expect("modal still open");
+        assert_eq!(confirm.command, AdminCommand::CancelBackend(pid));
+    }
+
+    /// Snapshot carrying a result → outcome feedback (fired once per
+    /// at_epoch_ms even though the poller re-stamps it on every snapshot).
+    #[test]
+    fn snapshot_result_becomes_feedback_once_per_result() {
+        use pg_lens_core::AdminActionResult;
+
+        let mut app = App::new();
+        let mut snap = DbSnapshot::mock();
+        snap.last_admin_action = Some(AdminActionResult {
+            kind: AdminKind::Cancel,
+            pid: 4977,
+            outcome: AdminOutcome::Signalled(true),
+            at_epoch_ms: 111,
+        });
+        update(&mut app, Action::Snapshot(Arc::new(snap.clone())));
+        let feedback = app.admin_feedback.clone().expect("outcome feedback");
+        assert_eq!(feedback.text, "query cancelled (PID 4977)");
+        assert!(!feedback.error);
+
+        // The SAME result on the next snapshot must not re-announce (the
+        // feedback would never fade otherwise).
+        app.admin_feedback = None;
+        update(&mut app, Action::Snapshot(Arc::new(snap)));
+        assert!(app.admin_feedback.is_none(), "deduped by at_epoch_ms");
+
+        // A NEW result (new stamp) announces again.
+        let mut snap = DbSnapshot::mock();
+        snap.last_admin_action = Some(AdminActionResult {
+            kind: AdminKind::Terminate,
+            pid: 4312,
+            outcome: AdminOutcome::Signalled(true),
+            at_epoch_ms: 222,
+        });
+        update(&mut app, Action::Snapshot(Arc::new(snap)));
+        assert_eq!(
+            app.admin_feedback.as_ref().expect("new feedback").text,
+            "backend terminated (PID 4312)"
+        );
+    }
+
+    #[test]
+    fn returned_false_surfaces_the_privilege_hint() {
+        use pg_lens_core::AdminActionResult;
+
+        let mut app = App::new();
+        let mut snap = DbSnapshot::mock();
+        snap.last_admin_action = Some(AdminActionResult {
+            kind: AdminKind::Cancel,
+            pid: 999,
+            outcome: AdminOutcome::Signalled(false),
+            at_epoch_ms: 1,
+        });
+        update(&mut app, Action::Snapshot(Arc::new(snap)));
+        let feedback = app.admin_feedback.as_ref().expect("feedback");
+        assert!(feedback.error, "false return renders loud");
+        assert!(feedback.text.contains("PID 999"));
+        assert!(feedback.text.contains("gone or insufficient privilege"));
+        assert!(feedback.text.contains("pg_signal_backend"));
+    }
+
+    #[test]
+    fn error_outcome_surfaces_the_message() {
+        use pg_lens_core::AdminActionResult;
+
+        let mut app = App::new();
+        let mut snap = DbSnapshot::mock();
+        snap.last_admin_action = Some(AdminActionResult {
+            kind: AdminKind::Terminate,
+            pid: 7,
+            outcome: AdminOutcome::Error("permission denied".to_string()),
+            at_epoch_ms: 1,
+        });
+        update(&mut app, Action::Snapshot(Arc::new(snap)));
+        let feedback = app.admin_feedback.as_ref().expect("feedback");
+        assert!(feedback.error);
+        // Permission errors (PG >= 16 raises instead of returning false)
+        // carry the same actionable hint as the false-return case.
+        assert_eq!(
+            feedback.text,
+            "terminate PID 7 failed: permission denied (needs same user or pg_signal_backend)"
+        );
+
+        let mut snap = DbSnapshot::mock();
+        snap.last_admin_action = Some(AdminActionResult {
+            kind: AdminKind::Cancel,
+            pid: 8,
+            outcome: AdminOutcome::Error("connection closed".to_string()),
+            at_epoch_ms: 2,
+        });
+        update(&mut app, Action::Snapshot(Arc::new(snap)));
+        assert_eq!(
+            app.admin_feedback.as_ref().expect("feedback").text,
+            "cancel PID 8 failed: connection closed",
+            "non-permission errors get no privilege hint"
+        );
+    }
+
+    #[test]
+    fn admin_feedback_fades_after_the_tick_deadline() {
+        let (mut app, _) = micro_app();
+        update(&mut app, press(KeyCode::Char('c')));
+        update(&mut app, press(KeyCode::Char('y')));
+        assert!(app.admin_feedback.is_some());
+
+        // One tick short of the deadline: still on screen.
+        for _ in 0..ADMIN_FEEDBACK_TICKS - 1 {
+            update(&mut app, Action::Tick);
+        }
+        assert!(app.admin_feedback.is_some(), "still visible at deadline-1");
+        // The deadline tick clears it (≈10s at the 250ms tick cadence).
+        update(&mut app, Action::Tick);
+        assert!(app.admin_feedback.is_none(), "faded");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! View layer: pure, synchronous rendering functions. No I/O, ever.
 
 pub mod format;
+mod confirm;
 mod macro_lens;
 mod micro_lens;
 mod picker;
@@ -42,19 +43,27 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         PollerStatus::Ok => 0,
         PollerStatus::Connecting | PollerStatus::Error(_) => 1,
     };
-    let [header_area, tabs_area, banner_area, body_area, statusbar_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(banner_height),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
+    // Transient admin-action feedback ("cancel sent…" / outcome): its own
+    // one-line row under the poller banner, collapsing to zero when absent.
+    let feedback_height = u16::from(app.admin_feedback.is_some());
+    let [header_area, tabs_area, banner_area, feedback_area, body_area, statusbar_area] =
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(banner_height),
+            Constraint::Length(feedback_height),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .areas(frame.area());
 
     draw_header(app, frame, header_area);
     draw_tabs(app, frame, tabs_area);
     if banner_height > 0 {
         draw_status_banner(app, frame, banner_area);
+    }
+    if feedback_height > 0 {
+        draw_admin_feedback(app, frame, feedback_area);
     }
     match app.active_tab {
         Tab::MacroLens => macro_lens::draw(app, frame, body_area),
@@ -62,6 +71,26 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         Tab::SchemaLens => schema_lens::draw(app, frame, body_area),
     }
     draw_statusbar(app, frame, statusbar_area);
+    // The admin confirmation modal draws over everything else, last.
+    if app.confirm.is_some() {
+        confirm::draw(app, frame);
+    }
+}
+
+/// One line of admin-action feedback; loud red for failures (including the
+/// returned-false privilege case), green for successes/acks. Fades on its
+/// own: `update()` clears it ~10s after it was set (tick-based).
+fn draw_admin_feedback(app: &App, frame: &mut Frame, area: Rect) {
+    let Some(feedback) = app.admin_feedback.as_ref() else {
+        return;
+    };
+    let style = if feedback.error {
+        Style::new().fg(Color::White).bg(Color::Red).bold()
+    } else {
+        Style::new().fg(Color::Green).bold()
+    };
+    let line = Line::from(format!(" {}", feedback.text)).style(style);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Poller health banner: loud on error (last good data stays on screen
@@ -142,9 +171,19 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(d);
     };
     push_hint(&mut spans, "q/Esc", ": quit".into(), false);
-    push_hint(&mut spans, "Tab", ": switch lens".into(), true);
+    push_hint(&mut spans, "Tab", ": lens".into(), true);
     push_hint(&mut spans, "j/k", format!(": row {row}"), true);
-    push_hint(&mut spans, "Enter", ": detail".into(), true);
+    // The Micro Lens trades the Enter hint for the admin keys (the open
+    // panel titles itself "Enter/Esc: close") — the bar must fit 120 cols.
+    if app.active_tab == Tab::MicroLens {
+        push_hint(&mut spans, "c", ": cancel".into(), true);
+        spans.push(Span::styled(" \u{b7} ", style::label_style()));
+        let [k, d] = style::hint("K", ": kill");
+        spans.push(k);
+        spans.push(d);
+    } else {
+        push_hint(&mut spans, "Enter", ": detail".into(), true);
+    }
     push_hint(&mut spans, "s", format!(": sort={sort_label}"), true);
     if schema_extra {
         push_hint(&mut spans, "R", ": recollect".into(), true);
@@ -383,6 +422,83 @@ mod tests {
             .collect();
         assert!(screen.contains("p g _ l e n s"));
         assert!(screen.contains("connection refused"));
+    }
+
+    // --- admin actions -------------------------------------------------------
+
+    fn press(app: &mut App, code: crossterm::event::KeyCode) {
+        crate::app::update(
+            app,
+            crate::app::Action::Key(crossterm::event::KeyEvent::new(
+                code,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+    }
+
+    #[test]
+    fn micro_lens_statusbar_shows_the_admin_hints() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Tab); // → Micro Lens
+        let screen = render(&mut app);
+        assert!(screen.contains("c: cancel"), "cancel hint: {screen}");
+        assert!(screen.contains("K: kill"), "kill hint: {screen}");
+
+        // Macro Lens: no admin hints (the keys are inert there).
+        let mut app = App::new();
+        let screen = render(&mut app);
+        assert!(!screen.contains("c: cancel"));
+        assert!(!screen.contains("K: kill"));
+    }
+
+    #[test]
+    fn cancel_modal_renders_pid_target_and_key_hints() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Tab);
+        let row = app.selected_row().expect("selection");
+        let (pid, user, db) = (row.pid, row.username.clone(), row.database.clone());
+        press(&mut app, crossterm::event::KeyCode::Char('c'));
+        let screen = render(&mut app);
+        assert!(screen.contains("Cancel query"), "title: {screen}");
+        assert!(screen.contains(&format!("Cancel query on PID {pid} ({user}@{db})?")));
+        assert!(screen.contains("y: confirm"));
+        assert!(screen.contains("n/Esc: abort"));
+        assert!(!screen.contains("connection will be killed"));
+    }
+
+    #[test]
+    fn terminate_modal_renders_the_kill_warning() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Tab);
+        let pid = app.selected_row().expect("selection").pid;
+        press(&mut app, crossterm::event::KeyCode::Char('K'));
+        let screen = render(&mut app);
+        assert!(screen.contains("Terminate backend"), "title: {screen}");
+        assert!(screen.contains(&format!("Terminate backend PID {pid}")));
+        assert!(screen.contains("The connection will be killed."));
+        assert!(screen.contains("y: confirm"));
+    }
+
+    #[test]
+    fn admin_feedback_line_renders_and_fades() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Tab);
+        let pid = app.selected_row().expect("selection").pid;
+        press(&mut app, crossterm::event::KeyCode::Char('c'));
+        press(&mut app, crossterm::event::KeyCode::Char('y'));
+        let screen = render(&mut app);
+        assert!(!screen.contains("Cancel query on PID"), "modal closed");
+        assert!(
+            screen.contains(&format!("cancel sent to PID {pid}")),
+            "sent feedback: {screen}"
+        );
+
+        // ~10s of ticks later the line is gone.
+        for _ in 0..crate::app::ADMIN_FEEDBACK_TICKS {
+            crate::app::update(&mut app, crate::app::Action::Tick);
+        }
+        let screen = render(&mut app);
+        assert!(!screen.contains("cancel sent to PID"), "faded: {screen}");
     }
 
     #[test]

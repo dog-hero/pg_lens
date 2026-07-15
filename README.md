@@ -332,6 +332,16 @@ exactly as before: connect directly.
 | `s` | Cycle sort column (duration / state / pid) |
 | `Enter` | Open/close query detail for the selected row |
 | `+` / `-` | Increase / decrease the poll interval |
+| `c` | Cancel the selected session's query (`pg_cancel_backend`) — asks for confirmation first |
+| `K` | Terminate the selected session's backend (`pg_terminate_backend`, kills the connection) — asks for confirmation first (uppercase on purpose; `k` stays navigation) |
+
+> **Tip:** `c`/`K` need permission on the server side: PostgreSQL only lets
+> you signal backends of the **same user**, or any backend if your role is a
+> member of [`pg_signal_backend`](https://www.postgresql.org/docs/current/predefined-roles.html)
+> (superusers can signal anything). Without it, pg_lens shows
+> "gone or insufficient privilege" / the server's permission error in the
+> feedback line. These actions are TUI-only — the web dashboard stays
+> read-only by design.
 
 ## Architecture
 

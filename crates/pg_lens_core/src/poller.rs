@@ -22,12 +22,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_postgres::{Client, Statement};
 
 use crate::history::{HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::models::{
-    BloatRow, DbSnapshot, PollerStatus, SchemaSnapshot, SchemaStatus, ServerVitals,
+    AdminActionResult, AdminCommand, AdminOutcome, BloatRow, DbSnapshot, PollerStatus,
+    SchemaSnapshot, SchemaStatus, ServerVitals,
 };
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
@@ -147,6 +148,70 @@ async fn wait_interval(interval_rx: &mut watch::Receiver<Duration>) {
     }
 }
 
+/// Sleeps like [`wait_interval`], but ALSO wakes when an [`AdminCommand`]
+/// arrives — the command is returned so the caller executes it and re-polls
+/// immediately (a cancelled/terminated row should leave the screen fast).
+/// This is the shape the feature spec calls the "poller select restructure":
+/// the admin channel is one more branch of the tick sleep, not a new task —
+/// the poller stays the only owner of the DB client.
+///
+/// A closed admin channel (a frontend without admin keys dropped the sender,
+/// or never had one) degrades to the plain sleep — no busy loop.
+async fn wait_interval_or_admin(
+    interval_rx: &mut watch::Receiver<Duration>,
+    admin_rx: &mut mpsc::Receiver<AdminCommand>,
+) -> Option<AdminCommand> {
+    tokio::select! {
+        _ = wait_interval(interval_rx) => None,
+        cmd = admin_rx.recv() => match cmd {
+            Some(cmd) => Some(cmd),
+            None => {
+                // Sender dropped: `recv` resolves `None` forever; finish a
+                // full sleep so this select cannot busy-loop.
+                wait_interval(interval_rx).await;
+                None
+            }
+        }
+    }
+}
+
+/// Maps one executed [`AdminCommand`] + the query result onto the
+/// serializable [`AdminActionResult`] stamped into snapshots. Pure — the
+/// result-mapping rule is unit-testable without a database.
+fn admin_result(cmd: AdminCommand, signalled: Result<bool, String>) -> AdminActionResult {
+    AdminActionResult {
+        kind: cmd.kind(),
+        pid: cmd.pid(),
+        outcome: match signalled {
+            Ok(acknowledged) => AdminOutcome::Signalled(acknowledged),
+            Err(msg) => AdminOutcome::Error(msg),
+        },
+        at_epoch_ms: epoch_ms_now(),
+    }
+}
+
+/// Runs the prepared `pg_cancel_backend`/`pg_terminate_backend` statement
+/// for `cmd`. Errors (usually privilege) become `AdminOutcome::Error` — an
+/// admin failure must never tear the polling session down; a genuinely dead
+/// connection will surface on the very next poll anyway.
+async fn execute_admin(client: &Client, stmts: &Prepared, cmd: AdminCommand) -> AdminActionResult {
+    let stmt = match cmd {
+        AdminCommand::CancelBackend(_) => &stmts.cancel_backend,
+        AdminCommand::TerminateBackend(_) => &stmts.terminate_backend,
+    };
+    let signalled = match client.query_one(stmt, &[&cmd.pid()]).await {
+        Ok(row) => row.try_get::<_, bool>("is_stopped").map_err(|e| e.to_string()),
+        // Prefer the server's own message ("permission denied to ...") over
+        // tokio-postgres's generic "db error" wrapper — this text is the
+        // frontend's feedback line.
+        Err(e) => Err(e
+            .as_db_error()
+            .map(|db| db.message().to_string())
+            .unwrap_or_else(|| e.to_string())),
+    };
+    admin_result(cmd, signalled)
+}
+
 /// Spawns the real poller: connect using `config`, detect the server
 /// version, pick
 /// the matching [`queries::QuerySet`], prepare the statements **once**, then
@@ -167,6 +232,12 @@ async fn wait_interval(interval_rx: &mut watch::Receiver<Duration>) {
 /// counter — send any new value to force an immediate collection on the
 /// next fast tick (the TUI's `R` key in Fase S3).
 ///
+/// `admin_rx` is the frontend→poller admin channel: one [`AdminCommand`]
+/// per cancel/terminate request. The poller (sole owner of the DB client)
+/// executes it via prepared statements, stamps the [`AdminActionResult`]
+/// into `last_admin_action` on every subsequent snapshot, and re-polls
+/// immediately. Frontends without admin actions just drop the sender.
+///
 /// The channel starts pre-filled with a [`DbSnapshot::connecting`] value.
 /// The task ends on its own once every receiver has been dropped.
 ///
@@ -179,10 +250,18 @@ pub fn spawn(
     interval_rx: watch::Receiver<Duration>,
     schema_interval: Duration,
     schema_refresh_rx: watch::Receiver<u64>,
+    admin_rx: mpsc::Receiver<AdminCommand>,
 ) -> watch::Receiver<Arc<DbSnapshot>> {
     let (tx, rx) = watch::channel(Arc::new(DbSnapshot::connecting()));
     let schema = SchemaState::new(schema_interval, schema_refresh_rx);
-    tokio::spawn(run(config, password_source, interval_rx, schema, tx));
+    tokio::spawn(run(
+        config,
+        password_source,
+        interval_rx,
+        schema,
+        admin_rx,
+        tx,
+    ));
     rx
 }
 
@@ -192,12 +271,15 @@ async fn run(
     password_source: Option<PasswordSource>,
     mut interval_rx: watch::Receiver<Duration>,
     mut schema: SchemaState,
+    mut admin_rx: mpsc::Receiver<AdminCommand>,
     tx: watch::Sender<Arc<DbSnapshot>>,
 ) {
     let mut backoff = BACKOFF_INITIAL;
     // Survives reconnects so the sparklines don't reset on a blip.
-    // (`schema` too: the last collection outlives a connection blip.)
+    // (`schema` too: the last collection outlives a connection blip.
+    // `last_admin` likewise: the result banner must not vanish on a blip.)
     let mut history = SnapshotHistory::default();
+    let mut last_admin: Option<AdminActionResult> = None;
     loop {
         let mut polled_ok = false;
         let end = session(
@@ -207,6 +289,8 @@ async fn run(
             &tx,
             &mut history,
             &mut schema,
+            &mut admin_rx,
+            &mut last_admin,
             &mut polled_ok,
         )
         .await;
@@ -242,6 +326,7 @@ enum SessionEnd {
 /// The password source (when present) is resolved here — once per
 /// *connection attempt*, never per tick — so every reconnect re-runs
 /// `password_cmd` and picks up rotated credentials.
+#[allow(clippy::too_many_arguments)] // poller-internal plumbing, one call site
 async fn session(
     config: &tokio_postgres::Config,
     password_source: Option<&PasswordSource>,
@@ -249,6 +334,8 @@ async fn session(
     tx: &watch::Sender<Arc<DbSnapshot>>,
     history: &mut SnapshotHistory,
     schema: &mut SchemaState,
+    admin_rx: &mut mpsc::Receiver<AdminCommand>,
+    last_admin: &mut Option<AdminActionResult>,
     polled_ok: &mut bool,
 ) -> SessionEnd {
     // The base config is never mutated: the resolved password goes into a
@@ -267,14 +354,25 @@ async fn session(
         Ok(pair) => pair,
         Err(e) => return SessionEnd::Error(format!("connect failed: {e}")),
     };
-    let end = poll_loop(&client, interval_rx, tx, history, schema, polled_ok).await;
+    let end = poll_loop(
+        &client,
+        interval_rx,
+        tx,
+        history,
+        schema,
+        admin_rx,
+        last_admin,
+        polled_ok,
+    )
+    .await;
     conn_handle.abort();
     end
 }
 
 /// The statements of a session, prepared once (never per tick). The first
 /// three run every fast tick; `table_stats` and the two estimated-bloat
-/// statements only on the slow cadence.
+/// statements only on the slow cadence; the two admin statements only when
+/// an [`AdminCommand`] arrives.
 struct Prepared {
     activity: Statement,
     blocking: Statement,
@@ -282,14 +380,19 @@ struct Prepared {
     table_stats: Statement,
     bloat_tables: Statement,
     bloat_indexes: Statement,
+    cancel_backend: Statement,
+    terminate_backend: Statement,
 }
 
+#[allow(clippy::too_many_arguments)] // poller-internal plumbing, one call site
 async fn poll_loop(
     client: &Client,
     interval_rx: &mut watch::Receiver<Duration>,
     tx: &watch::Sender<Arc<DbSnapshot>>,
     history: &mut SnapshotHistory,
     schema: &mut SchemaState,
+    admin_rx: &mut mpsc::Receiver<AdminCommand>,
+    last_admin: &mut Option<AdminActionResult>,
     polled_ok: &mut bool,
 ) -> SessionEnd {
     let version_num = match db::server_version_num(client).await {
@@ -307,17 +410,28 @@ async fn poll_loop(
         client.prepare(query_set.table_stats),
         client.prepare(query_set.bloat_tables),
         client.prepare(query_set.bloat_indexes),
+        client.prepare(query_set.cancel_backend),
+        client.prepare(query_set.terminate_backend),
     ) {
-        Ok((activity, blocking, server_info, table_stats, bloat_tables, bloat_indexes)) => {
-            Prepared {
-                activity,
-                blocking,
-                server_info,
-                table_stats,
-                bloat_tables,
-                bloat_indexes,
-            }
-        }
+        Ok((
+            activity,
+            blocking,
+            server_info,
+            table_stats,
+            bloat_tables,
+            bloat_indexes,
+            cancel_backend,
+            terminate_backend,
+        )) => Prepared {
+            activity,
+            blocking,
+            server_info,
+            table_stats,
+            bloat_tables,
+            bloat_indexes,
+            cancel_backend,
+            terminate_backend,
+        },
         Err(e) => return SessionEnd::Error(format!("prepare failed: {e}")),
     };
 
@@ -347,11 +461,20 @@ async fn poll_loop(
         };
         // Ticks in between reuse the last collection at Arc-clone cost.
         snapshot.schema = schema.current.clone();
+        // The most recent admin result rides in every envelope from then
+        // on; frontends dedupe on its `at_epoch_ms`.
+        snapshot.last_admin_action = last_admin.clone();
         *polled_ok = true;
         if tx.send(Arc::new(snapshot)).is_err() {
             return SessionEnd::Closed;
         }
-        wait_interval(interval_rx).await;
+        // The tick sleep doubles as the admin-command listener: a command
+        // wakes it, executes on this session's prepared statements, and
+        // skips the rest of the sleep so the next poll (and the snapshot
+        // carrying the result) happens immediately.
+        if let Some(cmd) = wait_interval_or_admin(interval_rx, admin_rx).await {
+            *last_admin = Some(execute_admin(client, &stmts, cmd).await);
+        }
     }
 }
 
@@ -462,8 +585,9 @@ async fn poll_once(
         activity,
         locks,
         history: history.clone(),
-        // Stamped by the caller from the poller-owned SchemaState.
+        // Both stamped by the caller from poller-owned state.
         schema: None,
+        last_admin_action: None,
         status: PollerStatus::Ok,
     })
 }
@@ -556,12 +680,19 @@ fn record_history(history: &mut SnapshotHistory, snapshot: &mut DbSnapshot) {
 /// The task ends on its own once every receiver (including clones) has been
 /// dropped — `watch::Sender::send` returns `Err` when the channel is closed.
 ///
+/// Admin commands (`admin_rx`) are simulated: every command "succeeds"
+/// (`Signalled(true)`), a terminated pid disappears from subsequent
+/// snapshots (activity and locks), a cancelled pid goes `idle`, and the
+/// result is stamped like the real poller's — so the whole TUI flow is
+/// demoable/e2e-testable without a database.
+///
 /// # Panics
 ///
 /// Must be called from within a tokio runtime (it calls `tokio::spawn`).
 pub fn spawn_mock(
     mut interval_rx: watch::Receiver<Duration>,
     mut schema_refresh_rx: watch::Receiver<u64>,
+    mut admin_rx: mpsc::Receiver<AdminCommand>,
 ) -> watch::Receiver<Arc<DbSnapshot>> {
     // The mock poller owns the ring exactly like the real one.
     let mut history = SnapshotHistory::default();
@@ -574,10 +705,23 @@ pub fn spawn_mock(
 
     tokio::spawn(async move {
         let mut ticks: u64 = 0;
+        let mut cancelled: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        let mut terminated: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        let mut last_admin: Option<AdminActionResult> = None;
         loop {
-            wait_interval(&mut interval_rx).await;
+            // Same select shape as the real poller: an admin command wakes
+            // the sleep, is applied, and the re-publish happens immediately.
+            if let Some(cmd) = wait_interval_or_admin(&mut interval_rx, &mut admin_rx).await {
+                match cmd {
+                    AdminCommand::CancelBackend(pid) => cancelled.insert(pid),
+                    AdminCommand::TerminateBackend(pid) => terminated.insert(pid),
+                };
+                last_admin = Some(admin_result(cmd, Ok(true)));
+            }
             ticks += 1;
             let mut snapshot = DbSnapshot::mock();
+            apply_mock_admin(&mut snapshot, &cancelled, &terminated);
+            snapshot.last_admin_action = last_admin.clone();
             record_history(&mut history, &mut snapshot);
             let forced = schema_refresh_rx.has_changed().unwrap_or(false);
             if forced {
@@ -598,6 +742,29 @@ pub fn spawn_mock(
     rx
 }
 
+/// Applies simulated admin outcomes onto a fresh mock snapshot: terminated
+/// pids vanish (activity + locks, as if the connection died); cancelled
+/// pids stay connected but their query is gone (state `idle`, no wait, zero
+/// duration) — mirroring what a real cancel/terminate does to
+/// `pg_stat_activity`.
+fn apply_mock_admin(
+    snapshot: &mut DbSnapshot,
+    cancelled: &std::collections::HashSet<i32>,
+    terminated: &std::collections::HashSet<i32>,
+) {
+    snapshot.activity.retain(|row| !terminated.contains(&row.pid));
+    snapshot
+        .locks
+        .retain(|lock| !terminated.contains(&lock.pid) && !cancelled.contains(&lock.pid));
+    for row in &mut snapshot.activity {
+        if cancelled.contains(&row.pid) {
+            row.state = "idle".to_string();
+            row.wait_event = None;
+            row.duration_secs = 0.0;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,8 +783,16 @@ mod tests {
         rx
     }
 
+    /// An admin channel whose sender stays alive (leaked) — the shape every
+    /// non-admin test wants: open but silent.
+    fn admin_rx() -> mpsc::Receiver<AdminCommand> {
+        let (tx, rx) = mpsc::channel(8);
+        std::mem::forget(tx);
+        rx
+    }
+
     fn spawn_mock_default(ms: u64) -> watch::Receiver<Arc<DbSnapshot>> {
-        spawn_mock(interval_rx(ms), refresh_rx())
+        spawn_mock(interval_rx(ms), refresh_rx(), admin_rx())
     }
 
     /// The poller must publish at least two snapshots that differ from each
@@ -672,7 +847,7 @@ mod tests {
     #[tokio::test]
     async fn mock_poller_survives_dropped_interval_sender() {
         let (interval_tx, interval_rx) = watch::channel(Duration::from_millis(10));
-        let mut rx = spawn_mock(interval_rx, refresh_rx());
+        let mut rx = spawn_mock(interval_rx, refresh_rx(), admin_rx());
         drop(interval_tx);
 
         for _ in 0..2 {
@@ -688,7 +863,7 @@ mod tests {
     #[tokio::test]
     async fn interval_change_wakes_the_poller() {
         let (interval_tx, interval_rx) = watch::channel(Duration::from_secs(3600));
-        let mut rx = spawn_mock(interval_rx, refresh_rx());
+        let mut rx = spawn_mock(interval_rx, refresh_rx(), admin_rx());
         rx.borrow_and_update();
 
         // With a one-hour interval nothing would arrive in 2s — unless the
@@ -710,7 +885,14 @@ mod tests {
         let config: tokio_postgres::Config = "host=127.0.0.1 port=1 user=nobody connect_timeout=1"
             .parse()
             .expect("test DSN must parse");
-        let mut rx = spawn(config, None, interval_rx(50), SCHEMA_INTERVAL_DEFAULT, refresh_rx());
+        let mut rx = spawn(
+            config,
+            None,
+            interval_rx(50),
+            SCHEMA_INTERVAL_DEFAULT,
+            refresh_rx(),
+            admin_rx(),
+        );
 
         assert!(matches!(rx.borrow().status, PollerStatus::Connecting));
 
@@ -738,7 +920,14 @@ mod tests {
         let source = PasswordSource::Command(
             "echo topsecret-stdout; echo vault sealed >&2; exit 1".to_string(),
         );
-        let mut rx = spawn(config, Some(source), interval_rx(50), SCHEMA_INTERVAL_DEFAULT, refresh_rx());
+        let mut rx = spawn(
+            config,
+            Some(source),
+            interval_rx(50),
+            SCHEMA_INTERVAL_DEFAULT,
+            refresh_rx(),
+            admin_rx(),
+        );
 
         tokio::time::timeout(Duration::from_secs(5), rx.changed())
             .await
@@ -778,6 +967,7 @@ mod tests {
             interval_rx(50),
             SCHEMA_INTERVAL_DEFAULT,
             refresh_rx(),
+            admin_rx(),
         );
 
         // First attempt at ~0s, second after the 1s backoff. Poll the file
@@ -953,7 +1143,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_mock_force_refresh_rebuilds_schema_immediately() {
         let (refresh_tx, refresh_rx) = watch::channel(0u64);
-        let mut rx = spawn_mock(interval_rx(10), refresh_rx);
+        let mut rx = spawn_mock(interval_rx(10), refresh_rx, admin_rx());
         let initial = rx.borrow().schema.clone().expect("mock carries schema");
 
         refresh_tx.send(1).expect("poller alive");
@@ -970,5 +1160,122 @@ mod tests {
             !Arc::ptr_eq(&schema, &initial),
             "tick 1 would normally reuse the Arc; the bump must swap it"
         );
+    }
+
+    // --- admin actions (cancel/terminate) ------------------------------------
+
+    /// The pure result-mapping rule: function return → Signalled(bool),
+    /// query error → Error(msg), pid/kind preserved, timestamp stamped.
+    #[test]
+    fn admin_result_maps_outcomes_and_stamps_the_time() {
+        let ok = admin_result(AdminCommand::CancelBackend(4977), Ok(true));
+        assert_eq!(ok.kind, crate::models::AdminKind::Cancel);
+        assert_eq!(ok.pid, 4977);
+        assert_eq!(ok.outcome, AdminOutcome::Signalled(true));
+        assert!(ok.at_epoch_ms > 0);
+
+        let gone = admin_result(AdminCommand::TerminateBackend(1), Ok(false));
+        assert_eq!(gone.kind, crate::models::AdminKind::Terminate);
+        assert_eq!(gone.outcome, AdminOutcome::Signalled(false));
+
+        let err = admin_result(
+            AdminCommand::TerminateBackend(2),
+            Err("permission denied to terminate process".to_string()),
+        );
+        assert!(matches!(err.outcome, AdminOutcome::Error(ref m)
+            if m.contains("permission denied")));
+    }
+
+    /// A terminate command wakes the mock poller immediately (1h interval —
+    /// only the admin branch can publish within 2s), the result rides in the
+    /// snapshot, and the pid is gone from activity AND locks.
+    #[tokio::test]
+    async fn mock_terminate_wakes_publishes_result_and_removes_the_row() {
+        let (admin_tx, admin_rx) = mpsc::channel(8);
+        let (interval_tx, interval_rx) = watch::channel(Duration::from_secs(3600));
+        let mut rx = spawn_mock(interval_rx, refresh_rx(), admin_rx);
+        let initial = rx.borrow_and_update().clone();
+        assert!(initial.activity.iter().any(|r| r.pid == 4312), "mock pid");
+        assert!(initial.last_admin_action.is_none());
+
+        admin_tx
+            .send(AdminCommand::TerminateBackend(4312))
+            .await
+            .expect("poller alive");
+        tokio::time::timeout(Duration::from_secs(2), rx.changed())
+            .await
+            .expect("admin command must wake the poller for an immediate re-poll")
+            .expect("sender alive");
+        let snap = rx.borrow_and_update().clone();
+        let result = snap.last_admin_action.as_ref().expect("result stamped");
+        assert_eq!(result.kind, crate::models::AdminKind::Terminate);
+        assert_eq!(result.pid, 4312);
+        assert_eq!(result.outcome, AdminOutcome::Signalled(true));
+        assert!(
+            snap.activity.iter().all(|r| r.pid != 4312),
+            "terminated backend must vanish from subsequent snapshots"
+        );
+        drop(interval_tx);
+    }
+
+    /// A cancel command keeps the session connected but idles its query
+    /// (and clears its lock wait) — like a real pg_cancel_backend.
+    #[tokio::test]
+    async fn mock_cancel_idles_the_query_but_keeps_the_session() {
+        let (admin_tx, admin_rx) = mpsc::channel(8);
+        let mut rx = spawn_mock(interval_rx(10), refresh_rx(), admin_rx);
+        rx.borrow_and_update();
+
+        admin_tx
+            .send(AdminCommand::CancelBackend(4977))
+            .await
+            .expect("poller alive");
+        // The wake is immediate, but tolerate one in-flight tick racing it.
+        let mut cancelled_seen = false;
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(2), rx.changed())
+                .await
+                .expect("poller publishes")
+                .expect("sender alive");
+            let snap = rx.borrow_and_update().clone();
+            let Some(result) = snap.last_admin_action.as_ref() else {
+                continue;
+            };
+            assert_eq!(result.kind, crate::models::AdminKind::Cancel);
+            assert_eq!(result.pid, 4977);
+            assert_eq!(result.outcome, AdminOutcome::Signalled(true));
+            let row = snap
+                .activity
+                .iter()
+                .find(|r| r.pid == 4977)
+                .expect("cancelled session stays connected");
+            assert_eq!(row.state, "idle");
+            assert!(row.wait_event.is_none());
+            assert_eq!(row.duration_secs, 0.0);
+            assert!(
+                snap.locks.iter().all(|l| l.pid != 4977),
+                "cancelled query no longer waits on a lock"
+            );
+            cancelled_seen = true;
+            break;
+        }
+        assert!(cancelled_seen, "result must surface within a few ticks");
+    }
+
+    /// Dropping the admin sender must not busy-loop or kill the poller —
+    /// same resilience contract as the interval sender.
+    #[tokio::test]
+    async fn mock_poller_survives_dropped_admin_sender() {
+        let (admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
+        let mut rx = spawn_mock(interval_rx(10), refresh_rx(), admin_rx);
+        drop(admin_tx);
+
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(2), rx.changed())
+                .await
+                .expect("poller must keep publishing after admin sender drop")
+                .expect("sender must still be alive");
+            rx.borrow_and_update();
+        }
     }
 }

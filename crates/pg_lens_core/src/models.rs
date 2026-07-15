@@ -372,6 +372,64 @@ impl SchemaSnapshot {
     }
 }
 
+/// An administrative request a frontend sends TO the poller task (which owns
+/// the DB client) over a `tokio::sync::mpsc` channel — the reverse direction
+/// of the snapshot `watch`, same message-passing-only rule. TUI-only today:
+/// the web frontend stays read-only by design (its API has no such channel).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum AdminCommand {
+    /// `SELECT pg_cancel_backend($1)` — cancel the backend's current query.
+    CancelBackend(i32),
+    /// `SELECT pg_terminate_backend($1)` — kill the whole connection.
+    TerminateBackend(i32),
+}
+
+impl AdminCommand {
+    pub fn pid(self) -> i32 {
+        match self {
+            AdminCommand::CancelBackend(pid) | AdminCommand::TerminateBackend(pid) => pid,
+        }
+    }
+
+    pub fn kind(self) -> AdminKind {
+        match self {
+            AdminCommand::CancelBackend(_) => AdminKind::Cancel,
+            AdminCommand::TerminateBackend(_) => AdminKind::Terminate,
+        }
+    }
+}
+
+/// Which admin function ran (mirrors [`AdminCommand`], minus the pid).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum AdminKind {
+    Cancel,
+    Terminate,
+}
+
+/// What `pg_cancel_backend`/`pg_terminate_backend` said.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum AdminOutcome {
+    /// The function's boolean return: `true` = signal sent; `false` = the
+    /// PID no longer exists (pg_* may also return false without the
+    /// same-user/pg_signal_backend privilege, depending on version/paths).
+    Signalled(bool),
+    /// The query itself failed — most commonly a privilege error
+    /// (`must be a member of the role whose process is being ...`).
+    Error(String),
+}
+
+/// The result of one [`AdminCommand`], reported back INSIDE the snapshot
+/// envelope (no side channel): the poller stamps its most recent result on
+/// every snapshot it publishes; frontends dedupe by `at_epoch_ms`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AdminActionResult {
+    pub kind: AdminKind,
+    pub pid: i32,
+    pub outcome: AdminOutcome,
+    /// When the command executed (Unix epoch ms) — the dedupe/aging key.
+    pub at_epoch_ms: u64,
+}
+
 /// Health of the poller loop, carried inside every snapshot so that all
 /// frontends can surface collection errors without a side channel.
 #[derive(Clone, Debug, Serialize)]
@@ -400,6 +458,12 @@ pub struct DbSnapshot {
     /// `Arc`: fast ticks that don't recollect reuse the last collection at
     /// pointer-clone cost.
     pub schema: Option<Arc<SchemaSnapshot>>,
+    /// Result of the most recent [`AdminCommand`] this poller executed
+    /// (cancel/terminate), stamped on every snapshot from then on. `None`
+    /// until the first admin action of the session. Frontends that expose
+    /// admin actions (the TUI) dedupe on `at_epoch_ms`; read-only frontends
+    /// (the web) simply never look at it.
+    pub last_admin_action: Option<AdminActionResult>,
     pub status: PollerStatus,
 }
 
@@ -560,6 +624,8 @@ impl DbSnapshot {
             // staleness UI is exercisable); a bare mock() carries a fresh
             // collection so `--mock` always has schema data to render.
             schema: Some(Arc::new(SchemaSnapshot::mock())),
+            // Stamped by the (mock) poller after it executes a command.
+            last_admin_action: None,
             status: PollerStatus::Ok,
         }
     }
@@ -590,6 +656,7 @@ impl DbSnapshot {
             locks: Vec::new(),
             history: SnapshotHistory::default(),
             schema: None,
+            last_admin_action: None,
             status: PollerStatus::Connecting,
         }
     }
@@ -707,6 +774,45 @@ mod tests {
         // `connecting` (pre-first-collection) serializes schema as null.
         let json = serde_json::to_value(DbSnapshot::connecting()).expect("serialize");
         assert!(json["schema"].is_null());
+    }
+
+    #[test]
+    fn admin_action_result_serializes_inside_the_envelope() {
+        // No action yet: the field crosses as JSON null (web renders nothing).
+        let json = serde_json::to_value(DbSnapshot::mock()).expect("serialize");
+        assert!(json["last_admin_action"].is_null());
+
+        // Every outcome shape is JSON-representable.
+        let mut snapshot = DbSnapshot::mock();
+        snapshot.last_admin_action = Some(AdminActionResult {
+            kind: AdminKind::Cancel,
+            pid: 4977,
+            outcome: AdminOutcome::Signalled(true),
+            at_epoch_ms: 1_752_000_000_000,
+        });
+        let json = serde_json::to_value(&snapshot).expect("serialize");
+        let action = &json["last_admin_action"];
+        assert_eq!(action["kind"], serde_json::json!("Cancel"));
+        assert_eq!(action["pid"], serde_json::json!(4977));
+        assert_eq!(action["outcome"]["Signalled"], serde_json::json!(true));
+        assert_eq!(action["at_epoch_ms"], serde_json::json!(1_752_000_000_000u64));
+
+        let err = AdminActionResult {
+            kind: AdminKind::Terminate,
+            pid: 1,
+            outcome: AdminOutcome::Error("permission denied".to_string()),
+            at_epoch_ms: 1,
+        };
+        let json = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(json["outcome"]["Error"], serde_json::json!("permission denied"));
+    }
+
+    #[test]
+    fn admin_command_exposes_pid_and_kind() {
+        assert_eq!(AdminCommand::CancelBackend(42).pid(), 42);
+        assert_eq!(AdminCommand::TerminateBackend(43).pid(), 43);
+        assert_eq!(AdminCommand::CancelBackend(1).kind(), AdminKind::Cancel);
+        assert_eq!(AdminCommand::TerminateBackend(1).kind(), AdminKind::Terminate);
     }
 
     #[test]
