@@ -19,7 +19,8 @@ __pycache__/
 # --- Editors / local AI tooling ---
 .vscode/
 .idea/
-.claude/
+.claude/*
+!.claude/agents/
 .remember/
 
 # --- Secrets & local config: never commit ---
