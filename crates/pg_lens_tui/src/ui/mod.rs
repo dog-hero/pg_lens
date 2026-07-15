@@ -231,7 +231,14 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     }
     push_hint(&mut spans, "s", format!(": sort={sort_label}"), true);
     if slow_lens_extra {
-        push_hint(&mut spans, "R", ": recollect".into(), true);
+        // `R` refreshes the slow lenses and, on the Schema Lens, runs the
+        // on-demand estimated-bloat queries (too slow for the auto cadence).
+        let desc = if app.active_tab == Tab::SchemaLens {
+            ": refresh + bloat"
+        } else {
+            ": recollect"
+        };
+        push_hint(&mut spans, "R", desc.into(), true);
     }
     push_hint(
         &mut spans,
@@ -309,8 +316,10 @@ mod tests {
         assert!(screen.contains("!!"), "red severity marker: {screen}");
         assert!(screen.contains("~?"), "is_na renders ~?, never a number");
         assert!(screen.contains("db: shop"), "footer names the database");
+        // Mock schema carries bloat, so the footer shows the ESTIMATED label
+        // and the on-demand re-estimate hint.
         assert!(screen.contains("ESTIMATED"), "estimate label is mandatory");
-        assert!(screen.contains("R: recollect"));
+        assert!(screen.contains("R: refresh + bloat"), "schema R hint: {screen}");
     }
 
     #[test]

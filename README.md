@@ -36,10 +36,12 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
   backoff. The UI never blocks on the database.
 - **Live tuning** — adjust the poll interval on the fly with `+` / `-`
   (0.5s–10s).
-- **Schema Lens (data layer)** — per-table `pg_stat_user_tables` counters,
-  on-disk sizes, and **estimated** table/btree-index bloat, collected on a
-  separate slow cadence (default 60s, `--schema-interval`) so it never
-  taxes the fast tick. Bloat estimation uses queries adapted from
+- **Schema Lens (data layer)** — per-table `pg_stat_user_tables` counters
+  and on-disk sizes, refreshed on a separate slow cadence (default 60s,
+  `--schema-interval`) so they never tax the fast tick. **Estimated bloat
+  is on-demand** — its queries are heavy, so they run only when you press
+  `R` in the Schema Lens (never automatically, so connecting is instant).
+  Bloat estimation uses queries adapted from
   [ioguix/pgsql-bloat-estimation](https://github.com/ioguix/pgsql-bloat-estimation)
   (BSD-2-Clause, attribution kept in the SQL headers). Methodology note:
   these are *statistics-based estimates*, not measurements — they rely on a

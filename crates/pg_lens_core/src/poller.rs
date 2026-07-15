@@ -70,17 +70,24 @@ impl SchemaState {
         }
     }
 
-    /// Should this tick also collect schema stats? True when the slow
-    /// interval elapsed (or never ran) or a force-refresh signal arrived.
-    /// Consumes the pending refresh signal, if any.
-    fn due(&mut self, now: Instant) -> bool {
+    /// Should this tick collect schema stats, and if so, WITH the heavy
+    /// estimated-bloat queries? `Some(true)` on a force refresh (`R`) — full
+    /// collection including on-demand bloat; `Some(false)` when the auto
+    /// cadence elapsed — table stats only, never the slow bloat queries;
+    /// `None` when there is nothing to do. Consumes the pending refresh
+    /// signal, if any.
+    fn due(&mut self, now: Instant) -> Option<bool> {
         // `has_changed` errs when the sender is gone — no more force
         // refreshes then, the elapsed check still stands.
         let forced = self.refresh_rx.has_changed().unwrap_or(false);
         if forced {
             self.refresh_rx.borrow_and_update();
+            return Some(true);
         }
-        forced || cadence_elapsed(self.last_attempt, now, self.interval)
+        if cadence_elapsed(self.last_attempt, now, self.interval) {
+            return Some(false);
+        }
+        None
     }
 
     /// Stores a collection whose table stats succeeded. Partial-failure
@@ -91,8 +98,15 @@ impl SchemaState {
     fn store(&mut self, collection: SchemaCollection) {
         let previous = self.current.as_deref();
         let (table_bloat, index_bloat, status) = match collection.bloat {
-            Ok((table_bloat, index_bloat)) => (table_bloat, index_bloat, SchemaStatus::Ok),
-            Err(msg) => (
+            // Bloat not requested this cycle (auto tick): carry the last
+            // on-demand estimate forward untouched.
+            None => (
+                previous.map(|p| p.table_bloat.clone()).unwrap_or_default(),
+                previous.map(|p| p.index_bloat.clone()).unwrap_or_default(),
+                SchemaStatus::Ok,
+            ),
+            Some(Ok((table_bloat, index_bloat))) => (table_bloat, index_bloat, SchemaStatus::Ok),
+            Some(Err(msg)) => (
                 previous.map(|p| p.table_bloat.clone()).unwrap_or_default(),
                 previous.map(|p| p.index_bloat.clone()).unwrap_or_default(),
                 SchemaStatus::Error(format!("estimated-bloat collection failed: {msg}")),
@@ -532,14 +546,34 @@ async fn poll_loop(
         if tx.is_closed() {
             return SessionEnd::Closed;
         }
-        // Slow cadence: only when due (interval elapsed / force refresh)
-        // does the tick ALSO run the schema query — never otherwise. A
-        // failed collection stays inside SchemaStatus (activity intact) and
-        // re-arms the timer, so it is not retried every 2s.
+        // Publish the fast tick FIRST so the dashboard appears immediately on
+        // connect — the slow schema/statements collection never blocks the
+        // first (or any) snapshot; its result rides the NEXT tick.
+        let mut snapshot = match poll_once(client, &stmts, &mut deltas, history).await {
+            Ok(s) => s,
+            Err(msg) => return SessionEnd::Error(format!("poll failed: {msg}")),
+        };
+        // Ticks between collections reuse the last one at Arc-clone cost.
+        snapshot.schema = schema.current.clone();
+        snapshot.statements = statements.current.clone();
+        // The most recent admin result rides in every envelope from then
+        // on; frontends dedupe on its `at_epoch_ms`.
+        snapshot.last_admin_action = last_admin.clone();
+        *polled_ok = true;
+        if tx.send(Arc::new(snapshot)).is_err() {
+            return SessionEnd::Closed;
+        }
+
+        // Slow collection AFTER the fast snapshot is out. `due` returns
+        // Some(with_bloat): table stats refresh on the auto cadence
+        // (with_bloat = false), while the heavy estimated-bloat queries run
+        // ONLY on an explicit force refresh (`R`, with_bloat = true) — they
+        // are too slow to run automatically. A failed collection stays inside
+        // SchemaStatus (activity intact) and re-arms the timer.
         let now = Instant::now();
-        if schema.due(now) {
+        if let Some(with_bloat) = schema.due(now) {
             schema.last_attempt = Some(now);
-            match collect_schema(client, &stmts).await {
+            match collect_schema(client, &stmts, with_bloat).await {
                 Ok(collection) => schema.store(collection),
                 Err(msg) => schema.store_error(format!("schema collection failed: {msg}")),
             }
@@ -555,20 +589,6 @@ async fn poll_loop(
                 },
                 Err(reason) => statements.store_unavailable(reason.clone()),
             }
-        }
-        let mut snapshot = match poll_once(client, &stmts, &mut deltas, history).await {
-            Ok(s) => s,
-            Err(msg) => return SessionEnd::Error(format!("poll failed: {msg}")),
-        };
-        // Ticks in between reuse the last collection at Arc-clone cost.
-        snapshot.schema = schema.current.clone();
-        snapshot.statements = statements.current.clone();
-        // The most recent admin result rides in every envelope from then
-        // on; frontends dedupe on its `at_epoch_ms`.
-        snapshot.last_admin_action = last_admin.clone();
-        *polled_ok = true;
-        if tx.send(Arc::new(snapshot)).is_err() {
-            return SessionEnd::Closed;
         }
         // The tick sleep doubles as the admin-command listener: a command
         // wakes it, executes on this session's prepared statements, and
@@ -721,36 +741,55 @@ async fn poll_once(
 /// row sets. The bloat part is a `Result` of its own — a failing bloat
 /// query must not take the table stats down with it (see
 /// [`SchemaState::store`] for the partial-failure semantics).
+/// Estimated table + index bloat from one on-demand collection, or the error
+/// that collection hit.
+type BloatEstimate = Result<(Vec<BloatRow>, Vec<BloatRow>), String>;
+
 struct SchemaCollection {
     tables: Vec<crate::models::TableStatRow>,
-    bloat: Result<(Vec<BloatRow>, Vec<BloatRow>), String>,
+    /// `None` when bloat was not requested this cycle (auto tick — keep the
+    /// last on-demand estimate); `Some(_)` when a force refresh asked for a
+    /// fresh estimate.
+    bloat: Option<BloatEstimate>,
 }
 
-/// Runs the (slow) table-stats + estimated-bloat queries, pipelined on the
-/// session like the fast tick's trio. Called from the tick loop only when
-/// the schema cadence is due — the anti-pattern nº 1 of this feature is
-/// running these on the fast tick.
-async fn collect_schema(client: &Client, stmts: &Prepared) -> Result<SchemaCollection, String> {
-    let (table_rows, bloat_table_rows, bloat_index_rows) = tokio::join!(
-        client.query(&stmts.table_stats, &[]),
-        client.query(&stmts.bloat_tables, &[]),
-        client.query(&stmts.bloat_indexes, &[]),
-    );
+/// Runs the (slow) table-stats query, plus the HEAVY estimated-bloat queries
+/// only when `with_bloat` (an explicit force refresh). Bloat never runs on
+/// the auto cadence — it is too slow to hold up the dashboard, so it is
+/// on-demand. Called from the tick loop only when the schema cadence grants.
+async fn collect_schema(
+    client: &Client,
+    stmts: &Prepared,
+    with_bloat: bool,
+) -> Result<SchemaCollection, String> {
     // Table stats are the collection's backbone: their failure fails it all.
-    let table_rows = table_rows.map_err(|e| e.to_string())?;
+    let table_rows = client
+        .query(&stmts.table_stats, &[])
+        .await
+        .map_err(|e| e.to_string())?;
     let mut tables = Vec::with_capacity(table_rows.len());
     for row in &table_rows {
         tables.push(db::table_stat_from_row(row).map_err(|e| e.to_string())?);
     }
-    let bloat = bloat_table_rows
-        .map_err(|e| e.to_string())
-        .and_then(|rows| bloat_rows(&rows))
-        .and_then(|table_bloat| {
-            let index_bloat = bloat_index_rows
+    let bloat = if with_bloat {
+        let (bloat_table_rows, bloat_index_rows) = tokio::join!(
+            client.query(&stmts.bloat_tables, &[]),
+            client.query(&stmts.bloat_indexes, &[]),
+        );
+        Some(
+            bloat_table_rows
                 .map_err(|e| e.to_string())
-                .and_then(|rows| bloat_rows(&rows))?;
-            Ok((table_bloat, index_bloat))
-        });
+                .and_then(|rows| bloat_rows(&rows))
+                .and_then(|table_bloat| {
+                    let index_bloat = bloat_index_rows
+                        .map_err(|e| e.to_string())
+                        .and_then(|rows| bloat_rows(&rows))?;
+                    Ok((table_bloat, index_bloat))
+                }),
+        )
+    } else {
+        None
+    };
     Ok(SchemaCollection { tables, bloat })
 }
 
@@ -1177,14 +1216,62 @@ mod tests {
         let mut schema = SchemaState::new(Duration::from_secs(3600), refresh_rx);
         let t0 = Instant::now();
         schema.last_attempt = Some(t0); // just collected: not due for an hour
-        assert!(!schema.due(t0 + Duration::from_secs(2)));
+        assert_eq!(schema.due(t0 + Duration::from_secs(2)), None);
 
         refresh_tx.send(1).expect("receiver alive");
-        assert!(schema.due(t0 + Duration::from_secs(4)), "bump forces due");
-        assert!(
-            !schema.due(t0 + Duration::from_secs(6)),
+        assert_eq!(
+            schema.due(t0 + Duration::from_secs(4)),
+            Some(true),
+            "bump forces due WITH bloat (on-demand)"
+        );
+        assert_eq!(
+            schema.due(t0 + Duration::from_secs(6)),
+            None,
             "signal consumed: no refresh loop"
         );
+    }
+
+    /// The auto cadence collects table stats only (`Some(false)`), never the
+    /// heavy bloat queries — those are on-demand (force refresh → `Some(true)`).
+    #[test]
+    fn auto_cadence_skips_bloat_force_refresh_includes_it() {
+        let (refresh_tx, refresh_rx) = watch::channel(0u64);
+        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx);
+        let t0 = Instant::now();
+        // Never collected → auto due, but table-stats only (no bloat).
+        assert_eq!(schema.due(t0), Some(false));
+        schema.last_attempt = Some(t0);
+        // Cadence elapsed → still table-stats only.
+        assert_eq!(schema.due(t0 + Duration::from_secs(61)), Some(false));
+        // Force refresh → full, including bloat.
+        refresh_tx.send(1).expect("receiver alive");
+        assert_eq!(schema.due(t0 + Duration::from_secs(62)), Some(true));
+    }
+
+    /// An auto tick (`bloat: None`) keeps the last on-demand bloat estimate
+    /// while refreshing the table stats.
+    #[test]
+    fn auto_tick_carries_bloat_forward() {
+        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx());
+        let good = SchemaSnapshot::mock();
+        schema.store(SchemaCollection {
+            tables: good.tables.clone(),
+            bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
+        });
+        let mut fresh = good.tables.clone();
+        fresh.pop();
+        schema.store(SchemaCollection {
+            tables: fresh.clone(),
+            bloat: None, // auto tick: no bloat this cycle
+        });
+        let after = schema.current.clone().expect("stored");
+        assert_eq!(after.tables.len(), fresh.len(), "fresh tables");
+        assert_eq!(
+            after.table_bloat.len(),
+            good.table_bloat.len(),
+            "bloat carried forward"
+        );
+        assert!(matches!(after.status, SchemaStatus::Ok));
     }
 
     /// A failed slow collection keeps the last good tables (and their
@@ -1196,7 +1283,7 @@ mod tests {
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
-            bloat: Ok((good.table_bloat.clone(), good.index_bloat.clone())),
+            bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
         let stored = schema.current.clone().expect("stored");
         let collected_at = stored.collected_at_epoch_ms;
@@ -1220,14 +1307,14 @@ mod tests {
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
-            bloat: Ok((good.table_bloat.clone(), good.index_bloat.clone())),
+            bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
 
         let mut fresh_tables = good.tables.clone();
         fresh_tables.pop(); // observably different from the previous set
         schema.store(SchemaCollection {
             tables: fresh_tables.clone(),
-            bloat: Err("canceling statement due to statement timeout".to_string()),
+            bloat: Some(Err("canceling statement due to statement timeout".to_string())),
         });
 
         let after = schema.current.clone().expect("stored");

@@ -184,9 +184,16 @@ export class SchemaLens {
       return;
     }
     const ageSecs = Math.max(0, (Date.now() - s.collected_at_epoch_ms) / 1000);
+    // Bloat is on-demand (its queries are slow) and can only be triggered
+    // from the TUI (`R`); the web shows the last estimate if one exists, or
+    // notes that none has been taken.
+    const bloatNote =
+      s.table_bloat.length === 0 && s.index_bloat.length === 0
+        ? "bloat: on-demand (run R in the TUI)"
+        : "estimated bloat";
     this.staleness.textContent =
       `db: ${this.database} · ${s.tables.length} tables · ` +
-      `collected ${humanDuration(ageSecs)} ago · estimated bloat`;
+      `collected ${humanDuration(ageSecs)} ago · ${bloatNote}`;
   }
 
   private renderWarning(): void {

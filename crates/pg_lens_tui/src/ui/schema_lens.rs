@@ -220,9 +220,16 @@ fn draw_footer(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
     let staleness_secs =
         (pg_lens_core::history::epoch_ms_now().saturating_sub(schema.collected_at_epoch_ms))
             / 1_000;
+    // Bloat is on-demand (its queries are slow): the auto cadence refreshes
+    // only the table stats, so the footer says how to get bloat, or that the
+    // shown estimate is on-demand.
+    let bloat_note = if schema.table_bloat.is_empty() && schema.index_bloat.is_empty() {
+        "R: estimate bloat (slow, on-demand)"
+    } else {
+        "ESTIMATED bloat (needs fresh ANALYZE) \u{b7} R: re-estimate"
+    };
     let line = Line::from(format!(
-        " db: {db} \u{b7} {n} tables \u{b7} collected {staleness_secs}s ago \u{b7} ESTIMATED \
-         bloat (needs fresh ANALYZE) \u{b7} R: recollect",
+        " db: {db} \u{b7} {n} tables \u{b7} collected {staleness_secs}s ago \u{b7} {bloat_note}",
         db = app.snapshot.vitals.database,
         n = schema.tables.len(),
     ))
