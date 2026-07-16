@@ -1,8 +1,9 @@
 // Macro Lens: vitals cards rendered from ServerVitals.
 
-import type { ServerVitals, VacuumClusterAge } from "./types";
+import type { CheckpointerStats, ServerVitals, VacuumClusterAge } from "./types";
 import { humanBytes, humanCount, humanDuration, humanPercent } from "./format";
 import { ageSeverity } from "./vacuum";
+import { checkpointerCard } from "./checkpointer";
 
 interface Card {
   label: string;
@@ -32,7 +33,36 @@ function vacuumCard(age: VacuumClusterAge | null): Card | null {
   };
 }
 
-function cards(v: ServerVitals, vacuumAge: VacuumClusterAge | null): Card[] {
+/**
+ * F4's checkpointer/bgwriter card. `null` (before the first poll of a
+ * session) renders a calm collecting-state card instead of being omitted —
+ * the card slot is always present so the layout doesn't jump.
+ */
+function checkpointCard(cp: CheckpointerStats | null): Card {
+  if (cp === null) {
+    return {
+      label: "Checkpoints",
+      value: "…",
+      detail: "collecting checkpointer stats…",
+      meter: null,
+      tone: "",
+    };
+  }
+  const card = checkpointerCard(cp);
+  return {
+    label: "Checkpoints",
+    value: card.perMin,
+    detail: `${card.pressure} · ${card.buffersPerSec} · avg ${card.avgWriteSync}`,
+    meter: null,
+    tone: card.severity,
+  };
+}
+
+function cards(
+  v: ServerVitals,
+  vacuumAge: VacuumClusterAge | null,
+  checkpointer: CheckpointerStats | null,
+): Card[] {
   const saturation =
     v.max_connections > 0 ? v.connections_total / v.max_connections : 0;
   const warning = vacuumCard(vacuumAge);
@@ -73,6 +103,7 @@ function cards(v: ServerVitals, vacuumAge: VacuumClusterAge | null): Card[] {
       meter: null,
       tone: "",
     },
+    checkpointCard(checkpointer),
   ];
 }
 
@@ -80,9 +111,10 @@ export function renderVitals(
   container: HTMLElement,
   v: ServerVitals,
   vacuumAge: VacuumClusterAge | null = null,
+  checkpointer: CheckpointerStats | null = null,
 ): void {
   container.replaceChildren(
-    ...cards(v, vacuumAge).map((card) => {
+    ...cards(v, vacuumAge, checkpointer).map((card) => {
       const el = document.createElement("div");
       el.className = card.tone === "" ? "card" : `card ${card.tone}`;
       const meter =

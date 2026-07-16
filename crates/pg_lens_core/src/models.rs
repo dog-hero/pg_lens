@@ -95,6 +95,53 @@ pub struct ServerVitals {
     pub deadlocks: i64,
 }
 
+/// Checkpointer/bgwriter stats (F4), refreshed every fast tick (same
+/// essential transaction as [`ServerVitals`] — a cheap single-row catalog
+/// read, never best-effort). Normalizes the PG17 `pg_stat_bgwriter` /
+/// `pg_stat_checkpointer` catalog split into one shape: the cumulative
+/// counters below are what the SQL reports either way (`buffers_backend`
+/// aside, `None` on 17+ — moved to `pg_stat_io`), and the derived fields are
+/// computed by the poller from tick-to-tick deltas, mirroring
+/// `ServerVitals::tps`.
+#[derive(Clone, Debug, Serialize)]
+pub struct CheckpointerStats {
+    // --- cumulative counters (since server start, or the last stats reset) ---
+    pub checkpoints_timed: i64,
+    pub checkpoints_req: i64,
+    pub checkpoint_write_time_ms: f64,
+    pub checkpoint_sync_time_ms: f64,
+    pub buffers_checkpoint: i64,
+    pub buffers_clean: i64,
+    pub maxwritten_clean: i32,
+    /// `None` on PG 17+ (moved to `pg_stat_io`).
+    pub buffers_backend: Option<i64>,
+    pub buffers_alloc: i64,
+
+    // --- derived per-tick rates: `None` on the first poll of a session (no
+    // delta window yet — same rule as `ServerVitals::tps`) ---
+    pub checkpoints_per_min_timed: Option<f64>,
+    pub checkpoints_per_min_req: Option<f64>,
+    pub buffers_checkpoint_per_sec: Option<f64>,
+    pub buffers_clean_per_sec: Option<f64>,
+    /// `None` when no delta window yet, OR when `buffers_backend` itself is
+    /// absent (PG 17+).
+    pub buffers_backend_per_sec: Option<f64>,
+    /// Average write/sync time per checkpoint, over ticks that saw at least
+    /// one new checkpoint complete; `None` when no checkpoint has completed
+    /// in the delta window (the common case — checkpoints are infrequent).
+    pub avg_checkpoint_write_ms: Option<f64>,
+    pub avg_checkpoint_sync_ms: Option<f64>,
+
+    /// `requested / (requested + timed)` checkpoints, computed over the
+    /// **poller session window** (since this connection's first poll, not
+    /// per-tick — checkpoints are rare enough that a per-tick delta would be
+    /// mostly 0/0 noise). `None` until at least one checkpoint has completed
+    /// since the session began. A high share means checkpoint pressure
+    /// (`max_wal_size` likely too small): the Macro Lens tints this yellow
+    /// when `requested > timed`, calm otherwise.
+    pub requested_ratio_session: Option<f64>,
+}
+
 /// One row of the Schema Lens table-stats query
 /// (`queries/table_stats_post_130000.sql`): `pg_stat_user_tables` counters
 /// plus on-disk sizes, for one user table of the *connected database*.
@@ -987,6 +1034,11 @@ pub struct DbSnapshot {
     /// when it succeeded and simply found no vacuum running (the common
     /// case — rendered as a calm "no vacuum running", never an error).
     pub vacuum_progress: Option<Vec<VacuumProgressRow>>,
+    /// Checkpointer/bgwriter stats (F4), refreshed every fast tick in the
+    /// same essential transaction as `vitals` — NOT best-effort (readable by
+    /// everyone, same class as `pg_stat_database`). `None` only before the
+    /// first successful poll of a session.
+    pub checkpointer: Option<CheckpointerStats>,
     pub status: PollerStatus,
 }
 
@@ -1207,6 +1259,28 @@ impl DbSnapshot {
                 heap_blks_total: 24_000,
                 heap_blks_scanned: (14_400 + (seq as i64) * 350) % 24_000,
             }]),
+            // F4: healthy checkpointer — requested share stays well under
+            // timed (calm session ratio), everything else jittered so
+            // `--mock` visibly moves.
+            checkpointer: Some(CheckpointerStats {
+                checkpoints_timed: 812 + (seq as i64) / 3,
+                checkpoints_req: 46 + jitter(seq, 20, 6) as i64,
+                checkpoint_write_time_ms: 245_000.0 + jitter(seq, 21, 5_000) as f64,
+                checkpoint_sync_time_ms: 18_400.0 + jitter(seq, 22, 800) as f64,
+                buffers_checkpoint: 1_240_000 + (seq as i64) * 37,
+                buffers_clean: 88_500 + (seq as i64) * 4,
+                maxwritten_clean: 12 + jitter(seq, 23, 3) as i32,
+                buffers_backend: Some(305_000 + (seq as i64) * 9),
+                buffers_alloc: 5_600_000 + (seq as i64) * 120,
+                checkpoints_per_min_timed: Some(0.31 + jitter(seq, 24, 20) as f64 / 1_000.0),
+                checkpoints_per_min_req: Some(0.02 + jitter(seq, 25, 10) as f64 / 1_000.0),
+                buffers_checkpoint_per_sec: Some(210.0 + jitter(seq, 26, 40) as f64),
+                buffers_clean_per_sec: Some(35.0 + jitter(seq, 27, 15) as f64),
+                buffers_backend_per_sec: Some(58.0 + jitter(seq, 28, 20) as f64),
+                avg_checkpoint_write_ms: Some(4_200.0 + jitter(seq, 29, 600) as f64),
+                avg_checkpoint_sync_ms: Some(310.0 + jitter(seq, 30, 80) as f64),
+                requested_ratio_session: Some(0.13 + jitter(seq, 31, 10) as f64 / 100.0),
+            }),
             status: PollerStatus::Ok,
         }
     }
@@ -1242,6 +1316,7 @@ impl DbSnapshot {
             replication: None,
             replication_slots: None,
             vacuum_progress: None,
+            checkpointer: None,
             status: PollerStatus::Connecting,
         }
     }

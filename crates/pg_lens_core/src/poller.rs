@@ -30,9 +30,10 @@ use crate::history::{DEFAULT_CAP, HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::history_store::HistoryStore;
 use crate::index_advisor::{self, IndexCatalogRow};
 use crate::models::{
-    AdminActionResult, AdminCommand, AdminOutcome, BloatRow, DbSnapshot, IndexRow, PollerStatus,
-    ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow,
-    StatementsSnapshot, StatementsStatus, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
+    AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats, DbSnapshot,
+    IndexRow, PollerStatus, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus,
+    ServerVitals, StatementRow, StatementsSnapshot, StatementsStatus, VacuumClusterAge,
+    VacuumProgressRow, VacuumTableRow,
 };
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
@@ -694,6 +695,129 @@ struct DeltaState {
     blks_hit: i64,
     blks_read: i64,
     cache_hit_ratio: f64,
+    checkpointer: CheckpointerDeltaState,
+}
+
+/// F4's previous-tick checkpointer/bgwriter counters, plus the
+/// session-window baseline for the requested/timed ratio — captured once at
+/// the first poll of a session and never updated again unless a stats reset
+/// is detected (see [`derive_checkpointer_stats`]). Checkpoints are
+/// infrequent, so a per-tick delta would mostly be 0/0 noise; the ratio
+/// needs the longer session window instead.
+#[derive(Clone, Copy)]
+struct CheckpointerDeltaState {
+    at: Instant,
+    checkpoints_timed: i64,
+    checkpoints_req: i64,
+    checkpoint_write_time_ms: f64,
+    checkpoint_sync_time_ms: f64,
+    buffers_checkpoint: i64,
+    buffers_clean: i64,
+    buffers_backend: Option<i64>,
+    session_baseline_timed: i64,
+    session_baseline_req: i64,
+}
+
+/// Derives F4's per-tick rates + session-window requested/timed ratio from
+/// raw cumulative counters. Pure and DB-free (unit-tested directly).
+/// `prev` is `None` on the first poll of a session — no delta window yet,
+/// same "acceptable first-snapshot gap" rule as `ServerVitals::tps`.
+fn derive_checkpointer_stats(
+    raw: &db::BgwriterRow,
+    now: Instant,
+    prev: Option<&CheckpointerDeltaState>,
+) -> (CheckpointerStats, CheckpointerDeltaState) {
+    // A cumulative counter going backwards means pg_stat_reset() or a server
+    // restart — the whole delta window (and the session baseline) restarts
+    // from this tick, exactly like TPS falls back to the cumulative ratio.
+    let stats_reset = prev.is_some_and(|p| {
+        raw.checkpoints_timed < p.checkpoints_timed || raw.checkpoints_req < p.checkpoints_req
+    });
+    let usable_prev = prev.filter(|_| !stats_reset);
+
+    let (session_baseline_timed, session_baseline_req) = match usable_prev {
+        Some(p) => (p.session_baseline_timed, p.session_baseline_req),
+        None => (raw.checkpoints_timed, raw.checkpoints_req),
+    };
+
+    let mut stats = CheckpointerStats {
+        checkpoints_timed: raw.checkpoints_timed,
+        checkpoints_req: raw.checkpoints_req,
+        checkpoint_write_time_ms: raw.checkpoint_write_time_ms,
+        checkpoint_sync_time_ms: raw.checkpoint_sync_time_ms,
+        buffers_checkpoint: raw.buffers_checkpoint,
+        buffers_clean: raw.buffers_clean,
+        maxwritten_clean: raw.maxwritten_clean,
+        buffers_backend: raw.buffers_backend,
+        buffers_alloc: raw.buffers_alloc,
+        checkpoints_per_min_timed: None,
+        checkpoints_per_min_req: None,
+        buffers_checkpoint_per_sec: None,
+        buffers_clean_per_sec: None,
+        buffers_backend_per_sec: None,
+        avg_checkpoint_write_ms: None,
+        avg_checkpoint_sync_ms: None,
+        requested_ratio_session: None,
+    };
+
+    if let Some(p) = usable_prev {
+        let dt = now.duration_since(p.at).as_secs_f64();
+        if dt > 0.0 {
+            let d_timed = raw.checkpoints_timed - p.checkpoints_timed;
+            let d_req = raw.checkpoints_req - p.checkpoints_req;
+            stats.checkpoints_per_min_timed = Some(d_timed as f64 / dt * 60.0);
+            stats.checkpoints_per_min_req = Some(d_req as f64 / dt * 60.0);
+
+            let d_buf_checkpoint = raw.buffers_checkpoint - p.buffers_checkpoint;
+            if d_buf_checkpoint >= 0 {
+                stats.buffers_checkpoint_per_sec = Some(d_buf_checkpoint as f64 / dt);
+            }
+            let d_buf_clean = raw.buffers_clean - p.buffers_clean;
+            if d_buf_clean >= 0 {
+                stats.buffers_clean_per_sec = Some(d_buf_clean as f64 / dt);
+            }
+            if let (Some(a), Some(b)) = (raw.buffers_backend, p.buffers_backend) {
+                let d = a - b;
+                if d >= 0 {
+                    stats.buffers_backend_per_sec = Some(d as f64 / dt);
+                }
+            }
+
+            // Average write/sync time per checkpoint, only over ticks that
+            // actually saw one complete — otherwise it would divide by zero.
+            let d_checkpoints = d_timed + d_req;
+            if d_checkpoints > 0 {
+                let d_write_ms = raw.checkpoint_write_time_ms - p.checkpoint_write_time_ms;
+                let d_sync_ms = raw.checkpoint_sync_time_ms - p.checkpoint_sync_time_ms;
+                if d_write_ms >= 0.0 {
+                    stats.avg_checkpoint_write_ms = Some(d_write_ms / d_checkpoints as f64);
+                }
+                if d_sync_ms >= 0.0 {
+                    stats.avg_checkpoint_sync_ms = Some(d_sync_ms / d_checkpoints as f64);
+                }
+            }
+        }
+    }
+
+    let sd_timed = raw.checkpoints_timed - session_baseline_timed;
+    let sd_req = raw.checkpoints_req - session_baseline_req;
+    if sd_timed >= 0 && sd_req >= 0 && sd_timed + sd_req > 0 {
+        stats.requested_ratio_session = Some(sd_req as f64 / (sd_timed + sd_req) as f64);
+    }
+
+    let next = CheckpointerDeltaState {
+        at: now,
+        checkpoints_timed: raw.checkpoints_timed,
+        checkpoints_req: raw.checkpoints_req,
+        checkpoint_write_time_ms: raw.checkpoint_write_time_ms,
+        checkpoint_sync_time_ms: raw.checkpoint_sync_time_ms,
+        buffers_checkpoint: raw.buffers_checkpoint,
+        buffers_clean: raw.buffers_clean,
+        buffers_backend: raw.buffers_backend,
+        session_baseline_timed,
+        session_baseline_req,
+    };
+    (stats, next)
 }
 
 async fn poll_once(
@@ -702,12 +826,15 @@ async fn poll_once(
     deltas: &mut Option<DeltaState>,
     history: &mut SnapshotHistory,
 ) -> Result<DbSnapshot, String> {
-    // Essential queries: three futures pipelined inside ONE read-only
+    // Essential queries: four futures pipelined inside ONE read-only
     // transaction — a single consistent snapshot, and pooler-safe (prepare +
     // execute stay on the same backend). Their failure is a real fault, so it
     // is fatal to the poll, surfaced with the actual server message
-    // (tokio-postgres's raw Display is just "db error").
-    let (activity_rows, blocking_rows, info_rows) = {
+    // (tokio-postgres's raw Display is just "db error"). `bgwriter` (F4) rides
+    // here rather than best-effort: pg_stat_bgwriter/checkpointer are
+    // readable by everyone, same class as pg_stat_database, and the query is
+    // a single cheap catalog row.
+    let (activity_rows, blocking_rows, info_rows, bgwriter_rows) = {
         let etx = begin_read(client)
             .await
             .map_err(|e| db_error_message("poll failed", &e))?;
@@ -715,6 +842,7 @@ async fn poll_once(
             etx.query(q.activity, &[]),
             etx.query(q.blocking, &[]),
             etx.query(q.server_info, &[]),
+            etx.query(q.bgwriter, &[]),
         )
         .map_err(|e| db_error_message("poll failed", &e))?;
         etx.commit()
@@ -735,6 +863,10 @@ async fn poll_once(
         .first()
         .ok_or_else(|| "server info query returned no rows".to_string())?;
     let info = db::server_info_from_row(info_row).map_err(|e| e.to_string())?;
+    let bgwriter_row = bgwriter_rows
+        .first()
+        .ok_or_else(|| "bgwriter/checkpointer query returned no rows".to_string())?;
+    let bgwriter_raw = db::bgwriter_from_row(bgwriter_row).map_err(|e| e.to_string())?;
 
     // Replication is BEST-EFFORT: a restricted or managed server (RDS,
     // Cloud SQL, …) may forbid the WAL views/functions. A failure here
@@ -780,12 +912,19 @@ async fn poll_once(
         // no TPS reading (plan: acceptable for the first snapshot).
         None => (0.0, cumulative_ratio),
     };
+    let (checkpointer_stats, checkpointer_delta) = derive_checkpointer_stats(
+        &bgwriter_raw,
+        now,
+        deltas.as_ref().map(|d| &d.checkpointer),
+    );
+
     *deltas = Some(DeltaState {
         at: now,
         xact_total,
         blks_hit: info.blks_hit,
         blks_read: info.blks_read,
         cache_hit_ratio,
+        checkpointer: checkpointer_delta,
     });
 
     // One incremental push per poll — the ring is never rebuilt.
@@ -826,6 +965,7 @@ async fn poll_once(
         replication,
         replication_slots,
         vacuum_progress,
+        checkpointer: Some(checkpointer_stats),
         status: PollerStatus::Ok,
     })
 }
@@ -1903,5 +2043,126 @@ mod tests {
                 .expect("sender must still be alive");
             rx.borrow_and_update();
         }
+    }
+
+    // --- F4: checkpointer / bgwriter delta derivation -----------------------
+
+    fn bgwriter(
+        timed: i64,
+        req: i64,
+        write_ms: f64,
+        sync_ms: f64,
+        buf_checkpoint: i64,
+        buf_clean: i64,
+        buf_backend: Option<i64>,
+    ) -> db::BgwriterRow {
+        db::BgwriterRow {
+            checkpoints_timed: timed,
+            checkpoints_req: req,
+            checkpoint_write_time_ms: write_ms,
+            checkpoint_sync_time_ms: sync_ms,
+            buffers_checkpoint: buf_checkpoint,
+            buffers_clean: buf_clean,
+            maxwritten_clean: 0,
+            buffers_backend: buf_backend,
+            buffers_alloc: 0,
+        }
+    }
+
+    #[test]
+    fn first_poll_of_a_session_has_no_rates_but_carries_cumulative_counters() {
+        let raw = bgwriter(100, 5, 50_000.0, 4_000.0, 900_000, 30_000, Some(20_000));
+        let (stats, _delta) = derive_checkpointer_stats(&raw, Instant::now(), None);
+        assert_eq!(stats.checkpoints_timed, 100);
+        assert_eq!(stats.checkpoints_req, 5);
+        assert_eq!(stats.buffers_backend, Some(20_000));
+        assert!(stats.checkpoints_per_min_timed.is_none());
+        assert!(stats.checkpoints_per_min_req.is_none());
+        assert!(stats.buffers_checkpoint_per_sec.is_none());
+        assert!(stats.avg_checkpoint_write_ms.is_none());
+        // The session baseline captured on this first tick means the ratio
+        // itself is also absent until a later tick sees a NEW checkpoint.
+        assert!(stats.requested_ratio_session.is_none());
+    }
+
+    #[test]
+    fn second_tick_derives_per_min_and_per_sec_rates() {
+        let raw0 = bgwriter(100, 5, 50_000.0, 4_000.0, 900_000, 30_000, Some(20_000));
+        let t0 = Instant::now();
+        let (_stats0, delta0) = derive_checkpointer_stats(&raw0, t0, None);
+
+        // 30s later: one more timed checkpoint completed, plus buffer churn.
+        let raw1 = bgwriter(101, 5, 54_000.0, 4_200.0, 900_600, 30_300, Some(20_150));
+        let t1 = t0 + Duration::from_secs(30);
+        let (stats1, _delta1) = derive_checkpointer_stats(&raw1, t1, Some(&delta0));
+
+        // 1 checkpoint / 30s = 2/min.
+        assert!((stats1.checkpoints_per_min_timed.unwrap() - 2.0).abs() < 1e-9);
+        assert!((stats1.checkpoints_per_min_req.unwrap() - 0.0).abs() < 1e-9);
+        // 600 buffers / 30s = 20/s.
+        assert!((stats1.buffers_checkpoint_per_sec.unwrap() - 20.0).abs() < 1e-9);
+        // 300 buffers / 30s = 10/s.
+        assert!((stats1.buffers_clean_per_sec.unwrap() - 10.0).abs() < 1e-9);
+        // 150 buffers / 30s = 5/s.
+        assert!((stats1.buffers_backend_per_sec.unwrap() - 5.0).abs() < 1e-9);
+        // One checkpoint completed: avg write/sync = the full delta.
+        assert!((stats1.avg_checkpoint_write_ms.unwrap() - 4_000.0).abs() < 1e-9);
+        assert!((stats1.avg_checkpoint_sync_ms.unwrap() - 200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn no_new_checkpoint_this_tick_leaves_avg_write_sync_absent() {
+        let raw0 = bgwriter(100, 5, 50_000.0, 4_000.0, 900_000, 30_000, None);
+        let t0 = Instant::now();
+        let (_stats0, delta0) = derive_checkpointer_stats(&raw0, t0, None);
+
+        // Same checkpoint counts, only buffer churn — no division by zero.
+        let raw1 = bgwriter(100, 5, 50_000.0, 4_000.0, 900_100, 30_050, None);
+        let t1 = t0 + Duration::from_secs(10);
+        let (stats1, _delta1) = derive_checkpointer_stats(&raw1, t1, Some(&delta0));
+        assert!(stats1.avg_checkpoint_write_ms.is_none());
+        assert!(stats1.avg_checkpoint_sync_ms.is_none());
+        assert!(stats1.buffers_backend_per_sec.is_none(), "absent on 17+ style rows");
+        assert!(stats1.buffers_checkpoint_per_sec.is_some());
+    }
+
+    #[test]
+    fn session_ratio_accumulates_since_the_session_baseline_not_per_tick() {
+        let raw0 = bgwriter(100, 5, 50_000.0, 4_000.0, 900_000, 30_000, None);
+        let t0 = Instant::now();
+        let (_stats0, delta0) = derive_checkpointer_stats(&raw0, t0, None);
+
+        // Tick 2: one requested checkpoint completes (session delta: 0
+        // timed, 1 requested since baseline) — ratio is 100% requested.
+        let raw1 = bgwriter(100, 6, 50_500.0, 4_050.0, 900_100, 30_050, None);
+        let t1 = t0 + Duration::from_secs(30);
+        let (stats1, delta1) = derive_checkpointer_stats(&raw1, t1, Some(&delta0));
+        assert!((stats1.requested_ratio_session.unwrap() - 1.0).abs() < 1e-9);
+
+        // Tick 3: two timed checkpoints follow — session totals become 2
+        // timed / 1 requested since baseline, ratio settles to 1/3, calm.
+        let raw2 = bgwriter(102, 6, 51_500.0, 4_150.0, 900_300, 30_150, None);
+        let t2 = t1 + Duration::from_secs(60);
+        let (stats2, _delta2) = derive_checkpointer_stats(&raw2, t2, Some(&delta1));
+        assert!((stats2.requested_ratio_session.unwrap() - (1.0 / 3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_backwards_counter_rebaselines_instead_of_going_negative() {
+        let raw0 = bgwriter(500, 200, 900_000.0, 60_000.0, 5_000_000, 400_000, None);
+        let t0 = Instant::now();
+        let (_stats0, delta0) = derive_checkpointer_stats(&raw0, t0, None);
+
+        // pg_stat_reset() or a restart: counters drop back near zero.
+        let raw1 = bgwriter(1, 0, 100.0, 10.0, 500, 200, None);
+        let t1 = t0 + Duration::from_secs(30);
+        let (stats1, _delta1) = derive_checkpointer_stats(&raw1, t1, Some(&delta0));
+        // No negative rates leak through — the tick is treated like a first
+        // poll of a fresh session (baseline snaps to the new low counters).
+        assert!(stats1.checkpoints_per_min_timed.is_none());
+        assert!(stats1.buffers_checkpoint_per_sec.is_none());
+        // The reset tick itself has no NEW checkpoint since its own
+        // baseline yet, so the ratio is absent too.
+        assert!(stats1.requested_ratio_session.is_none());
     }
 }

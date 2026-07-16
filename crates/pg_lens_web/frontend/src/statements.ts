@@ -14,7 +14,7 @@
 //   (highlighted) plus queryid/user/blocks.
 
 import type { StatementRow, StatementsSnapshot } from "./types";
-import { humanCount, humanDuration } from "./format";
+import { humanCount, humanDuration, humanMs } from "./format";
 import { renderSqlInto } from "./sql";
 
 const NO_HIT_RATIO = "—";
@@ -24,14 +24,6 @@ export function hitPct(hit: number, read: number): string {
   const total = hit + read;
   if (total <= 0) return NO_HIT_RATIO;
   return `${((hit / total) * 100).toFixed(1)}%`;
-}
-
-/** `189442.7ms` → `3m09s`-style: pg_stat_statements times are in ms. */
-function humanMs(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "0ms";
-  if (ms < 1) return `${ms.toFixed(2)}ms`;
-  if (ms < 1000) return `${ms.toFixed(1)}ms`;
-  return humanDuration(ms / 1000);
 }
 
 type SortKey = "query" | "calls" | "total_exec_ms" | "mean_exec_ms" | "rows" | "hit";

@@ -48,6 +48,13 @@ pub struct QuerySet {
     /// Freshness of the connected database's cumulative stats (F3 header
     /// caveat). Same transaction as `indexes`.
     pub db_stats_reset: &'static str,
+    /// Checkpointer/bgwriter counters (F4): `pg_stat_bgwriter` on 13-16,
+    /// `pg_stat_checkpointer` + `pg_stat_bgwriter` joined on 17+ (columns
+    /// aliased to the same names either way — see
+    /// `bgwriter_post_130000.sql`/`bgwriter_post_170000.sql`). Cheap
+    /// single-row catalog read, runs in the same essential transaction as
+    /// `server_info` on the fast tick.
+    pub bgwriter: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -105,10 +112,20 @@ const REPLICATION_SLOTS: &str = include_str!("../queries/replication_slots.sql")
 // pg_index / pg_constraint are stable across the whole supported range).
 const INDEXES: &str = include_str!("../queries/indexes.sql");
 const DB_STATS_RESET: &str = include_str!("../queries/db_stats_reset.sql");
+// Checkpointer/bgwriter (F4). Split at the PG17 catalog reshuffle
+// (pg_stat_checkpointer split out of pg_stat_bgwriter) — the two files alias
+// their columns to the same names, so one parser serves both.
+const BGWRITER_POST_130000: &str = include_str!("../queries/bgwriter_post_130000.sql");
+const BGWRITER_POST_170000: &str = include_str!("../queries/bgwriter_post_170000.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
 pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
+    let bgwriter = if server_version_num >= 170_000 {
+        BGWRITER_POST_170000
+    } else {
+        BGWRITER_POST_130000
+    };
     if server_version_num >= 140_000 {
         Ok(QuerySet {
             activity: ACTIVITY_POST_140000,
@@ -128,6 +145,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             replication_slots: REPLICATION_SLOTS,
             indexes: INDEXES,
             db_stats_reset: DB_STATS_RESET,
+            bgwriter,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -148,6 +166,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             replication_slots: REPLICATION_SLOTS,
             indexes: INDEXES,
             db_stats_reset: DB_STATS_RESET,
+            bgwriter,
         })
     } else {
         Err(format!(
@@ -307,5 +326,28 @@ mod tests {
     fn pre_pg13_is_rejected() {
         let err = for_version(120_017).expect_err("PG 12 unsupported");
         assert!(err.contains("PostgreSQL 13+"));
+    }
+
+    #[test]
+    fn bgwriter_query_uses_the_merged_view_below_pg17() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.bgwriter.contains("pg_stat_bgwriter"));
+            assert!(!q.bgwriter.contains("pg_stat_checkpointer"));
+            assert!(q.bgwriter.contains("checkpoints_timed"));
+            assert!(q.bgwriter.contains("buffers_backend"));
+        }
+    }
+
+    #[test]
+    fn bgwriter_query_splits_the_checkpointer_out_on_pg17() {
+        let q = for_version(170_000).expect("PG 17 supported");
+        assert!(q.bgwriter.contains("pg_stat_checkpointer"));
+        assert!(q.bgwriter.contains("pg_stat_bgwriter"));
+        // Aliased to the same output columns as the pre-17 variant.
+        assert!(q.bgwriter.contains("AS checkpoints_timed"));
+        assert!(q.bgwriter.contains("AS checkpoints_req"));
+        assert!(q.bgwriter.contains("AS buffers_backend"));
+        assert!(q.bgwriter.contains("NULL::int8 AS buffers_backend"));
     }
 }

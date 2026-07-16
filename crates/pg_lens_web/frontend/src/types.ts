@@ -264,6 +264,40 @@ export interface ReplicationSlotRow {
   safe_wal_size: number | null;
 }
 
+/**
+ * Checkpointer/bgwriter stats (F4), refreshed every fast tick alongside
+ * `vitals` (not best-effort). Normalizes the PG17 `pg_stat_bgwriter` /
+ * `pg_stat_checkpointer` catalog split into one shape; derived fields are
+ * `null` on the first poll of a session (no delta window yet, same rule as
+ * `ServerVitals.tps`).
+ */
+export interface CheckpointerStats {
+  checkpoints_timed: number;
+  checkpoints_req: number;
+  checkpoint_write_time_ms: number;
+  checkpoint_sync_time_ms: number;
+  buffers_checkpoint: number;
+  buffers_clean: number;
+  maxwritten_clean: number;
+  /** null on PG 17+ (moved to pg_stat_io). */
+  buffers_backend: number | null;
+  buffers_alloc: number;
+  checkpoints_per_min_timed: number | null;
+  checkpoints_per_min_req: number | null;
+  buffers_checkpoint_per_sec: number | null;
+  buffers_clean_per_sec: number | null;
+  /** null when no delta window yet, OR when buffers_backend is absent. */
+  buffers_backend_per_sec: number | null;
+  avg_checkpoint_write_ms: number | null;
+  avg_checkpoint_sync_ms: number | null;
+  /**
+   * requested / (requested + timed) checkpoints since the poller SESSION
+   * began (not per-tick). null until a checkpoint has completed since the
+   * session started.
+   */
+  requested_ratio_session: number | null;
+}
+
 /** Result of an admin action, stamped by the poller inside every snapshot
  * until superseded; frontends dedupe by `at_epoch_ms`. Serde shapes:
  * kind = "Cancel"|"Terminate", outcome = {Signalled:bool}|{Error:string}. */
@@ -296,6 +330,11 @@ export interface DbSnapshot {
    * — the common, calm case, never rendered as an error.
    */
   vacuum_progress: VacuumProgressRow[] | null;
+  /**
+   * Checkpointer/bgwriter stats (F4), refreshed every fast tick — NOT
+   * best-effort. null only before the first successful poll of a session.
+   */
+  checkpointer: CheckpointerStats | null;
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
 }

@@ -7,7 +7,8 @@
 //! [`DbSnapshot::history`]: pg_lens_core::DbSnapshot
 
 use pg_lens_core::{
-    ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, WalReceiverRow, WalSenderRow,
+    CheckpointerStats, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, WalReceiverRow,
+    WalSenderRow,
 };
 use ratatui::{
     Frame,
@@ -216,6 +217,92 @@ fn vacuum_banner_line(schema: Option<&SchemaSnapshot>) -> Option<Line<'static>> 
     ]))
 }
 
+/// F4's checkpoint-pressure severity: a high requested share (over the
+/// poller session window, not per-tick — checkpoints are rare) means
+/// `max_wal_size` is likely too small. Yellow only — this is a tuning
+/// signal, not an incident, so it never escalates to red. `None` (no
+/// checkpoint yet this session) renders calm.
+fn checkpoint_pressure_severity(ratio: Option<f64>) -> Lag {
+    match ratio {
+        Some(r) if r > 0.5 => Lag::Warn,
+        _ => Lag::Ok,
+    }
+}
+
+/// `12.3/s`, or `--` while no delta window exists yet (first poll of a
+/// session — same rule as TPS).
+fn rate_per_sec(v: Option<f64>) -> String {
+    match v {
+        Some(x) => format!("{x:.1}/s"),
+        None => "--".to_string(),
+    }
+}
+
+/// Backend-issued buffer writes: absent for a real reason on PG 17+ (moved
+/// to `pg_stat_io`, out of this cheap single-row query's scope) — the empty
+/// state says so instead of a bare dash.
+fn backend_rate_text(cp: &CheckpointerStats) -> String {
+    if cp.buffers_backend.is_none() {
+        "n/a (17+)".to_string()
+    } else {
+        rate_per_sec(cp.buffers_backend_per_sec)
+    }
+}
+
+/// The Checkpoints/writer panel's lines (F4). Absent counters (first poll of
+/// a session) render as `--`, never a fault — mirrors the vitals panel's
+/// pre-first-snapshot treatment of TPS.
+fn checkpointer_lines(cp: Option<&CheckpointerStats>) -> Vec<Line<'static>> {
+    let Some(cp) = cp else {
+        return vec![Line::from(Span::styled(
+            "collecting checkpointer stats\u{2026}",
+            style::label_style(),
+        ))];
+    };
+    let sev = checkpoint_pressure_severity(cp.requested_ratio_session);
+    let per_min = match (cp.checkpoints_per_min_timed, cp.checkpoints_per_min_req) {
+        (Some(t), Some(r)) => format!("{t:.2} timed / {r:.2} req /min"),
+        _ => "-- timed / -- req /min".to_string(),
+    };
+    let pressure = match cp.requested_ratio_session {
+        Some(r) => format!("{:.0}% requested (session)", r * 100.0),
+        None => "-- (no checkpoint yet this session)".to_string(),
+    };
+    let avg_write = cp
+        .avg_checkpoint_write_ms
+        .map(format::human_ms)
+        .unwrap_or_else(|| "--".to_string());
+    let avg_sync = cp
+        .avg_checkpoint_sync_ms
+        .map(format::human_ms)
+        .unwrap_or_else(|| "--".to_string());
+
+    vec![
+        Line::from(vec![
+            Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
+            Span::styled("checkpoints: ", style::label_style()),
+            Span::styled(per_min, Style::new().fg(sev.color())),
+        ]),
+        Line::from(vec![
+            Span::styled("  pressure   : ", style::label_style()),
+            Span::styled(pressure, Style::new().fg(sev.color())),
+        ]),
+        style::kv(
+            "  buffers/s  : ",
+            format!(
+                "chkpt {} \u{b7} bgwriter {} \u{b7} backend {}",
+                rate_per_sec(cp.buffers_checkpoint_per_sec),
+                rate_per_sec(cp.buffers_clean_per_sec),
+                backend_rate_text(cp),
+            ),
+        ),
+        style::kv(
+            "  avg write/sync: ",
+            format!("{avg_write} / {avg_sync}"),
+        ),
+    ]
+}
+
 pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     let vitals = &app.snapshot.vitals;
     let history = &app.snapshot.history;
@@ -248,6 +335,11 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     }
     let [vitals_area, repl_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(repl_height)]).areas(bottom_area);
+    // Vitals keeps the left 60%; the Checkpoints/writer panel (F4) takes the
+    // right 40% — same split ratio as the two top gauges.
+    let [vitals_area, checkpoint_area] =
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .areas(vitals_area);
     let [conn_gauge_area, cache_gauge_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .areas(gauge_area);
@@ -321,6 +413,10 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     ];
     let paragraph = Paragraph::new(lines).block(titled_block("Vitals"));
     frame.render_widget(paragraph, vitals_area);
+
+    let checkpoint_lines = checkpointer_lines(app.snapshot.checkpointer.as_ref());
+    let checkpoint_panel = Paragraph::new(checkpoint_lines).block(titled_block("Checkpoints / writer"));
+    frame.render_widget(checkpoint_panel, checkpoint_area);
 
     if let Some(lines) = repl_lines {
         let panel = Paragraph::new(lines).block(titled_block("Replication"));
@@ -489,4 +585,131 @@ mod tests {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("XID wraparound"));
     }
+
+    // --- F4: checkpointer / bgwriter panel -------------------------------
+
+    fn checkpointer(requested_ratio_session: Option<f64>) -> CheckpointerStats {
+        CheckpointerStats {
+            checkpoints_timed: 100,
+            checkpoints_req: 10,
+            checkpoint_write_time_ms: 50_000.0,
+            checkpoint_sync_time_ms: 4_000.0,
+            buffers_checkpoint: 900_000,
+            buffers_clean: 30_000,
+            maxwritten_clean: 5,
+            buffers_backend: Some(20_000),
+            buffers_alloc: 1_000_000,
+            checkpoints_per_min_timed: Some(0.5),
+            checkpoints_per_min_req: Some(0.02),
+            buffers_checkpoint_per_sec: Some(12.3),
+            buffers_clean_per_sec: Some(4.5),
+            buffers_backend_per_sec: Some(1.1),
+            avg_checkpoint_write_ms: Some(4_200.0),
+            avg_checkpoint_sync_ms: Some(310.0),
+            requested_ratio_session,
+        }
+    }
+
+    #[test]
+    fn checkpoint_pressure_is_calm_below_and_at_the_fifty_percent_line() {
+        assert!(matches!(
+            checkpoint_pressure_severity(None),
+            Lag::Ok
+        ));
+        assert!(matches!(
+            checkpoint_pressure_severity(Some(0.0)),
+            Lag::Ok
+        ));
+        assert!(matches!(
+            checkpoint_pressure_severity(Some(0.5)),
+            Lag::Ok
+        ));
+    }
+
+    #[test]
+    fn checkpoint_pressure_turns_yellow_once_requested_outweighs_timed() {
+        assert!(matches!(
+            checkpoint_pressure_severity(Some(0.51)),
+            Lag::Warn
+        ));
+        assert!(matches!(
+            checkpoint_pressure_severity(Some(1.0)),
+            Lag::Warn
+        ));
+    }
+
+    #[test]
+    fn checkpointer_panel_shows_collecting_state_before_first_poll() {
+        let lines = checkpointer_lines(None);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("collecting checkpointer stats"));
+    }
+
+    #[test]
+    fn checkpointer_panel_renders_rates_and_a_calm_pressure_line() {
+        let cp = checkpointer(Some(0.1));
+        let lines = checkpointer_lines(Some(&cp));
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("0.50 timed"));
+        assert!(text.contains("0.02 req"));
+        assert!(text.contains("10% requested"));
+        assert!(text.contains("chkpt 12.3/s"));
+        assert!(text.contains("bgwriter 4.5/s"));
+        assert!(text.contains("backend 1.1/s"));
+        assert!(!text.contains('!'), "calm ratio carries no warn marker");
+    }
+
+    #[test]
+    fn checkpointer_panel_flags_pressure_and_absent_first_tick_rates() {
+        let cp = checkpointer(Some(0.9));
+        let lines = checkpointer_lines(Some(&cp));
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains('!'), "warn marker visible under pressure");
+        assert!(text.contains("90% requested"));
+
+        // First-tick style stats: rates absent, ratio absent — "--" not 0.
+        let mut cp0 = checkpointer(None);
+        cp0.checkpoints_per_min_timed = None;
+        cp0.checkpoints_per_min_req = None;
+        cp0.buffers_checkpoint_per_sec = None;
+        cp0.buffers_clean_per_sec = None;
+        cp0.buffers_backend_per_sec = None;
+        cp0.avg_checkpoint_write_ms = None;
+        cp0.avg_checkpoint_sync_ms = None;
+        let lines = checkpointer_lines(Some(&cp0));
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("-- timed / -- req"));
+        assert!(text.contains("no checkpoint yet this session"));
+    }
+
+    #[test]
+    fn checkpointer_panel_explains_the_pg17_backend_buffers_split() {
+        let mut cp = checkpointer(Some(0.1));
+        cp.buffers_backend = None;
+        cp.buffers_backend_per_sec = None;
+        let lines = checkpointer_lines(Some(&cp));
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("backend n/a (17+)"), "{text}");
+    }
+
 }

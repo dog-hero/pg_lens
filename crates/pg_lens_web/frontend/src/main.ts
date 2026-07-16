@@ -170,6 +170,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     vitalsContainer,
     snapshot.vitals,
     snapshot.schema?.vacuum_cluster_age ?? null,
+    snapshot.checkpointer,
   );
   renderReplication(
     replicationPanel,

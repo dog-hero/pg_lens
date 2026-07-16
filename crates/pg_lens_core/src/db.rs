@@ -143,6 +143,39 @@ pub fn server_info_from_row(row: &Row) -> Result<ServerInfoRow, tokio_postgres::
     })
 }
 
+/// The single row of `queries/bgwriter_post_*.sql` (F4), still raw
+/// cumulative counters — the poller turns them into per-tick rates and the
+/// session-window requested/timed ratio, exactly like `ServerInfoRow`'s
+/// TPS/cache-hit treatment.
+#[derive(Clone, Debug)]
+pub struct BgwriterRow {
+    pub checkpoints_timed: i64,
+    pub checkpoints_req: i64,
+    pub checkpoint_write_time_ms: f64,
+    pub checkpoint_sync_time_ms: f64,
+    pub buffers_checkpoint: i64,
+    pub buffers_clean: i64,
+    pub maxwritten_clean: i32,
+    /// `None` on PG 17+ (moved to `pg_stat_io`, the query sends a typed
+    /// NULL there — see `bgwriter_post_170000.sql`).
+    pub buffers_backend: Option<i64>,
+    pub buffers_alloc: i64,
+}
+
+pub fn bgwriter_from_row(row: &Row) -> Result<BgwriterRow, tokio_postgres::Error> {
+    Ok(BgwriterRow {
+        checkpoints_timed: row.try_get("checkpoints_timed")?,
+        checkpoints_req: row.try_get("checkpoints_req")?,
+        checkpoint_write_time_ms: row.try_get("checkpoint_write_time_ms")?,
+        checkpoint_sync_time_ms: row.try_get("checkpoint_sync_time_ms")?,
+        buffers_checkpoint: row.try_get("buffers_checkpoint")?,
+        buffers_clean: row.try_get("buffers_clean")?,
+        maxwritten_clean: row.try_get("maxwritten_clean")?,
+        buffers_backend: row.try_get("buffers_backend")?,
+        buffers_alloc: row.try_get("buffers_alloc")?,
+    })
+}
+
 /// Maps one row of `queries/replication.sql` onto [`WalSenderRow`] (the
 /// primary side: one connected streaming replica). Lag columns are nullable —
 /// `replay_lag` is NULL while a replica is idle, and the byte diff is NULL on

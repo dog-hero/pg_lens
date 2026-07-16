@@ -334,6 +334,10 @@ mod tests {
         assert!(screen.contains("Connections"));
         assert!(screen.contains("TPS"));
         assert!(screen.contains("q/Esc: quit"));
+        // F4: the Checkpoints/writer panel renders from the mock's data.
+        assert!(screen.contains("Checkpoints / writer"), "{screen}");
+        assert!(screen.contains("checkpoints:"), "{screen}");
+        assert!(screen.contains("pressure"), "{screen}");
     }
 
     /// F2.5: the mock's replication slots render under the senders in the

@@ -47,3 +47,12 @@ export function humanPercent(ratio: number): string {
   if (!Number.isFinite(ratio)) return "-";
   return `${(ratio * 100).toFixed(1)}%`;
 }
+
+/** `189442.7ms` → `3m09s`-style: source values are already milliseconds
+ * (pg_stat_statements, checkpoint write/sync time). */
+export function humanMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0ms";
+  if (ms < 1) return `${ms.toFixed(2)}ms`;
+  if (ms < 1000) return `${ms.toFixed(1)}ms`;
+  return humanDuration(ms / 1000);
+}
