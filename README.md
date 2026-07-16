@@ -406,7 +406,8 @@ file self-compacts so it never grows without bound.
 
 | Key | Action |
 |---|---|
-| `q` / `Esc` | Quit (`Esc` first closes the detail view if open) |
+| `q` | Quit immediately |
+| `Esc` | Close the open overlay (detail/filter/modal); at the top level, press **twice within ~2s** to quit — a single stray `Esc` never exits |
 | `Tab` | Switch between Macro Lens and Micro Lens |
 | `j` / `k` / `↓` / `↑` | Move selection in the activity table |
 | `s` | Cycle sort column (duration / state / pid) |

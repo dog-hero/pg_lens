@@ -19,6 +19,11 @@ const REFRESH_MAX: Duration = Duration::from_secs(10);
 /// Tick-based on purpose — the view stays synchronous, no timers in `ui/`.
 pub const ADMIN_FEEDBACK_TICKS: u64 = 40;
 
+/// How long (in 250ms UI ticks) an Esc press stays "armed" for quitting —
+/// ~2s: long enough to read the hint and confirm, short enough that a stray
+/// Esc doesn't leave a quit landmine behind.
+pub const ESC_QUIT_WINDOW_TICKS: u64 = 8;
+
 /// Which lens (tab) is on screen.
 // The "Lens" postfix is the product vocabulary (Macro/Micro/Schema Lens),
 // not naming noise — keep it despite clippy's shared-postfix lint.
@@ -383,6 +388,9 @@ pub struct App {
     pub filter_editing: bool,
     /// The filter value captured when editing began, restored on Esc.
     pub filter_saved: String,
+    /// Double-Esc quit barrier: `Some(tick)` while a first top-level Esc is
+    /// armed — a second Esc at or before that tick quits; later ones re-arm.
+    pub esc_quit_armed_until: Option<u64>,
     pub should_quit: bool,
 }
 
@@ -421,6 +429,7 @@ impl App {
             filter: String::new(),
             filter_editing: false,
             filter_saved: String::new(),
+            esc_quit_armed_until: None,
             should_quit: false,
         };
         resort(&mut app);
@@ -629,12 +638,27 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
-        // Esc closes the detail panel when it is open; quits otherwise.
+        // Esc closes the detail panel when it is open. At the top level it
+        // ARMS quitting instead of quitting: overlays (detail, filter,
+        // modal) all consume Esc, so a hammered Esc used to fall through and
+        // kill the app by accident. First press shows "Esc again to quit"
+        // for ESC_QUIT_WINDOW_TICKS; a second press inside that window
+        // quits. `q` and Ctrl+C stay immediate (deliberate keys).
         KeyCode::Esc => {
             if app.detail_open {
                 app.detail_open = false;
-            } else {
+            } else if app
+                .esc_quit_armed_until
+                .is_some_and(|until| app.tick_count <= until)
+            {
                 app.should_quit = true;
+            } else {
+                app.esc_quit_armed_until = Some(app.tick_count + ESC_QUIT_WINDOW_TICKS);
+                app.admin_feedback = Some(AdminFeedback {
+                    text: "Press Esc again to quit (q quits immediately)".to_string(),
+                    error: false,
+                    expires_at_tick: app.tick_count + ESC_QUIT_WINDOW_TICKS,
+                });
             }
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1150,11 +1174,49 @@ mod tests {
         assert!(app.should_quit);
     }
 
+    /// Double-Esc barrier: one Esc arms (hint shown), a second inside the
+    /// window quits. A hammered Esc closing overlays no longer exits by
+    /// accident.
     #[test]
-    fn esc_quits() {
+    fn esc_arms_then_second_esc_quits() {
         let mut app = App::new();
         update(&mut app, press(KeyCode::Esc));
+        assert!(!app.should_quit, "first Esc must not quit");
+        assert!(app.esc_quit_armed_until.is_some());
+        let feedback = app.admin_feedback.as_ref().expect("hint shown");
+        assert!(feedback.text.contains("Esc again"), "{}", feedback.text);
+        update(&mut app, press(KeyCode::Esc));
+        assert!(app.should_quit, "second Esc inside the window quits");
+    }
+
+    #[test]
+    fn esc_barrier_expires_after_the_window() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.should_quit);
+        // Let the window lapse (ticks advance past the armed deadline).
+        for _ in 0..=ESC_QUIT_WINDOW_TICKS {
+            update(&mut app, Action::Tick);
+        }
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.should_quit, "late Esc re-arms instead of quitting");
+        update(&mut app, press(KeyCode::Esc));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn esc_closing_the_detail_does_not_arm_quitting() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.detail_open);
+        assert!(!app.should_quit);
+        assert!(
+            app.esc_quit_armed_until.is_none(),
+            "closing an overlay must not arm the quit barrier"
+        );
     }
 
     #[test]
@@ -1356,7 +1418,10 @@ mod tests {
         assert!(!app.detail_open);
         assert!(!app.should_quit);
 
-        // ...the second one quits.
+        // ...the second ARMS the quit barrier (double-Esc rule), and only
+        // the third — inside the window — actually quits.
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.should_quit);
         update(&mut app, press(KeyCode::Esc));
         assert!(app.should_quit);
     }
