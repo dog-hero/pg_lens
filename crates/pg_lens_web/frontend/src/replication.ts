@@ -2,8 +2,13 @@
 // Mirrors the TUI's Macro Lens panel — same lag severity thresholds and the
 // same "hide when a primary has no replicas" rule.
 
-import type { ReplicationInfo, WalReceiverRow, WalSenderRow } from "./types";
-import { humanBytes, humanDuration } from "./format";
+import type {
+  ReplicationInfo,
+  ReplicationSlotRow,
+  WalReceiverRow,
+  WalSenderRow,
+} from "./types";
+import { humanBytes, humanDuration } from "./format.ts";
 
 type Severity = "" | "warn" | "bad";
 
@@ -26,6 +31,40 @@ function lagText(bytes: number | null, secs: number | null): string {
   if (bytes !== null) parts.push(humanBytes(bytes));
   if (secs !== null) parts.push(humanDuration(secs));
   return parts.length ? parts.join(" · ") : "—";
+}
+
+/**
+ * Severity of one replication slot (F2.5), mirroring the TUI's
+ * `slot_severity` exactly: an INACTIVE slot that keeps retaining WAL is the
+ * classic full-disk incident. Red trumps yellow — `wal_status` of
+ * `unreserved`/`lost` is always red, regardless of the retained-bytes
+ * reading; otherwise an inactive slot is yellow once it retains anything,
+ * red past 10 GB. An active slot (even a big-retaining one — it's a live
+ * replica consuming the WAL) stays calm.
+ */
+export function slotSeverity(slot: ReplicationSlotRow): Severity {
+  if (slot.wal_status === "unreserved" || slot.wal_status === "lost") return "bad";
+  if (!slot.active) {
+    const retained = slot.retained_wal_bytes ?? 0;
+    if (retained > 10 * 1024 * 1024 * 1024) return "bad";
+    if (retained > 0) return "warn";
+  }
+  return "";
+}
+
+function slotRow(slot: ReplicationSlotRow): HTMLDivElement {
+  const sev = slotSeverity(slot);
+  const retained =
+    slot.retained_wal_bytes !== null ? humanBytes(slot.retained_wal_bytes) : "—";
+  const status = slot.wal_status ?? "—";
+  const activeText = slot.active ? "active" : "inactive";
+  const r = row([
+    { text: `slot ${slot.slot_name}/${slot.slot_type}`, cls: "repl-name" },
+    { text: `${activeText} (${status})`, cls: "repl-state" },
+    { text: `retained: ${retained}`, cls: `repl-lag ${sev}`.trim() },
+  ]);
+  if (sev) r.classList.add(`lag-${sev}`);
+  return r;
 }
 
 function row(cells: { text: string; cls?: string }[]): HTMLDivElement {
@@ -76,13 +115,16 @@ function receiverRow(rc: WalReceiverRow): HTMLDivElement {
 
 /**
  * Renders the replication panel into `body`, toggling `panel`'s visibility.
- * Hidden when there is nothing to show (no data yet, or a primary with no
- * replicas) — matching the TUI.
+ * Hidden when there is nothing to show (no data yet, and a primary with no
+ * replicas and no slots) — matching the TUI. Slot rows (F2.5) render below
+ * the senders/receiver section; an empty (or absent) slots list contributes
+ * no extra rows — silence is the calm state, never an "no slots" line.
  */
 export function renderReplication(
   panel: HTMLElement,
   body: HTMLElement,
   repl: ReplicationInfo | null,
+  slots: ReplicationSlotRow[] | null,
 ): void {
   const rows: HTMLElement[] = [];
   if (repl && "Primary" in repl) {
@@ -96,6 +138,9 @@ export function renderReplication(
       div.textContent = "standby · waiting for a WAL sender…";
       rows.push(div);
     }
+  }
+  if (slots) {
+    for (const s of slots) rows.push(slotRow(s));
   }
 
   if (rows.length === 0) {

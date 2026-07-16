@@ -36,6 +36,10 @@ pub struct QuerySet {
     /// In-flight `pg_stat_progress_vacuum`, F2. Runs on the fast tick,
     /// best-effort (absent on any failure, like `replication`).
     pub vacuum_progress: &'static str,
+    /// `pg_replication_slots`, F2.5. Runs on the fast tick, best-effort like
+    /// `replication` — but unlike senders/receiver, slots exist on BOTH a
+    /// primary and a standby, so this query always runs regardless of role.
+    pub replication_slots: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -82,6 +86,10 @@ const WAL_RECEIVER: &str = include_str!("../queries/wal_receiver.sql");
 const VACUUM_CLUSTER_AGE: &str = include_str!("../queries/vacuum_cluster_age.sql");
 const VACUUM_TABLE_AGES: &str = include_str!("../queries/vacuum_table_ages.sql");
 const VACUUM_PROGRESS: &str = include_str!("../queries/vacuum_progress.sql");
+// Replication slots (F2.5). Version-independent 13+ (wal_status /
+// safe_wal_size shipped in PG 13), so one file serves the whole supported
+// range — no post_NNNNNN variant needed.
+const REPLICATION_SLOTS: &str = include_str!("../queries/replication_slots.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -102,6 +110,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             vacuum_cluster_age: VACUUM_CLUSTER_AGE,
             vacuum_table_ages: VACUUM_TABLE_AGES,
             vacuum_progress: VACUUM_PROGRESS,
+            replication_slots: REPLICATION_SLOTS,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -119,6 +128,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             vacuum_cluster_age: VACUUM_CLUSTER_AGE,
             vacuum_table_ages: VACUUM_TABLE_AGES,
             vacuum_progress: VACUUM_PROGRESS,
+            replication_slots: REPLICATION_SLOTS,
         })
     } else {
         Err(format!(
@@ -239,6 +249,19 @@ mod tests {
                 "SQL row cap must match VACUUM_TABLES_LIMIT"
             );
             assert!(q.vacuum_progress.contains("pg_stat_progress_vacuum"));
+        }
+    }
+
+    #[test]
+    fn replication_slots_query_serves_pg13_and_up_with_conventions() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.replication_slots.contains("pg_replication_slots"));
+            // Retained-bytes LSN diff guarded against evaluation during
+            // recovery, exactly like the sender/receiver queries.
+            assert!(q.replication_slots.contains("pg_is_in_recovery()"));
+            assert!(q.replication_slots.contains("wal_status"));
+            assert!(q.replication_slots.contains("safe_wal_size"));
         }
     }
 

@@ -6,7 +6,9 @@
 //!
 //! [`DbSnapshot::history`]: pg_lens_core::DbSnapshot
 
-use pg_lens_core::{ReplicationInfo, SchemaSnapshot, WalReceiverRow, WalSenderRow};
+use pg_lens_core::{
+    ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, WalReceiverRow, WalSenderRow,
+};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -120,18 +122,75 @@ fn receiver_line(r: &WalReceiverRow) -> Line<'static> {
     ])
 }
 
+/// Severity of one replication slot (F2.5). The point of the feature: an
+/// INACTIVE slot that keeps retaining WAL is the classic full-disk incident
+/// — nothing is consuming it, so WAL piles up in `pg_wal` until the disk
+/// fills. Red trumps yellow: `wal_status` of `unreserved`/`lost` (the slot
+/// has already lost the WAL it promised to keep, or is about to) is red
+/// regardless of the retained-bytes reading; otherwise an inactive slot is
+/// yellow once it is retaining anything, and red once that climbs past
+/// 10 GB. An active, `reserved` slot is calm — the default, healthy case.
+fn slot_severity(slot: &ReplicationSlotRow) -> Lag {
+    if matches!(slot.wal_status.as_deref(), Some("unreserved") | Some("lost")) {
+        return Lag::Bad;
+    }
+    if !slot.active {
+        let retained = slot.retained_wal_bytes.unwrap_or(0);
+        if retained > 10 * 1024 * 1024 * 1024 {
+            return Lag::Bad;
+        }
+        if retained > 0 {
+            return Lag::Warn;
+        }
+    }
+    Lag::Ok
+}
+
+fn slot_line(slot: &ReplicationSlotRow) -> Line<'static> {
+    let sev = slot_severity(slot);
+    let retained = match slot.retained_wal_bytes {
+        Some(b) => format::human_bytes(b),
+        None => "—".to_string(),
+    };
+    let active_text = if slot.active { "active" } else { "inactive" };
+    let status = slot.wal_status.as_deref().unwrap_or("—");
+    Line::from(vec![
+        Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
+        Span::styled(
+            format!("slot {}/{}", slot.slot_name, slot.slot_type),
+            style::accent_style(),
+        ),
+        Span::styled(format!("  {active_text}  "), style::label_style()),
+        Span::styled("retained: ", style::label_style()),
+        Span::styled(retained, Style::new().fg(sev.color())),
+        Span::styled(format!("  ({status})"), style::label_style()),
+    ])
+}
+
 /// The replication panel's lines, or `None` when there is nothing worth a
-/// panel (a primary with no replicas). A standby always shows a line.
-fn replication_lines(repl: Option<&ReplicationInfo>) -> Option<Vec<Line<'static>>> {
-    match repl? {
-        ReplicationInfo::Primary { senders } if senders.is_empty() => None,
-        ReplicationInfo::Primary { senders } => Some(senders.iter().map(sender_line).collect()),
-        ReplicationInfo::Standby { receiver: Some(r) } => Some(vec![receiver_line(r)]),
-        ReplicationInfo::Standby { receiver: None } => Some(vec![Line::from(Span::styled(
+/// panel (a primary with no replicas and no slots). A standby's
+/// sender/receiver section always shows a line; slot rows (F2.5) are
+/// appended below it, and contribute nothing when the slots list is empty
+/// (no extra "no slots" section — silence is the calm state).
+fn replication_lines(
+    repl: Option<&ReplicationInfo>,
+    slots: Option<&[ReplicationSlotRow]>,
+) -> Option<Vec<Line<'static>>> {
+    let mut lines: Vec<Line<'static>> = match repl {
+        Some(ReplicationInfo::Primary { senders }) => {
+            senders.iter().map(sender_line).collect()
+        }
+        Some(ReplicationInfo::Standby { receiver: Some(r) }) => vec![receiver_line(r)],
+        Some(ReplicationInfo::Standby { receiver: None }) => vec![Line::from(Span::styled(
             "standby · waiting for a WAL sender…",
             style::label_style(),
-        ))]),
+        ))],
+        None => Vec::new(),
+    };
+    if let Some(slots) = slots {
+        lines.extend(slots.iter().map(slot_line));
     }
+    if lines.is_empty() { None } else { Some(lines) }
 }
 
 /// F2's Macro Lens warning: one line, loud only when the cluster's XID
@@ -164,7 +223,10 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     let vacuum_banner = vacuum_banner_line(app.snapshot.schema.as_deref());
     let vacuum_banner_height = u16::from(vacuum_banner.is_some());
 
-    let repl_lines = replication_lines(app.snapshot.replication.as_ref());
+    let repl_lines = replication_lines(
+        app.snapshot.replication.as_ref(),
+        app.snapshot.replication_slots.as_deref(),
+    );
     // Reserve a bordered panel only when there is replication to show;
     // otherwise the vitals panel keeps the whole bottom area (layout
     // unchanged for non-replicated servers).
@@ -292,14 +354,96 @@ mod tests {
     #[test]
     fn primary_without_replicas_hides_the_panel() {
         let repl = ReplicationInfo::Primary { senders: vec![] };
-        assert!(replication_lines(Some(&repl)).is_none());
-        assert!(replication_lines(None).is_none());
+        assert!(replication_lines(Some(&repl), None).is_none());
+        assert!(replication_lines(None, None).is_none());
+        assert!(replication_lines(None, Some(&[])).is_none());
     }
 
     #[test]
     fn standby_always_shows_a_line() {
         let repl = ReplicationInfo::Standby { receiver: None };
-        assert_eq!(replication_lines(Some(&repl)).unwrap().len(), 1);
+        assert_eq!(replication_lines(Some(&repl), None).unwrap().len(), 1);
+    }
+
+    // --- F2.5: replication slots -----------------------------------------
+
+    fn slot(active: bool, wal_status: Option<&str>, retained_wal_bytes: Option<i64>) -> ReplicationSlotRow {
+        ReplicationSlotRow {
+            slot_name: "probe_slot".to_string(),
+            slot_type: "physical".to_string(),
+            active,
+            retained_wal_bytes,
+            wal_status: wal_status.map(str::to_string),
+            safe_wal_size: None,
+        }
+    }
+
+    #[test]
+    fn active_reserved_slot_is_calm() {
+        assert!(matches!(
+            slot_severity(&slot(true, Some("reserved"), Some(0))),
+            Lag::Ok
+        ));
+        // Active is calm even while retaining a lot — it's a live replica
+        // consuming the WAL, not an abandoned one.
+        assert!(matches!(
+            slot_severity(&slot(true, Some("reserved"), Some(20 * 1024 * 1024 * 1024))),
+            Lag::Ok
+        ));
+    }
+
+    #[test]
+    fn inactive_slot_retaining_wal_is_yellow_then_red() {
+        assert!(matches!(
+            slot_severity(&slot(false, Some("extended"), Some(0))),
+            Lag::Ok
+        ), "inactive but retaining nothing stays calm");
+        assert!(matches!(
+            slot_severity(&slot(false, Some("extended"), Some(1024))),
+            Lag::Warn
+        ));
+        assert!(matches!(
+            slot_severity(&slot(
+                false,
+                Some("extended"),
+                Some(11 * 1024 * 1024 * 1024)
+            )),
+            Lag::Bad
+        ));
+    }
+
+    #[test]
+    fn unreserved_or_lost_wal_status_is_always_red() {
+        assert!(matches!(
+            slot_severity(&slot(false, Some("unreserved"), Some(1024))),
+            Lag::Bad
+        ));
+        assert!(matches!(
+            slot_severity(&slot(false, Some("lost"), None)),
+            Lag::Bad
+        ));
+        // Even an active slot: unreserved/lost is a red flag on its own.
+        assert!(matches!(
+            slot_severity(&slot(true, Some("unreserved"), Some(0))),
+            Lag::Bad
+        ));
+    }
+
+    #[test]
+    fn empty_slots_list_renders_no_extra_rows() {
+        let repl = ReplicationInfo::Primary { senders: vec![] };
+        assert!(replication_lines(Some(&repl), Some(&[])).is_none());
+    }
+
+    #[test]
+    fn slots_render_under_the_senders_with_a_marker() {
+        let repl = ReplicationInfo::Primary { senders: vec![] };
+        let slots = vec![slot(false, Some("extended"), Some(2_600_000_000))];
+        let lines = replication_lines(Some(&repl), Some(&slots)).expect("slot rows render");
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("probe_slot"));
+        assert!(text.contains('!'), "warn marker must be visible: {text}");
     }
 
     #[test]

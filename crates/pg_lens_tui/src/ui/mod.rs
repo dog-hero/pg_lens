@@ -315,6 +315,19 @@ mod tests {
         assert!(screen.contains("q/Esc: quit"));
     }
 
+    /// F2.5: the mock's replication slots render under the senders in the
+    /// Macro Lens's Replication panel — the calm active slot with no
+    /// marker text worth asserting on, and the inactive/retaining one with
+    /// its name and a visible `!` severity marker.
+    #[test]
+    fn macro_lens_renders_replication_slots_with_severity_marker() {
+        let mut app = App::new();
+        let screen = render(&mut app);
+        assert!(screen.contains("replica_1_slot"), "{screen}");
+        assert!(screen.contains("analytics_cdc"), "{screen}");
+        assert!(screen.contains('!'), "warn marker must be visible: {screen}");
+    }
+
     #[test]
     fn micro_lens_renders_activity_table() {
         let mut app = App::new();

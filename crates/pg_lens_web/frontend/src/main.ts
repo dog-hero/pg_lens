@@ -147,7 +147,12 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.vitals,
     snapshot.schema?.vacuum_cluster_age ?? null,
   );
-  renderReplication(replicationPanel, replicationBody, snapshot.replication);
+  renderReplication(
+    replicationPanel,
+    replicationBody,
+    snapshot.replication,
+    snapshot.replication_slots,
+  );
   chart.update(snapshot.history);
   // Top waits: aggregated over the FULL activity set (never the filtered
   // subset — it answers "what is the server stuck on"), mirroring the

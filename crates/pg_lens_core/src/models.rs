@@ -721,6 +721,35 @@ pub struct WalReceiverRow {
     pub replay_lag_secs: Option<f64>,
 }
 
+/// One row of `pg_replication_slots` (F2.5, `queries/replication_slots.sql`).
+/// Unlike [`WalSenderRow`]/[`WalReceiverRow`], slots exist on BOTH a primary
+/// and a standby, so they are collected regardless of `is_in_recovery` and
+/// carried on [`DbSnapshot`] alongside — not inside — [`ReplicationInfo`].
+///
+/// The point of the feature: an INACTIVE slot that keeps retaining WAL is
+/// the classic full-disk incident (nothing is consuming it, so WAL piles up
+/// in `pg_wal`). See `pg_lens_tui::ui::macro_lens` (and its web mirror) for
+/// the severity rule.
+#[derive(Clone, Debug, Serialize)]
+pub struct ReplicationSlotRow {
+    pub slot_name: String,
+    /// `"physical"` or `"logical"`.
+    pub slot_type: String,
+    pub active: bool,
+    /// `pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)` — `None` during
+    /// recovery (the CASE guard in the SQL short-circuits before the
+    /// recovery-only-erroring `pg_current_wal_lsn()` runs) or when
+    /// `restart_lsn` itself is NULL (a logical slot never yet used).
+    pub retained_wal_bytes: Option<i64>,
+    /// `reserved` / `extended` / `unreserved` / `lost` (PG 13+).
+    pub wal_status: Option<String>,
+    /// Bytes of `max_slot_wal_keep_size` headroom still available before
+    /// this slot's WAL is at risk of being removed (PG 13+); `None` when
+    /// `max_slot_wal_keep_size` is unlimited (the default) or not
+    /// applicable to this slot.
+    pub safe_wal_size: Option<i64>,
+}
+
 /// Replication role and topology, refreshed every fast tick (the queries are
 /// a few rows and cheap). Absent (`DbSnapshot.replication == None`) only
 /// before the first successful poll of a session.
@@ -776,6 +805,15 @@ pub struct DbSnapshot {
     /// Replication role and topology, refreshed every fast tick. `None` only
     /// before the first successful poll of a session.
     pub replication: Option<ReplicationInfo>,
+    /// `pg_replication_slots` rows (F2.5), refreshed every fast tick,
+    /// best-effort like `replication`: `None` when the collection failed
+    /// this tick, `Some(vec![])` when it succeeded and simply found no
+    /// slots (the common case on a server with no logical replication /
+    /// standbys using slots — rendered as no extra rows, never an error).
+    /// A sibling of `replication` rather than a field of `ReplicationInfo`
+    /// because slots exist on BOTH a primary and a standby, unlike the
+    /// role-specific senders/receiver.
+    pub replication_slots: Option<Vec<ReplicationSlotRow>>,
     /// In-flight `pg_stat_progress_vacuum` rows (F2), refreshed every fast
     /// tick, best-effort like `replication`: `None` when the collection
     /// failed this tick (restricted role, hidden view, ...), `Some(vec![])`
@@ -969,6 +1007,29 @@ impl DbSnapshot {
                     },
                 ],
             }),
+            // F2.5: two slots so `--mock` demos both severity tiers — one
+            // healthy (active physical replica, fully reserved, nothing to
+            // worry about) and one INACTIVE logical slot retaining a couple
+            // GB of WAL with wal_status "extended": the classic
+            // slowly-filling-disk warning sign, yellow in the panel.
+            replication_slots: Some(vec![
+                ReplicationSlotRow {
+                    slot_name: "replica_1_slot".to_string(),
+                    slot_type: "physical".to_string(),
+                    active: true,
+                    retained_wal_bytes: Some(4 * 1024 * 1024 + jitter(seq, 11, 512 * 1024) as i64),
+                    wal_status: Some("reserved".to_string()),
+                    safe_wal_size: None,
+                },
+                ReplicationSlotRow {
+                    slot_name: "analytics_cdc".to_string(),
+                    slot_type: "logical".to_string(),
+                    active: false,
+                    retained_wal_bytes: Some(2_600_000_000 + (seq as i64) * 1_048_576),
+                    wal_status: Some("extended".to_string()),
+                    safe_wal_size: Some(1_400_000_000),
+                },
+            ]),
             // F2: one in-flight autovacuum, progressing between snapshots so
             // `--mock` visibly moves — 60% at seq 0, wrapping back to a low
             // percentage as `heap_blks_scanned` cycles under the fixed total.
@@ -1012,6 +1073,7 @@ impl DbSnapshot {
             statements: None,
             last_admin_action: None,
             replication: None,
+            replication_slots: None,
             vacuum_progress: None,
             status: PollerStatus::Connecting,
         }
@@ -1029,6 +1091,30 @@ mod tests {
         assert!(snapshot.vitals.connections_total <= snapshot.vitals.max_connections);
         assert!((0.0..=1.0).contains(&snapshot.vitals.cache_hit_ratio));
         assert!(matches!(snapshot.status, PollerStatus::Ok));
+    }
+
+    /// F2.5: the mock carries exactly the two slots the spec asks for — one
+    /// calm active/reserved physical slot, one inactive logical slot
+    /// retaining several GB with wal_status "extended" (severity fixture
+    /// for the TUI/web panel tests).
+    #[test]
+    fn mock_snapshot_carries_replication_slots() {
+        let snapshot = DbSnapshot::mock();
+        let slots = snapshot
+            .replication_slots
+            .as_ref()
+            .expect("mock must carry replication slots");
+        assert_eq!(slots.len(), 2);
+        let active = slots.iter().find(|s| s.active).expect("one active slot");
+        assert_eq!(active.slot_type, "physical");
+        assert_eq!(active.wal_status.as_deref(), Some("reserved"));
+        let inactive = slots.iter().find(|s| !s.active).expect("one inactive slot");
+        assert_eq!(inactive.slot_type, "logical");
+        assert_eq!(inactive.wal_status.as_deref(), Some("extended"));
+        assert!(
+            inactive.retained_wal_bytes.unwrap_or(0) > 2_000_000_000,
+            "the inactive slot must retain a couple GB, per the spec"
+        );
     }
 
     /// F2: the mock's cluster age sits below the yellow threshold (200M) —

@@ -207,6 +207,28 @@ export type ReplicationInfo =
   | { Primary: { senders: WalSenderRow[] } }
   | { Standby: { receiver: WalReceiverRow | null } };
 
+/**
+ * One row of pg_replication_slots (F2.5). Unlike WalSenderRow/WalReceiverRow
+ * these exist on BOTH a primary and a standby, so they travel as their own
+ * top-level DbSnapshot field rather than inside ReplicationInfo.
+ */
+export interface ReplicationSlotRow {
+  slot_name: string;
+  /** "physical" or "logical". */
+  slot_type: string;
+  active: boolean;
+  /**
+   * pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn); null during
+   * recovery or when restart_lsn itself is null (unused logical slot).
+   */
+  retained_wal_bytes: number | null;
+  /** "reserved" | "extended" | "unreserved" | "lost" (PG 13+). */
+  wal_status: string | null;
+  /** Headroom before max_slot_wal_keep_size is at risk; null when
+   * unlimited/not applicable. */
+  safe_wal_size: number | null;
+}
+
 /** Result of an admin action, stamped by the poller inside every snapshot
  * until superseded; frontends dedupe by `at_epoch_ms`. Serde shapes:
  * kind = "Cancel"|"Terminate", outcome = {Signalled:bool}|{Error:string}. */
@@ -225,6 +247,13 @@ export interface DbSnapshot {
   schema: SchemaSnapshot | null;
   statements: StatementsSnapshot | null;
   replication: ReplicationInfo | null;
+  /**
+   * pg_replication_slots rows (F2.5), refreshed every fast tick,
+   * best-effort like `replication`: null when the collection failed this
+   * tick, an empty array when it succeeded and simply found no slots (the
+   * common, calm case — rendered as no extra rows, never an error).
+   */
+  replication_slots: ReplicationSlotRow[] | null;
   /**
    * In-flight vacuum progress (F2), refreshed every fast tick, best-effort:
    * null when the collection failed this tick (restricted role, hidden

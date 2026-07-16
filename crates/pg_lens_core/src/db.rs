@@ -8,8 +8,8 @@ use tokio::task::JoinHandle;
 use tokio_postgres::{Client, Config, NoTls, Row, Transaction};
 
 use crate::models::{
-    ActivityRow, BloatRow, LockRow, StatementRow, TableStatRow, VacuumClusterAge,
-    VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow,
+    ActivityRow, BloatRow, LockRow, ReplicationSlotRow, StatementRow, TableStatRow,
+    VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow,
 };
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
@@ -167,6 +167,22 @@ pub fn wal_receiver_from_row(row: &Row) -> Result<WalReceiverRow, tokio_postgres
         sender_port: row.try_get("sender_port")?,
         replay_lag_bytes: row.try_get("replay_lag_bytes")?,
         replay_lag_secs: row.try_get("replay_lag_secs")?,
+    })
+}
+
+/// Maps one row of `queries/replication_slots.sql` onto
+/// [`ReplicationSlotRow`]. `retained_wal_bytes` is nullable per the SQL's
+/// recovery/NULL-restart_lsn guard; `wal_status`/`safe_wal_size` are the
+/// PG 13+ columns and are never expected NULL on a supported server, but
+/// stay `Option` defensively (a slot mid-drop could plausibly race).
+pub fn replication_slot_from_row(row: &Row) -> Result<ReplicationSlotRow, tokio_postgres::Error> {
+    Ok(ReplicationSlotRow {
+        slot_name: row.try_get("slot_name")?,
+        slot_type: row.try_get("slot_type")?,
+        active: row.try_get("active")?,
+        retained_wal_bytes: row.try_get("retained_wal_bytes")?,
+        wal_status: row.try_get("wal_status")?,
+        safe_wal_size: row.try_get("safe_wal_size")?,
     })
 }
 

@@ -30,8 +30,8 @@ use crate::history::{DEFAULT_CAP, HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::history_store::HistoryStore;
 use crate::models::{
     AdminActionResult, AdminCommand, AdminOutcome, BloatRow, DbSnapshot, PollerStatus,
-    ReplicationInfo, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
-    StatementsStatus, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
+    ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow,
+    StatementsSnapshot, StatementsStatus, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
 };
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
@@ -736,7 +736,8 @@ async fn poll_once(
     // degrades to "no replication panel" — it must NEVER take the whole poll
     // (and the dashboard) down. Only the query for the server's actual role
     // runs.
-    let replication = collect_replication(client, q, info.is_in_recovery).await;
+    let (replication, replication_slots) =
+        collect_replication(client, q, info.is_in_recovery).await;
 
     // Vacuum progress (F2) is likewise best-effort on the fast tick: absent
     // (`None`) on any failure, never a poll fault — see
@@ -818,6 +819,7 @@ async fn poll_once(
         statements: None,
         last_admin_action: None,
         replication,
+        replication_slots,
         vacuum_progress,
         status: PollerStatus::Ok,
     })
@@ -949,31 +951,67 @@ async fn collect_statements(
     Ok(out)
 }
 
-/// Best-effort replication view for the server's current role. Returns `None`
-/// on ANY query or parse failure — replication is optional (a restricted or
-/// managed server may forbid the WAL views), and its absence must never fail
-/// the poll. Only the query matching the role runs.
+/// Best-effort replication view for the server's current role, PLUS its
+/// replication slots (F2.5) — both ride the same read-only transaction as
+/// the sender/receiver query. Either half returns `None` independently on
+/// its own query/parse failure (replication and slots are each optional: a
+/// restricted or managed server may forbid one view but not the other), and
+/// neither failure can fail the poll. Only the sender/receiver query
+/// matching the role runs; the slots query always runs — slots exist on
+/// BOTH a primary and a standby, unlike senders/receiver.
 async fn collect_replication(
     client: &mut Client,
     q: &queries::QuerySet,
     is_in_recovery: bool,
-) -> Option<ReplicationInfo> {
-    let tx = begin_read(client).await.ok()?;
-    let info = if is_in_recovery {
-        let rows = tx.query(q.wal_receiver, &[]).await.ok()?;
-        let receiver = rows.first().and_then(|r| db::wal_receiver_from_row(r).ok());
-        ReplicationInfo::Standby { receiver }
-    } else {
-        let rows = tx.query(q.replication, &[]).await.ok()?;
-        let senders = rows
-            .iter()
-            .filter_map(|r| db::wal_sender_from_row(r).ok())
-            .collect();
-        ReplicationInfo::Primary { senders }
+) -> (Option<ReplicationInfo>, Option<Vec<ReplicationSlotRow>>) {
+    let Ok(tx) = begin_read(client).await else {
+        return (None, None);
     };
-    // Best-effort: a failed commit just means no panel this tick.
-    tx.commit().await.ok()?;
-    Some(info)
+
+    let info = if is_in_recovery {
+        match tx.query(q.wal_receiver, &[]).await {
+            Ok(rows) => {
+                let receiver = rows.first().and_then(|r| db::wal_receiver_from_row(r).ok());
+                Some(ReplicationInfo::Standby { receiver })
+            }
+            Err(_) => None,
+        }
+    } else {
+        match tx.query(q.replication, &[]).await {
+            Ok(rows) => {
+                let senders = rows
+                    .iter()
+                    .filter_map(|r| db::wal_sender_from_row(r).ok())
+                    .collect();
+                Some(ReplicationInfo::Primary { senders })
+            }
+            Err(_) => None,
+        }
+    };
+
+    let slots = match tx.query(q.replication_slots, &[]).await {
+        Ok(rows) => {
+            let mut out = Vec::with_capacity(rows.len());
+            let mut all_parsed = true;
+            for row in &rows {
+                match db::replication_slot_from_row(row) {
+                    Ok(slot) => out.push(slot),
+                    Err(_) => {
+                        all_parsed = false;
+                        break;
+                    }
+                }
+            }
+            if all_parsed { Some(out) } else { None }
+        }
+        Err(_) => None,
+    };
+
+    // Best-effort: a failed commit just means no panels this tick.
+    if tx.commit().await.is_err() {
+        return (None, None);
+    }
+    (info, slots)
 }
 
 /// Best-effort in-flight vacuum progress (F2, `pg_stat_progress_vacuum`),
