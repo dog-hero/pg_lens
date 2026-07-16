@@ -118,8 +118,8 @@ Gatekeeper will refuse to run the unsigned binary:
 
 ```sh
 # macOS (Apple Silicon)
-curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.2.1/pg_lens-v0.2.1-aarch64-apple-darwin.tar.gz | tar xz
-./pg_lens-v0.2.1-aarch64-apple-darwin/pg_lens --mock
+curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.7.1/pg_lens-v0.7.1-aarch64-apple-darwin.tar.gz | tar xz
+./pg_lens-v0.7.1-aarch64-apple-darwin/pg_lens --mock
 ```
 
 If you already downloaded it with a browser and macOS says the app
@@ -134,10 +134,15 @@ building from source or installing via curl avoids the prompt entirely.)
 
 ### Docker (GHCR)
 
+> **Note:** image publishing is currently **paused** during active
+> development (the arm64 build under QEMU makes releases too slow) — the
+> latest available tag may lag the newest release. It will resume on a
+> native arm64 runner; meanwhile prefer the binaries/packages above.
+
 Multi-arch images (linux/amd64 + linux/arm64) are published to
-[GHCR](https://github.com/dog-hero/pg_lens/pkgs/container/pg_lens) on
-every release. The default command serves the [Web Lens](#web-lens)
-dashboard on `0.0.0.0:8080`:
+[GHCR](https://github.com/dog-hero/pg_lens/pkgs/container/pg_lens). The
+default command serves the [Web Lens](#web-lens) dashboard on
+`0.0.0.0:8080`:
 
 ```sh
 docker run --rm -p 8080:8080 \
@@ -205,12 +210,12 @@ and has no dependencies.
 
 ```sh
 # Debian / Ubuntu (pick amd64 or arm64)
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.2.1/pg-lens_0.2.1_amd64.deb
-sudo dpkg -i pg-lens_0.2.1_amd64.deb
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.7.1/pg-lens_0.7.1_amd64.deb
+sudo dpkg -i pg-lens_0.7.1_amd64.deb
 
 # RHEL / Fedora / SUSE (x86_64 or aarch64)
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.2.1/pg-lens-0.2.1-1.x86_64.rpm
-sudo rpm -i pg-lens-0.2.1-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.2.1-1.x86_64.rpm
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.7.1/pg-lens-0.7.1-1.x86_64.rpm
+sudo rpm -i pg-lens-0.7.1-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.7.1-1.x86_64.rpm
 ```
 
 ### Cargo (crates.io)
@@ -552,6 +557,11 @@ The full plan lives in [ROADMAP.md](ROADMAP.md) (product requirements in
 [PRD.md](PRD.md)). Currently in progress — **v0.7, "what should I go fix"**:
 a top-waits panel, vacuum health / XID-wraparound visibility, an
 unused/redundant index advisor, and a checkpointer panel.
+
+## Changelog
+
+Release history lives in [CHANGELOG.md](CHANGELOG.md); the forward plan in
+[ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 
