@@ -40,6 +40,14 @@ pub struct QuerySet {
     /// `replication` — but unlike senders/receiver, slots exist on BOTH a
     /// primary and a standby, so this query always runs regardless of role.
     pub replication_slots: &'static str,
+    /// Index advisor (F3): per-index usage + catalog signature for
+    /// unused/duplicate detection (`index_advisor::classify`). Same slow
+    /// cadence/transaction as `table_stats` (fail-together, like the F2
+    /// vacuum-age queries).
+    pub indexes: &'static str,
+    /// Freshness of the connected database's cumulative stats (F3 header
+    /// caveat). Same transaction as `indexes`.
+    pub db_stats_reset: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -51,6 +59,9 @@ pub const STATEMENTS_LIMIT: usize = 100;
 
 /// Row cap of the vacuum per-table ages query (worst N by XID age).
 pub const VACUUM_TABLES_LIMIT: usize = 20;
+
+/// Row cap of the index-advisor query (worst N indexes by size).
+pub const INDEXES_LIMIT: usize = 50;
 
 const ACTIVITY_POST_140000: &str = include_str!("../queries/activity_post_140000.sql");
 const ACTIVITY_POST_130000: &str = include_str!("../queries/activity_post_130000.sql");
@@ -90,6 +101,10 @@ const VACUUM_PROGRESS: &str = include_str!("../queries/vacuum_progress.sql");
 // safe_wal_size shipped in PG 13), so one file serves the whole supported
 // range — no post_NNNNNN variant needed.
 const REPLICATION_SLOTS: &str = include_str!("../queries/replication_slots.sql");
+// Index advisor (F3). Version-independent 13+ (pg_stat_user_indexes /
+// pg_index / pg_constraint are stable across the whole supported range).
+const INDEXES: &str = include_str!("../queries/indexes.sql");
+const DB_STATS_RESET: &str = include_str!("../queries/db_stats_reset.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -111,6 +126,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             vacuum_table_ages: VACUUM_TABLE_AGES,
             vacuum_progress: VACUUM_PROGRESS,
             replication_slots: REPLICATION_SLOTS,
+            indexes: INDEXES,
+            db_stats_reset: DB_STATS_RESET,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -129,6 +146,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             vacuum_table_ages: VACUUM_TABLE_AGES,
             vacuum_progress: VACUUM_PROGRESS,
             replication_slots: REPLICATION_SLOTS,
+            indexes: INDEXES,
+            db_stats_reset: DB_STATS_RESET,
         })
     } else {
         Err(format!(
@@ -262,6 +281,25 @@ mod tests {
             assert!(q.replication_slots.contains("pg_is_in_recovery()"));
             assert!(q.replication_slots.contains("wal_status"));
             assert!(q.replication_slots.contains("safe_wal_size"));
+        }
+    }
+
+    #[test]
+    fn index_advisor_query_serves_pg13_and_up_with_conventions() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.indexes.contains("pg_stat_user_indexes"));
+            assert!(q.indexes.contains("pg_index"));
+            assert!(q.indexes.contains("indisunique"));
+            assert!(q.indexes.contains("indisprimary"));
+            assert!(q.indexes.contains("indisexclusion"));
+            assert!(q.indexes.contains("pg_get_indexdef"));
+            assert!(
+                q.indexes.contains(&format!("LIMIT {INDEXES_LIMIT}")),
+                "SQL row cap must match INDEXES_LIMIT"
+            );
+            assert!(q.db_stats_reset.contains("pg_stat_database"));
+            assert!(q.db_stats_reset.contains("current_database()"));
         }
     }
 

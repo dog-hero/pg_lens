@@ -21,7 +21,7 @@ use ratatui::{
     widgets::{Paragraph, Tabs},
 };
 
-use crate::app::{App, Tab};
+use crate::app::{App, SchemaView, Tab};
 
 /// Root layout: header / tabs / [status banner] / body / statusbar. The
 /// banner row collapses to zero height while the poller is healthy.
@@ -175,11 +175,20 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     // Row counter and sort label follow the active lens (the Schema Lens
     // keeps its own selection and sort mode); `R: recollect` is a Schema
     // Lens hint (the key itself works from any lens).
+    // `sort_label` is `None` for the Schema Lens's Indexes view (F3): it has
+    // no sort mode of its own (fixed severity-then-size order) — the `s`
+    // hint stays hidden there instead of advertising an inert key.
     let (selected, len, sort_label, slow_lens_extra) = match app.active_tab {
+        Tab::SchemaLens if app.schema_view == SchemaView::Indexes => (
+            app.index_table_state.selected(),
+            app.index_row_order.len(),
+            None,
+            true,
+        ),
         Tab::SchemaLens => (
             app.schema_table_state.selected(),
             app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len()),
-            app.schema_sort_mode.label(),
+            Some(app.schema_sort_mode.label()),
             true,
         ),
         // The Query Lens shares the slow cadence (and the R hint) with the
@@ -190,7 +199,7 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
                 .statements
                 .as_deref()
                 .map_or(0, |s| s.statements.len()),
-            app.statements_sort_mode.label(),
+            Some(app.statements_sort_mode.label()),
             true,
         ),
         // Micro Lens counts the FILTERED display order (`row_order`), so the
@@ -198,7 +207,7 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         _ => (
             app.table_state.selected(),
             app.row_order.len(),
-            app.sort_mode.label(),
+            Some(app.sort_mode.label()),
             false,
         ),
     };
@@ -254,7 +263,19 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         push_hint(&mut spans, "Enter", ": detail".into(), true);
     }
-    push_hint(&mut spans, "s", format!(": sort={sort_label}"), true);
+    // `i` toggles the Schema Lens's Tables/Indexes sub-view (F3) — the hint
+    // names the view a press would switch TO, matching the Space/pause
+    // hint's convention of describing the resulting action.
+    if app.active_tab == Tab::SchemaLens {
+        let desc = match app.schema_view {
+            SchemaView::Tables => ": indexes",
+            SchemaView::Indexes => ": tables",
+        };
+        push_hint(&mut spans, "i", desc.into(), true);
+    }
+    if let Some(sort_label) = sort_label {
+        push_hint(&mut spans, "s", format!(": sort={sort_label}"), true);
+    }
     if slow_lens_extra {
         // `R` refreshes the slow lenses and, on the Schema Lens, runs the
         // on-demand estimated-bloat queries (too slow for the auto cadence).
@@ -503,6 +524,90 @@ mod tests {
         assert!(screen.contains("mod since analyze"));
         assert!(screen.contains("order_items_pkey"), "index bloat listed: {screen}");
         assert!(screen.contains("35.0%"), "index bloat pct shown");
+    }
+
+    /// F3: `i` toggles the Schema Lens between Tables and Indexes, the
+    /// statusbar hint flips with it, and the Indexes view renders its
+    /// columns + the mock's three findings (unused, exact dup, prefix).
+    #[test]
+    fn schema_lens_i_toggles_to_the_indexes_view_and_back() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let screen = render(&mut app);
+        assert!(screen.contains("i: indexes"), "tables-view hint: {screen}");
+        assert!(!screen.contains("i: tables"), "{screen}");
+
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('i'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        let screen = render(&mut app);
+        assert!(screen.contains("i: tables"), "indexes-view hint: {screen}");
+        assert_eq!(app.schema_view, crate::app::SchemaView::Indexes);
+        for header in ["Index", "Table", "Size", "Scans", "Tup Read", "Flag"] {
+            assert!(screen.contains(header), "missing column {header}: {screen}");
+        }
+        assert!(screen.contains("order_items_notes_idx"), "{screen}");
+        assert!(screen.contains("UNUSED"), "unused flag visible: {screen}");
+        assert!(screen.contains("order_items_customer_idx"), "{screen}");
+        assert!(screen.contains("DUP"), "duplicate flag visible: {screen}");
+        assert!(screen.contains("pgbench_accounts_bid_idx"), "{screen}");
+        assert!(screen.contains("prefix"), "prefix flag visible: {screen}");
+        // Constraint-serving indexes must never carry a flag.
+        assert!(screen.contains("pgbench_accounts_pkey"), "{screen}");
+        // Footer shows the stats-reset freshness caveat, not just staleness.
+        assert!(screen.contains("stats reset"), "freshness header: {screen}");
+        assert!(screen.contains("signal, not verdict"), "{screen}");
+
+        // Toggle back.
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('i'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert_eq!(app.schema_view, crate::app::SchemaView::Tables);
+        let screen = render(&mut app);
+        assert!(screen.contains("i: indexes"), "{screen}");
+    }
+
+    /// Enter on a selected Indexes-view row opens the detail panel: the
+    /// full indexdef verbatim, and — for a duplicate — the partner's name
+    /// spelled out as evidence, not just a bare "DUP" label.
+    #[test]
+    fn index_detail_shows_indexdef_and_duplicate_partner() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('i'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        // Severity-then-size order puts an UNUSED row first (rank 0).
+        app.detail_open = true;
+        let screen = render(&mut app);
+        assert!(screen.contains("Index \u{2014} public."), "{screen}");
+        assert!(screen.contains("CREATE"), "verbatim indexdef: {screen}");
+        assert!(screen.contains("UNUSED"), "{screen}");
+        assert!(screen.contains("zero scans"), "{screen}");
+
+        // Move down to the exact-duplicate row and re-check its evidence.
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('j'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        let screen = render(&mut app);
+        assert!(screen.contains("DUP"), "{screen}");
+        assert!(screen.contains("exact duplicate of"), "{screen}");
     }
 
     #[test]

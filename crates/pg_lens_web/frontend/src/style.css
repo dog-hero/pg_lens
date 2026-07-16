@@ -456,6 +456,84 @@ table#schema {
   background: var(--bg-raised);
 }
 
+/* ── index advisor (F3) ────────────────────────────────────────────── */
+
+.schema-subtabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+#indexes {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+#indexes th,
+#indexes td {
+  padding: 5px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+#indexes th {
+  color: var(--fg-dim);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+#indexes th.num,
+#indexes td.num {
+  text-align: right;
+}
+
+#indexes tbody tr {
+  border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+}
+
+#indexes tbody tr.index-row {
+  cursor: pointer;
+}
+
+#indexes tbody tr.index-row:hover {
+  background: var(--bg-raised);
+}
+
+/* Finding severity tiers: same ranking as the TUI's `index_finding_rank`
+   (Unused red > DuplicateExact yellow > DuplicatePrefix dim-yellow). */
+#indexes tr.idx-unused {
+  background: rgba(244, 112, 103, 0.1);
+}
+
+#indexes tr.idx-unused td:last-child {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+#indexes tr.idx-dup {
+  background: rgba(255, 183, 77, 0.07);
+}
+
+#indexes tr.idx-dup td:last-child {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+#indexes tr.idx-prefix td:last-child {
+  color: var(--warn);
+  opacity: 0.7;
+}
+
+#indexes tr.index-detail td {
+  white-space: pre-line;
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+  padding: 6px 8px 10px 28px;
+  background: var(--bg-raised);
+}
+
 /* ── vacuum / wraparound section (F2) ──────────────────────────────── */
 
 .vacuum-section {

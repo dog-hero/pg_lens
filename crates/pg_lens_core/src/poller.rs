@@ -28,8 +28,9 @@ use tokio_postgres::{Client, NoTls, Transaction};
 
 use crate::history::{DEFAULT_CAP, HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::history_store::HistoryStore;
+use crate::index_advisor::{self, IndexCatalogRow};
 use crate::models::{
-    AdminActionResult, AdminCommand, AdminOutcome, BloatRow, DbSnapshot, PollerStatus,
+    AdminActionResult, AdminCommand, AdminOutcome, BloatRow, DbSnapshot, IndexRow, PollerStatus,
     ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow,
     StatementsSnapshot, StatementsStatus, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
 };
@@ -121,6 +122,8 @@ impl SchemaState {
             index_bloat,
             vacuum_cluster_age: collection.vacuum_cluster_age,
             vacuum_tables: collection.vacuum_tables,
+            indexes: collection.indexes,
+            stats_reset_epoch_secs: collection.stats_reset_epoch_secs,
             status,
         }));
     }
@@ -137,6 +140,8 @@ impl SchemaState {
             index_bloat: previous.map(|p| p.index_bloat.clone()).unwrap_or_default(),
             vacuum_cluster_age: previous.and_then(|p| p.vacuum_cluster_age.clone()),
             vacuum_tables: previous.map(|p| p.vacuum_tables.clone()).unwrap_or_default(),
+            indexes: previous.map(|p| p.indexes.clone()).unwrap_or_default(),
+            stats_reset_epoch_secs: previous.and_then(|p| p.stats_reset_epoch_secs),
             status: SchemaStatus::Error(msg),
         }));
     }
@@ -841,6 +846,13 @@ struct SchemaCollection {
     vacuum_cluster_age: Option<VacuumClusterAge>,
     /// F2 per-table XID ages, same essential transaction as `tables`.
     vacuum_tables: Vec<VacuumTableRow>,
+    /// F3 index advisor rows, same essential transaction as `tables` — a
+    /// role that can read `pg_stat_user_tables` can read
+    /// `pg_stat_user_indexes`/`pg_index` too, so this fails together with
+    /// the rest of the collection (same choice F2's vacuum ages made).
+    indexes: Vec<IndexRow>,
+    /// F3 freshness header, same transaction as `indexes`.
+    stats_reset_epoch_secs: Option<f64>,
     /// `None` when bloat was not requested this cycle (auto tick — keep the
     /// last on-demand estimate); `Some(_)` when a force refresh asked for a
     /// fresh estimate.
@@ -890,6 +902,25 @@ async fn collect_schema(
         vacuum_tables.push(db::vacuum_table_from_row(row).map_err(|e| e.to_string())?);
     }
 
+    // Index advisor (F3): same essential transaction, same fail-together
+    // choice as the vacuum-age queries above.
+    let index_rows = stx.query(q.indexes, &[]).await.map_err(|e| e.to_string())?;
+    let mut index_catalog: Vec<IndexCatalogRow> = Vec::with_capacity(index_rows.len());
+    for row in &index_rows {
+        index_catalog.push(db::index_catalog_from_row(row).map_err(|e| e.to_string())?);
+    }
+    let indexes = index_advisor::build_index_rows(index_catalog);
+    let stats_reset_rows = stx
+        .query(q.db_stats_reset, &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    let stats_reset_epoch_secs = stats_reset_rows
+        .first()
+        .map(db::db_stats_reset_from_row)
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .flatten();
+
     let bloat = if with_bloat {
         let (bloat_table_rows, bloat_index_rows) = tokio::join!(
             stx.query(q.bloat_tables, &[]),
@@ -921,6 +952,8 @@ async fn collect_schema(
         tables,
         vacuum_cluster_age,
         vacuum_tables,
+        indexes,
+        stats_reset_epoch_secs,
         bloat,
     })
 }
@@ -1501,6 +1534,8 @@ mod tests {
             tables: good.tables.clone(),
             vacuum_cluster_age: good.vacuum_cluster_age.clone(),
             vacuum_tables: good.vacuum_tables.clone(),
+            indexes: good.indexes.clone(),
+            stats_reset_epoch_secs: good.stats_reset_epoch_secs,
             bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
         let mut fresh = good.tables.clone();
@@ -1509,6 +1544,8 @@ mod tests {
             tables: fresh.clone(),
             vacuum_cluster_age: good.vacuum_cluster_age.clone(),
             vacuum_tables: good.vacuum_tables.clone(),
+            indexes: good.indexes.clone(),
+            stats_reset_epoch_secs: good.stats_reset_epoch_secs,
             bloat: None, // auto tick: no bloat this cycle
         });
         let after = schema.current.clone().expect("stored");
@@ -1532,6 +1569,8 @@ mod tests {
             tables: good.tables.clone(),
             vacuum_cluster_age: good.vacuum_cluster_age.clone(),
             vacuum_tables: good.vacuum_tables.clone(),
+            indexes: good.indexes.clone(),
+            stats_reset_epoch_secs: good.stats_reset_epoch_secs,
             bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
         let stored = schema.current.clone().expect("stored");
@@ -1558,6 +1597,8 @@ mod tests {
             tables: good.tables.clone(),
             vacuum_cluster_age: good.vacuum_cluster_age.clone(),
             vacuum_tables: good.vacuum_tables.clone(),
+            indexes: good.indexes.clone(),
+            stats_reset_epoch_secs: good.stats_reset_epoch_secs,
             bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
 
@@ -1567,6 +1608,8 @@ mod tests {
             tables: fresh_tables.clone(),
             vacuum_cluster_age: good.vacuum_cluster_age.clone(),
             vacuum_tables: good.vacuum_tables.clone(),
+            indexes: good.indexes.clone(),
+            stats_reset_epoch_secs: good.stats_reset_epoch_secs,
             bloat: Some(Err("canceling statement due to statement timeout".to_string())),
         });
 

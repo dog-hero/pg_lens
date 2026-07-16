@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",
-    "test": "node --test src/sql.test.ts src/waits.test.ts src/vacuum.test.ts src/replication.test.ts",
+    "test": "node --test src/sql.test.ts src/waits.test.ts src/vacuum.test.ts src/replication.test.ts src/index-advisor.test.ts",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview"
   },

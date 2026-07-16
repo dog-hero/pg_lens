@@ -7,6 +7,7 @@
 pub mod db;
 pub mod history;
 pub mod history_store;
+pub mod index_advisor;
 pub mod models;
 pub mod poller;
 pub mod queries;
@@ -19,11 +20,13 @@ pub mod waits;
 pub use tokio_postgres;
 
 pub use history::{HistoryPoint, SnapshotHistory};
+pub use index_advisor::{IndexCatalogRow, classify as classify_indexes};
 pub use models::{
     ActivityRow, AdminActionResult, AdminCommand, AdminKind, AdminOutcome, BloatRow, DbSnapshot,
-    LockRow, PollerStatus, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus,
-    ServerVitals, StatementRow, StatementsSnapshot, StatementsStatus, TableStatRow,
-    VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow,
+    IndexFinding, IndexRow, LockRow, PollerStatus, ReplicationInfo, ReplicationSlotRow,
+    SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
+    StatementsStatus, TableStatRow, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
+    WalReceiverRow, WalSenderRow,
 };
 pub use services::PasswordSource;
 pub use waits::{WaitSummary, top_waits};

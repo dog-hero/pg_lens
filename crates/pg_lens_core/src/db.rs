@@ -360,6 +360,43 @@ pub fn vacuum_table_from_row(row: &Row) -> Result<VacuumTableRow, tokio_postgres
     })
 }
 
+/// Maps one row of `queries/indexes.sql` onto
+/// [`crate::index_advisor::IndexCatalogRow`]. The raw catalog signature
+/// columns (`indkey`/`indclass`/`indcollation`/`indpred`) travel through
+/// this struct only as far as `index_advisor::build_index_rows`, which
+/// consumes them to compute each row's `IndexFinding` and never re-exposes
+/// them.
+pub fn index_catalog_from_row(
+    row: &Row,
+) -> Result<crate::index_advisor::IndexCatalogRow, tokio_postgres::Error> {
+    Ok(crate::index_advisor::IndexCatalogRow {
+        schema: row.try_get("schemaname")?,
+        table: row.try_get("tablename")?,
+        name: row.try_get("indexname")?,
+        index_bytes: row.try_get("index_bytes")?,
+        idx_scan: row.try_get("idx_scan")?,
+        idx_tup_read: row.try_get("idx_tup_read")?,
+        idx_tup_fetch: row.try_get("idx_tup_fetch")?,
+        is_unique: row.try_get("is_unique")?,
+        is_primary: row.try_get("is_primary")?,
+        is_exclusion: row.try_get("is_exclusion")?,
+        is_constraint: row.try_get("is_constraint")?,
+        indexdef: row.try_get("indexdef")?,
+        indkey: row.try_get("indkey")?,
+        indclass: row.try_get("indclass")?,
+        indcollation: row.try_get("indcollation")?,
+        indpred: row.try_get("indpred")?,
+    })
+}
+
+/// Maps the single row of `queries/db_stats_reset.sql` onto its epoch-second
+/// value. `None` when the query returns no row (the connected database
+/// vanished mid-poll — practically unreachable, but stay defensive rather
+/// than `unwrap`).
+pub fn db_stats_reset_from_row(row: &Row) -> Result<Option<f64>, tokio_postgres::Error> {
+    row.try_get("stats_reset")
+}
+
 /// Maps one row of `queries/vacuum_progress.sql` onto [`VacuumProgressRow`].
 pub fn vacuum_progress_from_row(row: &Row) -> Result<VacuumProgressRow, tokio_postgres::Error> {
     Ok(VacuumProgressRow {

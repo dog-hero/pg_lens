@@ -132,6 +132,36 @@ export interface VacuumProgressRow {
   heap_blks_scanned: number;
 }
 
+/**
+ * The Index Advisor's (F3) verdict for one index — serde external tagging:
+ * unit variant `"Unused"`/`"None"`, struct variants `{ DuplicateExact: {
+ * partner } }` / `{ DuplicatePrefix: { partner } }`. Computed in Rust core
+ * (`index_advisor::classify`), never re-derived in the web frontend.
+ */
+export type IndexFinding =
+  | "Unused"
+  | { DuplicateExact: { partner: string } }
+  | { DuplicatePrefix: { partner: string } }
+  | "None";
+
+/** One row of the Index Advisor query (F3), current database only. */
+export interface IndexRow {
+  schema: string;
+  table: string;
+  name: string;
+  index_bytes: number;
+  idx_scan: number;
+  idx_tup_read: number;
+  idx_tup_fetch: number;
+  is_unique: boolean;
+  is_primary: boolean;
+  is_exclusion: boolean;
+  is_constraint: boolean;
+  /** `pg_get_indexdef()` — the full `CREATE INDEX` statement, verbatim. */
+  indexdef: string;
+  finding: IndexFinding;
+}
+
 /** Slow-cadence Schema Lens collection; null until the first one lands. */
 export interface SchemaSnapshot {
   collected_at_epoch_ms: number;
@@ -141,6 +171,11 @@ export interface SchemaSnapshot {
   /** null only before the first successful slow collection of a session. */
   vacuum_cluster_age: VacuumClusterAge | null;
   vacuum_tables: VacuumTableRow[];
+  /** Index advisor rows (F3), same slow collection as `tables`. */
+  indexes: IndexRow[];
+  /** When the connected database's cumulative stats were last reset (F3
+   * freshness header) — null only if the row vanished mid-query. */
+  stats_reset_epoch_secs: number | null;
   status: SchemaStatus;
 }
 

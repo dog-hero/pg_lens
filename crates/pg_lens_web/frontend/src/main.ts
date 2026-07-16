@@ -8,6 +8,7 @@ import { renderVitals } from "./vitals";
 import { HistoryChart } from "./chart";
 import { ActivityTable } from "./table";
 import { SchemaLens } from "./schema";
+import { IndexAdvisor } from "./index-advisor";
 import { VacuumPanel } from "./vacuum-panel";
 import { StatementsLens } from "./statements";
 import { renderReplication } from "./replication";
@@ -63,6 +64,29 @@ const schemaLens = new SchemaLens(
   el<HTMLParagraphElement>("schema-warning"),
   el<HTMLParagraphElement>("schema-placeholder"),
 );
+const indexAdvisor = new IndexAdvisor(
+  el<HTMLTableElement>("indexes"),
+  el<HTMLParagraphElement>("indexes-staleness"),
+  el<HTMLParagraphElement>("indexes-warning"),
+  el<HTMLParagraphElement>("indexes-placeholder"),
+);
+// Schema sub-tabs (F3): Tables (the panel's original content) vs Indexes —
+// nested inside the Schema tab, mirroring the TUI's `i` toggle. Both keep
+// polling from the same snapshot; only the visible view differs.
+const schemaSubtabs: Array<[HTMLButtonElement, HTMLElement]> = [
+  [el<HTMLButtonElement>("schema-view-tables"), el<HTMLElement>("schema-tables-view")],
+  [el<HTMLButtonElement>("schema-view-indexes"), el<HTMLElement>("schema-indexes-view")],
+];
+for (const [button] of schemaSubtabs) {
+  button.addEventListener("click", () => {
+    for (const [other, view] of schemaSubtabs) {
+      const selected = other === button;
+      other.classList.toggle("active", selected);
+      other.setAttribute("aria-pressed", String(selected));
+      view.hidden = !selected;
+    }
+  });
+}
 const vacuumPanel = new VacuumPanel(
   el<HTMLParagraphElement>("vacuum-cluster"),
   el<HTMLUListElement>("vacuum-tables"),
@@ -160,6 +184,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   renderWaits(waitsStrip, snapshot.activity);
   table.update(snapshot.activity, snapshot.locks);
   schemaLens.update(snapshot.schema, snapshot.vitals.database);
+  indexAdvisor.update(snapshot.schema, snapshot.vitals.database);
   vacuumPanel.update(snapshot.schema, snapshot.vacuum_progress);
   statementsLens.update(snapshot.statements, snapshot.vitals.database);
   announceAdmin(snapshot.last_admin_action);

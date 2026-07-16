@@ -206,6 +206,57 @@ pub enum SchemaStatus {
     Error(String),
 }
 
+/// The Index Advisor's (F3) verdict for one index — PRD pillar 6 ("signal,
+/// not verdict"): a flag plus, for duplicates, WHICH other index makes it
+/// one, so the detail panel can show the evidence rather than a bare label.
+/// Computed purely in [`crate::index_advisor::classify`], never in SQL.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub enum IndexFinding {
+    /// `idx_scan = 0` and the index serves no constraint (never flagged:
+    /// unique/primary/exclusion indexes exist for correctness, not reads).
+    Unused,
+    /// Same table, identical column list/opclasses/collations/predicate/
+    /// uniqueness as `partner` — interchangeable, one is pure overhead.
+    DuplicateExact { partner: String },
+    /// This index's column list is a strict, order-respecting prefix of
+    /// `partner`'s — a weaker signal than an exact duplicate: `partner`
+    /// alone could serve every query this index serves.
+    DuplicatePrefix { partner: String },
+    /// Nothing to report — reads happen, or it uniquely serves a query
+    /// shape no other index covers.
+    None,
+}
+
+/// One row of the Index Advisor query (`queries/indexes.sql`), F3: usage
+/// counters + on-disk size + constraint flags of one index of the connected
+/// database, plus its computed [`IndexFinding`]. The raw catalog signature
+/// used to derive `finding` (indkey/indclass/indcollation/indpred) is
+/// deliberately NOT part of this model — see
+/// [`crate::index_advisor::IndexCatalogRow`], which never survives past
+/// `index_advisor::build_index_rows`.
+#[derive(Clone, Debug, Serialize)]
+pub struct IndexRow {
+    pub schema: String,
+    pub table: String,
+    pub name: String,
+    /// `pg_relation_size(indexrelid)`.
+    pub index_bytes: i64,
+    pub idx_scan: i64,
+    pub idx_tup_read: i64,
+    pub idx_tup_fetch: i64,
+    pub is_unique: bool,
+    pub is_primary: bool,
+    pub is_exclusion: bool,
+    /// True when a `pg_constraint` row backs this index (PK/UNIQUE/EXCLUDE
+    /// constraint) — distinct from `is_unique` alone, which is also true
+    /// for a manually created `CREATE UNIQUE INDEX` with no constraint.
+    pub is_constraint: bool,
+    /// `pg_get_indexdef(indexrelid)` — the full `CREATE INDEX` statement,
+    /// shown verbatim in the detail panel (never reconstructed from parts).
+    pub indexdef: String,
+    pub finding: IndexFinding,
+}
+
 /// The Schema Lens payload: table stats (+ estimated bloat from Fase S2 on)
 /// of the connected database, collected on its own slow cadence (default
 /// 60s). Wrapped in an `Arc` inside [`DbSnapshot`] so the fast ticks that
@@ -227,6 +278,14 @@ pub struct SchemaSnapshot {
     pub vacuum_cluster_age: Option<VacuumClusterAge>,
     /// Worst N tables by XID age, F2 (the query caps at 20 rows).
     pub vacuum_tables: Vec<VacuumTableRow>,
+    /// Index advisor rows (F3), collected in the same essential transaction
+    /// as `tables` (the query caps at 50 rows by size).
+    pub indexes: Vec<IndexRow>,
+    /// When the connected database's cumulative `pg_stat_*` counters were
+    /// last zeroed (F3 freshness header) — `None` only if the row vanished
+    /// mid-query (the database itself would have to be dropped), never a
+    /// real "unknown" state on a healthy connection.
+    pub stats_reset_epoch_secs: Option<f64>,
     pub status: SchemaStatus,
 }
 
@@ -440,6 +499,110 @@ impl SchemaSnapshot {
                 n_live_tup: 273_000 + churn,
             },
         ];
+        // F3: run the SAME `index_advisor::classify` the live poller uses,
+        // over a catalog fixture that demos all three findings at once —
+        // one unused index, one exact-duplicate pair, and one prefix case —
+        // so `--mock` exercises the real detection code, not a hand-typed
+        // `finding` field that could drift from it.
+        use crate::index_advisor::{IndexCatalogRow, build_index_rows};
+        let catalog_index = |table: &str, name: &str, idx_scan: i64, is_unique: bool,
+                              is_primary: bool, indkey: &str, indexdef: &str| {
+            IndexCatalogRow {
+                schema: "public".to_string(),
+                table: table.to_string(),
+                name: name.to_string(),
+                index_bytes: 8_388_608,
+                idx_scan,
+                idx_tup_read: idx_scan * 3,
+                idx_tup_fetch: idx_scan * 3,
+                is_unique,
+                is_primary,
+                is_exclusion: false,
+                is_constraint: is_unique || is_primary,
+                indexdef: indexdef.to_string(),
+                indkey: indkey.to_string(),
+                indclass: indkey.split_whitespace().map(|_| "1978").collect::<Vec<_>>().join(" "),
+                indcollation: indkey.split_whitespace().map(|_| "0").collect::<Vec<_>>().join(" "),
+                indpred: String::new(),
+            }
+        };
+        let index_catalog = vec![
+            catalog_index(
+                "order_items",
+                "order_items_pkey",
+                9_004_112 + churn.max(0),
+                true,
+                true,
+                "1",
+                "CREATE UNIQUE INDEX order_items_pkey ON public.order_items USING btree (id)",
+            ),
+            // Exact-duplicate pair: same column, same uniqueness — a
+            // classic "created it twice, nobody noticed" finding.
+            catalog_index(
+                "order_items",
+                "order_items_customer_idx",
+                412,
+                false,
+                false,
+                "3",
+                "CREATE INDEX order_items_customer_idx ON public.order_items USING \
+                 btree (customer_id)",
+            ),
+            catalog_index(
+                "order_items",
+                "order_items_customer_idx2",
+                97,
+                false,
+                false,
+                "3",
+                "CREATE INDEX order_items_customer_idx2 ON public.order_items USING \
+                 btree (customer_id)",
+            ),
+            // Unused: never scanned since the last stats reset, not backing
+            // any constraint — pure write overhead.
+            catalog_index(
+                "order_items",
+                "order_items_notes_idx",
+                0,
+                false,
+                false,
+                "6",
+                "CREATE INDEX order_items_notes_idx ON public.order_items USING btree (notes)",
+            ),
+            catalog_index(
+                "pgbench_accounts",
+                "pgbench_accounts_pkey",
+                48_211_390 + churn,
+                true,
+                true,
+                "1",
+                "CREATE UNIQUE INDEX pgbench_accounts_pkey ON public.pgbench_accounts USING \
+                 btree (aid)",
+            ),
+            // Prefix-redundant: (bid) is a strict prefix of (bid, abalance)
+            // — a weaker, dim-yellow signal.
+            catalog_index(
+                "pgbench_accounts",
+                "pgbench_accounts_bid_idx",
+                58,
+                false,
+                false,
+                "2",
+                "CREATE INDEX pgbench_accounts_bid_idx ON public.pgbench_accounts USING \
+                 btree (bid)",
+            ),
+            catalog_index(
+                "pgbench_accounts",
+                "pgbench_accounts_bid_abalance_idx",
+                7_310 + churn.max(0),
+                false,
+                false,
+                "2 4",
+                "CREATE INDEX pgbench_accounts_bid_abalance_idx ON public.pgbench_accounts \
+                 USING btree (bid, abalance)",
+            ),
+        ];
+        let indexes = build_index_rows(index_catalog);
         Self {
             collected_at_epoch_ms: epoch_ms_now(),
             tables,
@@ -447,6 +610,10 @@ impl SchemaSnapshot {
             index_bloat,
             vacuum_cluster_age,
             vacuum_tables,
+            indexes,
+            // A plausible "reset a couple weeks ago" freshness so the
+            // header's "stats reset Nd ago" reads naturally in `--mock`.
+            stats_reset_epoch_secs: Some(epoch_ms_now() as f64 / 1000.0 - 12.0 * 86_400.0),
             status: SchemaStatus::Ok,
         }
     }
