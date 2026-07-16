@@ -28,6 +28,9 @@ Live-DB testing convention: `docker run -d --name pglens_pg16 -e POSTGRES_PASSWO
 
 Static Linux binaries: this machine has Homebrew rust (no rustup), so musl cross-compiles run inside `rust:1-alpine` Docker — recipe in README.md.
 
+TOOLCHAIN TRAP: the local Homebrew clippy lags CI's stable (it has missed lints that turned CI red after a green local gate). When touching `pg_lens_core`/`pg_lens_tui` non-trivially, confirm clippy in the CI-equivalent container before pushing:
+`docker run --rm -v "$PWD":/src -w /src rust:1-slim sh -c "rustup component add clippy >/dev/null 2>&1 && cargo clippy --workspace --all-targets -- -D warnings"`
+
 ## Architecture
 
 Cargo workspace, three crates:
