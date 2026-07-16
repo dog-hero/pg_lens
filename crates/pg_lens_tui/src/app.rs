@@ -265,6 +265,34 @@ impl PickerState {
     }
 }
 
+/// State of the in-session database picker (`d`, any lens, U2). Unlike the
+/// startup [`PickerState`] (a pre-poller, full-screen mode), this is an
+/// OVERLAY on top of the dashboard — a poller already exists, and PostgreSQL
+/// cannot switch databases without reconnecting, so Enter here always means
+/// "ask the poller to reconnect", never an in-place update.
+#[derive(Clone, Debug)]
+pub struct DbPickerState {
+    /// Snapshot of `DbSnapshot::databases` taken when the picker opened —
+    /// like the startup picker's `entries`, this list does not live-refresh
+    /// while the overlay is on screen.
+    pub entries: Vec<pg_lens_core::DatabaseRow>,
+    /// Index into `entries`; j/k/↑/↓ move it, saturating at both ends.
+    pub selected: usize,
+}
+
+impl DbPickerState {
+    /// Starts the cursor on the currently connected database when it is
+    /// among the entries (a small UX nicety: the picker opens already
+    /// pointing at "you are here"), falling back to the first entry.
+    pub fn new(entries: Vec<pg_lens_core::DatabaseRow>, current_database: &str) -> Self {
+        let selected = entries
+            .iter()
+            .position(|e| e.name == current_database)
+            .unwrap_or(0);
+        Self { entries, selected }
+    }
+}
+
 /// State of the admin confirmation modal (`c` = cancel query, `K` =
 /// terminate backend, Micro Lens only). While `App::confirm` is `Some`,
 /// every key except `y` (confirm) and `n`/`Esc` (abort) is inert.
@@ -382,6 +410,20 @@ pub struct App {
     /// `Some` while the admin confirmation modal is on screen (`c`/`K` on
     /// the Micro Lens). All other keys are inert until y/n/Esc resolves it.
     pub confirm: Option<ConfirmState>,
+    /// `Some` while the in-session database picker is on screen (`d`, any
+    /// lens, U2). Overlay semantics like `confirm`: every other key is
+    /// inert while it is open, and Esc closes it WITHOUT arming the quit
+    /// barrier.
+    pub db_picker: Option<DbPickerState>,
+    /// The database name picked by Enter in `db_picker`, queued for the main
+    /// loop to forward to the poller (same mirror pattern as
+    /// `schema_refresh_requests`/`pending_admin`). `None` once forwarded, or
+    /// whenever there is nothing to switch to.
+    pub pending_db_switch: Option<String>,
+    /// Set once by `main.rs` at startup (`--mock`); read by
+    /// `handle_db_picker_key` to show the "not simulated" toast instead of
+    /// queuing a real switch that no mock poller would ever act on.
+    pub is_mock: bool,
     /// Admin commands confirmed by `y` but not yet handed to the poller.
     /// `update()` only queues (pure state); the main loop drains this into
     /// the poller's `mpsc::Sender<AdminCommand>` after every update — the
@@ -448,6 +490,9 @@ impl App {
             picker: None,
             picked: None,
             confirm: None,
+            db_picker: None,
+            pending_db_switch: None,
+            is_mock: false,
             pending_admin: Vec::new(),
             admin_feedback: None,
             admin_seen_epoch_ms: None,
@@ -658,6 +703,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         handle_confirm_key(app, key);
         return;
     }
+    // In-session database picker (`d`, U2): j/k move, Enter selects, Esc
+    // closes — an overlay like `confirm`, so every other key (including q)
+    // is inert while it is open.
+    if app.db_picker.is_some() {
+        handle_db_picker_key(app, key);
+        return;
+    }
     // Filter editing (`/` on the Micro Lens): printable keys edit the filter
     // live, so the table narrows as you type; Enter commits, Esc reverts.
     // Every lens keybinding is inert until then.
@@ -726,6 +778,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.filter_saved = app.filter.clone();
             app.filter_editing = true;
         }
+        // `d` opens the database picker (U2) from ANY lens — reconnecting is
+        // a cluster-wide, not a per-lens, action.
+        KeyCode::Char('d') => open_db_picker(app),
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
         // `s` cycles the sort of whichever lens is active (each keeps its
@@ -836,6 +891,66 @@ fn handle_confirm_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('n') | KeyCode::Esc => app.confirm = None,
+        _ => {}
+    }
+}
+
+/// Opens the in-session database picker (`d`). A no-op when the poller has
+/// not yet collected the database list (`snapshot.databases` is `None`
+/// before the first successful fast tick, or on any collection failure) —
+/// nothing to pick from yet; the key simply does nothing rather than open an
+/// empty, useless overlay.
+fn open_db_picker(app: &mut App) {
+    let Some(databases) = app.snapshot.databases.clone() else {
+        return;
+    };
+    if databases.is_empty() {
+        return;
+    }
+    app.db_picker = Some(DbPickerState::new(databases, &app.snapshot.vitals.database));
+}
+
+/// Keymap of the in-session database picker: j/k/↑/↓ move (saturating),
+/// Enter selects, Esc closes — WITHOUT arming the quit barrier (it is an
+/// overlay, not a top-level Esc; see `KeyCode::Esc` above). `q` is
+/// deliberately inert while the picker is open, same convention as the
+/// admin confirm modal.
+fn handle_db_picker_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.db_picker = None,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(picker) = app.db_picker.as_mut() {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(picker) = app.db_picker.as_mut()
+                && !picker.entries.is_empty()
+            {
+                picker.selected = (picker.selected + 1).min(picker.entries.len() - 1);
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(picker) = app.db_picker.take()
+                && let Some(entry) = picker.entries.get(picker.selected)
+            {
+                let name = entry.name.clone();
+                if name == app.snapshot.vitals.database {
+                    // Already connected here: nothing to do.
+                } else if app.is_mock {
+                    app.admin_feedback = Some(AdminFeedback {
+                        text: "mock mode: database switch not simulated".to_string(),
+                        error: false,
+                        expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+                    });
+                } else {
+                    app.pending_db_switch = Some(name);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -1924,6 +2039,131 @@ mod tests {
         assert_eq!(app.refresh_interval, DEFAULT_REFRESH);
         assert!(app.picker.is_some());
         assert!(!app.should_quit);
+    }
+
+    // --- in-session database picker (U2) --------------------------------------
+
+    #[test]
+    fn d_opens_the_picker_starting_on_the_current_database() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char('d')));
+        let picker = app.db_picker.as_ref().expect("picker opened");
+        assert!(picker.entries.iter().any(|e| e.name == "shop"), "mock entries");
+        let current = &picker.entries[picker.selected];
+        assert_eq!(current.name, app.snapshot.vitals.database);
+    }
+
+    /// `d` works from any lens, not just the Macro Lens.
+    #[test]
+    fn d_opens_the_picker_from_any_lens() {
+        for tab_presses in 0..Tab::TITLES.len() {
+            let mut app = App::new();
+            for _ in 0..tab_presses {
+                update(&mut app, press(KeyCode::Tab));
+            }
+            update(&mut app, press(KeyCode::Char('d')));
+            assert!(app.db_picker.is_some(), "tab {tab_presses}: picker must open");
+        }
+    }
+
+    /// No database list yet (pre-first-tick / collection failed): `d` is a
+    /// harmless no-op, never an empty useless overlay.
+    #[test]
+    fn d_is_a_no_op_without_a_database_list() {
+        let mut app = App::new();
+        let mut snap = app.snapshot.as_ref().clone();
+        snap.databases = None;
+        update(&mut app, Action::Snapshot(std::sync::Arc::new(snap)));
+        update(&mut app, press(KeyCode::Char('d')));
+        assert!(app.db_picker.is_none());
+    }
+
+    #[test]
+    fn picker_j_k_move_the_db_picker_selection_saturating() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char('d')));
+        update(&mut app, press(KeyCode::Up)); // already at 0 (or wherever): must not underflow
+        let picker = app.db_picker.as_ref().expect("open");
+        let len = picker.entries.len();
+        assert!(len >= 2, "mock must carry at least 2 databases");
+        for _ in 0..len + 3 {
+            update(&mut app, press(KeyCode::Char('j')));
+        }
+        assert_eq!(app.db_picker.as_ref().unwrap().selected, len - 1);
+        for _ in 0..len + 3 {
+            update(&mut app, press(KeyCode::Char('k')));
+        }
+        assert_eq!(app.db_picker.as_ref().unwrap().selected, 0);
+    }
+
+    /// Esc closes the overlay WITHOUT arming the top-level quit barrier — an
+    /// overlay dismissal, not a top-level Esc (mirrors the detail panel).
+    #[test]
+    fn esc_closes_the_db_picker_without_arming_quit() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char('d')));
+        update(&mut app, press(KeyCode::Esc));
+        assert!(app.db_picker.is_none());
+        assert!(!app.should_quit);
+        assert!(app.esc_quit_armed_until.is_none());
+    }
+
+    /// `q` is inert while the picker is open (matches the confirm modal's
+    /// convention) — it must not fall through and quit the app.
+    #[test]
+    fn q_is_inert_while_the_db_picker_is_open() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char('d')));
+        update(&mut app, press(KeyCode::Char('q')));
+        assert!(app.db_picker.is_some());
+        assert!(!app.should_quit);
+    }
+
+    /// Enter on a DIFFERENT database queues the switch and closes the
+    /// picker; the current database is never among the events sent (there
+    /// is nothing to switch to).
+    #[test]
+    fn enter_on_a_different_database_queues_the_switch() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char('d')));
+        update(&mut app, press(KeyCode::Char('j'))); // move off the current selection
+        let target = app.db_picker.as_ref().unwrap().entries
+            [app.db_picker.as_ref().unwrap().selected]
+            .name
+            .clone();
+        assert_ne!(target, app.snapshot.vitals.database, "test needs a different pick");
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.db_picker.is_none(), "overlay closes on Enter");
+        assert_eq!(app.pending_db_switch, Some(target));
+    }
+
+    /// Enter on the CURRENTLY connected database is a no-op — nothing to
+    /// reconnect to.
+    #[test]
+    fn enter_on_the_current_database_does_not_queue_a_switch() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char('d')));
+        // The picker starts on the current database (see
+        // `d_opens_the_picker_starting_on_the_current_database`).
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.db_picker.is_none());
+        assert!(app.pending_db_switch.is_none());
+    }
+
+    /// `--mock` (`App::is_mock`): Enter on a different database shows the
+    /// "not simulated" toast instead of queuing a switch no mock poller
+    /// would ever act on.
+    #[test]
+    fn mock_mode_toasts_instead_of_queueing_a_switch() {
+        let mut app = App::new();
+        app.is_mock = true;
+        update(&mut app, press(KeyCode::Char('d')));
+        update(&mut app, press(KeyCode::Char('j')));
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.pending_db_switch.is_none(), "mock never queues a real switch");
+        let feedback = app.admin_feedback.as_ref().expect("toast shown");
+        assert!(feedback.text.contains("mock mode"), "{}", feedback.text);
+        assert!(!feedback.error);
     }
 
     #[test]

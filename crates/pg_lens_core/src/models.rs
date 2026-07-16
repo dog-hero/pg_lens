@@ -230,6 +230,21 @@ pub struct VacuumTableRow {
     pub n_live_tup: i64,
 }
 
+/// One row of `pg_database` (U2, `queries/databases.sql`): the databases
+/// available on this cluster, feeding the in-session database picker (`d`).
+/// PostgreSQL cannot switch databases without reconnecting, so picking a row
+/// asks the poller to reconnect with a different `dbname` rather than
+/// running an in-place query.
+#[derive(Clone, Debug, Serialize)]
+pub struct DatabaseRow {
+    pub name: String,
+    /// `pg_database_size(datname)`, best-effort per row: `None` when the
+    /// connected role lacks CONNECT privilege on this OTHER database (the
+    /// function raises for those — the SQL guards it instead of failing the
+    /// whole query, see `queries/databases.sql`).
+    pub size_bytes: Option<i64>,
+}
+
 /// One in-flight `pg_stat_progress_vacuum` row, F2. Collected on the FAST
 /// tick, best-effort (see [`DbSnapshot::vacuum_progress`]).
 #[derive(Clone, Debug, Serialize)]
@@ -1039,6 +1054,12 @@ pub struct DbSnapshot {
     /// everyone, same class as `pg_stat_database`). `None` only before the
     /// first successful poll of a session.
     pub checkpointer: Option<CheckpointerStats>,
+    /// Databases available on the cluster (U2), refreshed every fast tick,
+    /// best-effort like `replication`: `None` when the collection failed
+    /// this tick, `Some(vec![])` only if the cluster genuinely has none
+    /// connectable (never happens in practice — at least the connected
+    /// database always qualifies), never an error.
+    pub databases: Option<Vec<DatabaseRow>>,
     pub status: PollerStatus,
 }
 
@@ -1281,6 +1302,25 @@ impl DbSnapshot {
                 avg_checkpoint_sync_ms: Some(310.0 + jitter(seq, 30, 80) as f64),
                 requested_ratio_session: Some(0.13 + jitter(seq, 31, 10) as f64 / 100.0),
             }),
+            // U2: a small cluster with the connected database ("shop", per
+            // `vitals.database` above) plus two others — one whose size the
+            // connected role can read, one it cannot (the `--` path), so
+            // `--mock` demos the picker's current-db marker and the
+            // best-effort size dash in one fixture.
+            databases: Some(vec![
+                DatabaseRow {
+                    name: "shop".to_string(),
+                    size_bytes: Some(3_400_000_000 + (seq as i64) * 1_048_576),
+                },
+                DatabaseRow {
+                    name: "warehouse".to_string(),
+                    size_bytes: Some(48_600_000_000),
+                },
+                DatabaseRow {
+                    name: "analytics".to_string(),
+                    size_bytes: None,
+                },
+            ]),
             status: PollerStatus::Ok,
         }
     }
@@ -1317,6 +1357,7 @@ impl DbSnapshot {
             replication_slots: None,
             vacuum_progress: None,
             checkpointer: None,
+            databases: None,
             status: PollerStatus::Connecting,
         }
     }
@@ -1394,6 +1435,23 @@ mod tests {
         assert!(p.heap_blks_scanned <= p.heap_blks_total);
         assert!(!p.relation.is_empty());
         assert!(!p.phase.is_empty());
+    }
+
+    /// U2: the mock carries the connected database plus at least one other,
+    /// and demonstrates the per-row best-effort size (one `None`).
+    #[test]
+    fn mock_snapshot_carries_databases_including_the_current_one() {
+        let snapshot = DbSnapshot::mock();
+        let databases = snapshot.databases.as_ref().expect("mock must carry databases");
+        assert!(databases.len() >= 2);
+        assert!(
+            databases.iter().any(|d| d.name == snapshot.vitals.database),
+            "the connected database must be among the choices"
+        );
+        assert!(
+            databases.iter().any(|d| d.size_bytes.is_none()),
+            "one row must demo the best-effort size dash"
+        );
     }
 
     #[test]

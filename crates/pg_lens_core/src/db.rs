@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_postgres::{Client, Config, NoTls, Row, Transaction};
 
 use crate::models::{
-    ActivityRow, BloatRow, LockRow, ReplicationSlotRow, StatementRow, TableStatRow,
+    ActivityRow, BloatRow, DatabaseRow, LockRow, ReplicationSlotRow, StatementRow, TableStatRow,
     VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow,
 };
 
@@ -438,6 +438,14 @@ pub fn vacuum_progress_from_row(row: &Row) -> Result<VacuumProgressRow, tokio_po
         phase: row.try_get("phase")?,
         heap_blks_total: row.try_get("heap_blks_total")?,
         heap_blks_scanned: row.try_get("heap_blks_scanned")?,
+    })
+}
+
+/// Maps one row of `queries/databases.sql` onto [`DatabaseRow`] (U2).
+pub fn database_from_row(row: &Row) -> Result<DatabaseRow, tokio_postgres::Error> {
+    Ok(DatabaseRow {
+        name: row.try_get("datname")?,
+        size_bytes: row.try_get("size_bytes")?,
     })
 }
 

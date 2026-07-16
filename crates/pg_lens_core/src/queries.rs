@@ -55,6 +55,10 @@ pub struct QuerySet {
     /// single-row catalog read, runs in the same essential transaction as
     /// `server_info` on the fast tick.
     pub bgwriter: &'static str,
+    /// Databases available on the cluster (U2, the database picker). Runs
+    /// on the fast tick, best-effort like `replication_slots` — a cheap
+    /// catalog read, but never allowed to fail the poll.
+    pub databases: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -117,6 +121,9 @@ const DB_STATS_RESET: &str = include_str!("../queries/db_stats_reset.sql");
 // their columns to the same names, so one parser serves both.
 const BGWRITER_POST_130000: &str = include_str!("../queries/bgwriter_post_130000.sql");
 const BGWRITER_POST_170000: &str = include_str!("../queries/bgwriter_post_170000.sql");
+// Databases (U2). Version-independent 13+ (pg_database/has_database_privilege
+// are stable across the whole supported range) — no post_NNNNNN variant.
+const DATABASES: &str = include_str!("../queries/databases.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -146,6 +153,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             indexes: INDEXES,
             db_stats_reset: DB_STATS_RESET,
             bgwriter,
+            databases: DATABASES,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -167,6 +175,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             indexes: INDEXES,
             db_stats_reset: DB_STATS_RESET,
             bgwriter,
+            databases: DATABASES,
         })
     } else {
         Err(format!(
@@ -336,6 +345,16 @@ mod tests {
             assert!(!q.bgwriter.contains("pg_stat_checkpointer"));
             assert!(q.bgwriter.contains("checkpoints_timed"));
             assert!(q.bgwriter.contains("buffers_backend"));
+        }
+    }
+
+    #[test]
+    fn databases_query_serves_pg13_and_up_with_conventions() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.databases.contains("pg_database"));
+            assert!(q.databases.contains("datallowconn"));
+            assert!(q.databases.contains("has_database_privilege"));
         }
     }
 

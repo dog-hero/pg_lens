@@ -300,6 +300,10 @@ fn picker_entries(services: Vec<ServiceSummary>) -> Vec<PickerEntry> {
 /// changes into it, `serve` just keeps it alive. `schema_refresh_rx` is the
 /// force-recollection signal (a bumped counter): Fase S3 wires the TUI's `R`
 /// key to its sender — until then callers just keep the sender alive.
+/// `db_switch_rx` is U2's database-picker channel (`d` in the TUI); `serve`
+/// and `--mock` have no picker, so they simply drop it (the poller never
+/// resolves that branch of its select, per `poller::wait_db_switch`'s
+/// dropped-sender contract) — real switching is TUI-only for now.
 fn spawn_poller(
     conn: Option<Resolved>,
     interval_rx: watch::Receiver<Duration>,
@@ -307,10 +311,13 @@ fn spawn_poller(
     schema_refresh_rx: watch::Receiver<u64>,
     admin_rx: mpsc::Receiver<AdminCommand>,
     shutdown_rx: watch::Receiver<bool>,
+    db_switch_rx: mpsc::Receiver<String>,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, String, JoinHandle<()>) {
     match conn {
         // The mock has no DB queries to cancel on shutdown — a already-done
-        // handle keeps the caller's await uniform.
+        // handle keeps the caller's await uniform. `db_switch_rx` is simply
+        // dropped here: mock mode never simulates a real reconnect (see
+        // `app::handle_db_picker_key`'s "mock mode" toast).
         None => (
             pg_lens_core::poller::spawn_mock(interval_rx, schema_refresh_rx, admin_rx),
             "mock".to_string(),
@@ -321,7 +328,14 @@ fn spawn_poller(
             // host and user, never the password. When the resolution came
             // with a password_cmd, the poller re-runs it per (re)connection.
             let label = resolved.label.to_string();
-            let history_path = history_file_path(&resolved.config);
+            // `pg_lens_core` never reads env/XDG itself, so the per-database
+            // history path is computed HERE and injected as a closure the
+            // poller can re-call on a database switch (U2) — `None` uses the
+            // base config's own dbname (the classic, pre-U2 path), `Some(db)`
+            // overrides it with the newly picked database.
+            let base_config = resolved.config.clone();
+            let history_path_fn: pg_lens_core::poller::HistoryPathFn =
+                Arc::new(move |db: Option<&str>| history_file_path(&base_config, db));
             let (snapshots, handle) = pg_lens_core::poller::spawn(
                 resolved.config,
                 resolved.password_source,
@@ -329,8 +343,9 @@ fn spawn_poller(
                 schema_interval,
                 schema_refresh_rx,
                 admin_rx,
-                history_path,
+                Some(history_path_fn),
                 shutdown_rx,
+                db_switch_rx,
             );
             (snapshots, label, handle)
         }
@@ -353,9 +368,17 @@ async fn shutdown_poller(shutdown_tx: &watch::Sender<bool>, handle: JoinHandle<(
 
 /// Where to persist this connection's history ring: `<state>/pg_lens/`
 /// (`$XDG_STATE_HOME`, else `$HOME/.local/state`) with a per-target filename
-/// so distinct servers keep distinct series. `None` when no state directory
-/// can be derived — persistence is then simply off (in-memory only).
-fn history_file_path(config: &pg_lens_core::tokio_postgres::Config) -> Option<PathBuf> {
+/// so distinct servers (and, per U2, distinct DATABASES on the same server)
+/// keep distinct series. `None` when no state directory can be derived —
+/// persistence is then simply off (in-memory only). `db_override` is U2's
+/// hook: `None` uses `config`'s own dbname (the classic path, computed once
+/// at the first connection); `Some(db)` names the database explicitly — used
+/// after a database-picker switch, when the connection is about to reconnect
+/// to `db` but `config` itself has not been updated yet.
+fn history_file_path(
+    config: &pg_lens_core::tokio_postgres::Config,
+    db_override: Option<&str>,
+) -> Option<PathBuf> {
     let state_dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| {
@@ -365,13 +388,14 @@ fn history_file_path(config: &pg_lens_core::tokio_postgres::Config) -> Option<Pa
     Some(
         state_dir
             .join("pg_lens")
-            .join(format!("history-{}.jsonl", history_key(config))),
+            .join(format!("history-{}.jsonl", history_key(config, db_override))),
     )
 }
 
 /// A stable, filesystem-safe key for one connection target (host_port_db),
-/// so `pg_lens` against different servers doesn't cross-contaminate history.
-fn history_key(config: &pg_lens_core::tokio_postgres::Config) -> String {
+/// so `pg_lens` against different servers/databases doesn't cross-contaminate
+/// history. See [`history_file_path`] for `db_override`.
+fn history_key(config: &pg_lens_core::tokio_postgres::Config, db_override: Option<&str>) -> String {
     use pg_lens_core::tokio_postgres::config::Host;
     let host = config
         .get_hosts()
@@ -382,10 +406,12 @@ fn history_key(config: &pg_lens_core::tokio_postgres::Config) -> String {
         })
         .unwrap_or_else(|| "localhost".to_string());
     let port = config.get_ports().first().copied().unwrap_or(5432);
-    let db = config
-        .get_dbname()
-        .or_else(|| config.get_user())
-        .unwrap_or("postgres");
+    let db = db_override.unwrap_or_else(|| {
+        config
+            .get_dbname()
+            .or_else(|| config.get_user())
+            .unwrap_or("postgres")
+    });
     format!("{host}_{port}_{db}")
         .chars()
         .map(|c| {
@@ -488,6 +514,11 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
     // poller channels the TUI uses.
     let (admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // U2's database picker is TUI-only for now (see ROADMAP): `serve` has no
+    // sender for this channel, so it is dropped right here — the poller's
+    // `wait_db_switch` branch of its select then never resolves again,
+    // exactly like an admin/interval sender no frontend wired up.
+    let (_db_switch_tx, db_switch_rx) = mpsc::channel::<String>(1);
     let (snapshots, label, poller_handle) = spawn_poller(
         resolved,
         interval_rx,
@@ -495,6 +526,7 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
         schema_refresh_rx,
         admin_rx,
         shutdown_rx,
+        db_switch_rx,
     );
 
     let router = pg_lens_web::router(snapshots, schema_refresh_tx, admin_tx, token);
@@ -550,10 +582,17 @@ async fn run(
     // the poller (sole owner of the DB client) executes them. Message
     // passing only, like every other TUI↔poller conversation.
     let (admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
+    // U2's database picker (`d`): update() queues at most one pending switch
+    // in `app.pending_db_switch`; the loop below forwards it to the poller,
+    // which reconnects with a different `dbname` (PostgreSQL cannot switch
+    // databases in-session). `--mock` never sends here (see
+    // `app::handle_db_picker_key`'s toast).
+    let (db_switch_tx, db_switch_rx) = mpsc::channel::<String>(4);
     // Shutdown signal: on quit we set this, and wait for the poller to cancel
     // its in-flight query (so a heavy bloat estimate does not keep running
     // server-side) before the runtime tears down.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    app.is_mock = conn_args.mock;
     let mut poller_handle: Option<JoinHandle<()>> = None;
     // Picker mode enters the loop with NO poller: the channels above exist
     // as usual, but their receivers are parked here until the user picks an
@@ -565,6 +604,7 @@ async fn run(
         watch::Receiver<u64>,
         mpsc::Receiver<AdminCommand>,
         watch::Receiver<bool>,
+        mpsc::Receiver<String>,
     )> = None;
     match startup {
         Startup::Connect(conn) => {
@@ -575,6 +615,7 @@ async fn run(
                 schema_refresh_rx,
                 admin_rx,
                 shutdown_rx,
+                db_switch_rx,
             );
             poller_handle = Some(handle);
             app.host = label;
@@ -587,7 +628,7 @@ async fn run(
         }
         Startup::Picker(entries) => {
             app.picker = Some(PickerState::new(entries));
-            parked_rx = Some((interval_rx, schema_refresh_rx, admin_rx, shutdown_rx));
+            parked_rx = Some((interval_rx, schema_refresh_rx, admin_rx, shutdown_rx, db_switch_rx));
         }
     }
 
@@ -628,6 +669,17 @@ async fn run(
         // Confirmed admin commands (the modal's `y`) go to the poller task,
         // which executes them and reports back inside the next snapshot.
         drain_admin(&mut app, &admin_tx);
+        // U2: a database picked in `d`'s overlay goes to the poller, which
+        // reconnects with that dbname. `try_send` (never blocking the UI
+        // loop) is safe here even at capacity 4 — the channel is only ever
+        // fed by deliberate, infrequent user selections.
+        if let Some(name) = app.pending_db_switch.take()
+            && db_switch_tx.try_send(name.clone()).is_err()
+        {
+            // Full or closed channel: put it back for the next pass (closed
+            // just means the poller is gone — the loop is about to end).
+            app.pending_db_switch = Some(name);
+        }
 
         // Lazy poller spawn (picker mode): the first pass after Enter sees
         // `app.picked` plus the parked receivers and starts the exact same
@@ -638,7 +690,8 @@ async fn run(
         // Connection failures are NOT errors here: they surface as
         // `PollerStatus::Error` on the splash, retrying with backoff.
         if let Some(entry) = app.picked.clone()
-            && let Some((interval_rx, schema_refresh_rx, admin_rx, shutdown_rx)) = parked_rx.take()
+            && let Some((interval_rx, schema_refresh_rx, admin_rx, shutdown_rx, db_switch_rx)) =
+                parked_rx.take()
         {
             // Re-resolve with the chosen service (or none, for the default
             // entry). The file was readable moments ago at trigger time; if
@@ -656,6 +709,7 @@ async fn run(
                 schema_refresh_rx,
                 admin_rx,
                 shutdown_rx,
+                db_switch_rx,
             );
             poller_handle = Some(handle);
             update(&mut app, Action::HostLabel(label));
@@ -699,6 +753,49 @@ mod tests {
                 .expect("chmod");
         }
         f.into_temp_path()
+    }
+
+    // --- U2: per-database history key recomputation --------------------------
+
+    /// Without an override, the key follows the config's own dbname (the
+    /// classic pre-U2 behavior) — this is the `None` call `run()` makes once
+    /// at the first session.
+    #[test]
+    fn history_key_uses_the_configs_own_dbname_with_no_override() {
+        let config: pg_lens_core::tokio_postgres::Config =
+            "host=db.internal port=5433 dbname=shop user=ro".parse().expect("dsn");
+        assert_eq!(history_key(&config, None), "db_internal_5433_shop");
+    }
+
+    /// A database switch (U2's `d` picker) recomputes the SAME host/port key
+    /// but with the newly picked database — `config` itself has not been
+    /// mutated with the new dbname yet at the point `run()` calls this, which
+    /// is exactly why the override exists instead of just re-reading `config`.
+    #[test]
+    fn history_key_override_replaces_only_the_database_component() {
+        let config: pg_lens_core::tokio_postgres::Config =
+            "host=db.internal port=5433 dbname=shop user=ro".parse().expect("dsn");
+        assert_eq!(
+            history_key(&config, Some("warehouse")),
+            "db_internal_5433_warehouse"
+        );
+        // Switching back is symmetric — no state leaks between the two keys.
+        assert_ne!(
+            history_key(&config, Some("warehouse")),
+            history_key(&config, None)
+        );
+    }
+
+    /// No dbname in the config and no override: falls back to the user, then
+    /// "postgres" — unchanged from the pre-U2 behavior.
+    #[test]
+    fn history_key_falls_back_to_user_then_postgres() {
+        let with_user: pg_lens_core::tokio_postgres::Config =
+            "host=localhost user=monitor".parse().expect("dsn");
+        assert_eq!(history_key(&with_user, None), "localhost_5432_monitor");
+
+        let bare: pg_lens_core::tokio_postgres::Config = "host=localhost".parse().expect("dsn");
+        assert_eq!(history_key(&bare, None), "localhost_5432_postgres");
     }
 
     const TWO_SERVICES: &str = r#"

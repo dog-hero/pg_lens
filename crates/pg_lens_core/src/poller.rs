@@ -19,6 +19,7 @@
 //! This module is frontend-agnostic: it knows nothing about terminal
 //! libraries or about any frontend's internal message types.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,13 +31,24 @@ use crate::history::{DEFAULT_CAP, HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::history_store::HistoryStore;
 use crate::index_advisor::{self, IndexCatalogRow};
 use crate::models::{
-    AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats, DbSnapshot,
-    IndexRow, PollerStatus, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus,
-    ServerVitals, StatementRow, StatementsSnapshot, StatementsStatus, VacuumClusterAge,
-    VacuumProgressRow, VacuumTableRow,
+    AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats, DatabaseRow,
+    DbSnapshot, IndexRow, PollerStatus, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot,
+    SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot, StatementsStatus,
+    VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
 };
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
+
+/// Recomputes the on-disk history file path for a given database name (U2:
+/// the poller reconnects to a different `dbname`, and history is
+/// per-database — see `SessionEnd::SwitchDatabase`). `None` = derive the
+/// path from the base connection's own dbname (the classic, pre-U2
+/// behavior, computed the very first time a session starts); `Some(db)` = a
+/// switch just happened, so use `db` instead. Injected by the frontend
+/// rather than a plain path: `pg_lens_core` never reads `std::env`/XDG
+/// itself (see `main.rs::history_file_path`), and only the frontend knows
+/// how to derive a state directory.
+pub type HistoryPathFn = Arc<dyn Fn(Option<&str>) -> Option<PathBuf> + Send + Sync>;
 
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
@@ -127,6 +139,17 @@ impl SchemaState {
             stats_reset_epoch_secs: collection.stats_reset_epoch_secs,
             status,
         }));
+    }
+
+    /// U2: drops the collection entirely (no "keep the last good data" —
+    /// unlike a poll error, a database switch means the OLD collection
+    /// describes a different database's objects, and showing it under the
+    /// new database's name would be actively misleading). `interval` and
+    /// `refresh_rx` are untouched: the cadence and the `R` channel are
+    /// connection-scoped, not database-scoped.
+    fn reset(&mut self) {
+        self.last_attempt = None;
+        self.current = None;
     }
 
     /// Stores a failed collection: the last good data (and its original
@@ -282,6 +305,19 @@ async fn wait_shutdown(shutdown_rx: &mut watch::Receiver<bool>) {
     let _ = shutdown_rx.wait_for(|&stop| stop).await;
 }
 
+/// Resolves once the frontend requests a different database (U2's database
+/// picker, `d` in the TUI) — returns the desired `dbname`. A closed channel
+/// (no frontend wired one up, e.g. `--mock`/`serve` today) never resolves
+/// again after the one `None`, so the poller keeps its current session
+/// indefinitely — same "no busy loop on a dropped sender" contract as
+/// [`wait_shutdown`] and [`wait_interval`].
+async fn wait_db_switch(db_switch_rx: &mut mpsc::Receiver<String>) -> String {
+    match db_switch_rx.recv().await {
+        Some(name) => name,
+        None => std::future::pending().await,
+    }
+}
+
 /// Per-statement safety ceiling, applied as `SET LOCAL` at the start of every
 /// query transaction. A monitoring tool must never run an unbounded query
 /// against a production server: a pathological plan (e.g. the on-demand bloat
@@ -377,6 +413,19 @@ async fn execute_admin(client: &mut Client, q: &queries::QuerySet, cmd: AdminCom
 /// into `last_admin_action` on every subsequent snapshot, and re-polls
 /// immediately. Frontends without admin actions just drop the sender.
 ///
+/// `db_switch_rx` is U2's frontend→poller database-switch channel: one
+/// dbname per request (the TUI's `d` picker). The poller ends the current
+/// session (cancelling any in-flight query, exactly like shutdown) and
+/// reconnects with `dbname` swapped in — PostgreSQL cannot switch databases
+/// in-session. Per-database state (history, Schema/Query Lens) resets; see
+/// [`SessionEnd::SwitchDatabase`]. Frontends without the picker (`--mock`,
+/// `serve` today) just drop the sender.
+///
+/// `history_path_fn`, when present, is called with `None` once at the first
+/// session and with `Some(dbname)` on every subsequent database switch, to
+/// (re)derive the on-disk history file path for whichever database is now
+/// connected (see [`HistoryPathFn`]).
+///
 /// The channel starts pre-filled with a [`DbSnapshot::connecting`] value.
 /// The task ends on its own once every receiver has been dropped.
 ///
@@ -391,8 +440,9 @@ pub fn spawn(
     schema_interval: Duration,
     schema_refresh_rx: watch::Receiver<u64>,
     admin_rx: mpsc::Receiver<AdminCommand>,
-    history_path: Option<std::path::PathBuf>,
+    history_path_fn: Option<HistoryPathFn>,
     shutdown_rx: watch::Receiver<bool>,
+    db_switch_rx: mpsc::Receiver<String>,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, JoinHandle<()>) {
     let (tx, rx) = watch::channel(Arc::new(DbSnapshot::connecting()));
     let schema = SchemaState::new(schema_interval, schema_refresh_rx);
@@ -403,8 +453,9 @@ pub fn spawn(
         schema,
         admin_rx,
         tx,
-        history_path,
+        history_path_fn,
         shutdown_rx,
+        db_switch_rx,
     ));
     (rx, handle)
 }
@@ -412,14 +463,15 @@ pub fn spawn(
 /// Outer reconnect loop: one [`session`] per connection, backoff in between.
 #[allow(clippy::too_many_arguments)] // poller-internal plumbing, one call site
 async fn run(
-    config: tokio_postgres::Config,
+    mut config: tokio_postgres::Config,
     password_source: Option<PasswordSource>,
     mut interval_rx: watch::Receiver<Duration>,
     mut schema: SchemaState,
     mut admin_rx: mpsc::Receiver<AdminCommand>,
     tx: watch::Sender<Arc<DbSnapshot>>,
-    history_path: Option<std::path::PathBuf>,
+    history_path_fn: Option<HistoryPathFn>,
     mut shutdown_rx: watch::Receiver<bool>,
+    mut db_switch_rx: mpsc::Receiver<String>,
 ) {
     let mut backoff = BACKOFF_INITIAL;
     // Survives reconnects so the sparklines don't reset on a blip.
@@ -429,8 +481,13 @@ async fn run(
     // Persistence (best-effort): seed the ring from disk so the chart resumes
     // after a restart, and append/compact as new points arrive. `None`
     // (e.g. --mock, or no derivable state dir) simply keeps everything
-    // in-memory as before.
-    let store = history_path.map(HistoryStore::new);
+    // in-memory as before. `None` here (the base config's own dbname) is the
+    // classic pre-U2 call; a later database switch recomputes it with
+    // `Some(dbname)` instead (see `SessionEnd::SwitchDatabase` below).
+    let mut store = history_path_fn
+        .as_ref()
+        .and_then(|f| f(None))
+        .map(HistoryStore::new);
     if let Some(store) = &store {
         for point in store.load(DEFAULT_CAP) {
             history.push(point);
@@ -461,10 +518,36 @@ async fn run(
             store.as_ref(),
             &mut appends_since_compact,
             &mut shutdown_rx,
+            &mut db_switch_rx,
         )
         .await;
         match end {
             SessionEnd::Closed => return,
+            SessionEnd::SwitchDatabase(name) => {
+                // Deliberate user action, not a fault: reconnect immediately
+                // (no backoff), with `dbname` swapped in the base config so
+                // every future reconnect (including error retries) stays on
+                // the newly picked database until the next switch.
+                config.dbname(&name);
+                // Per-database state must not carry over: the Schema/Query
+                // Lens and history all describe THIS database's objects and
+                // activity — showing the old database's data under the new
+                // name would be actively misleading, not merely stale.
+                history = SnapshotHistory::default();
+                appends_since_compact = 0;
+                schema.reset();
+                statements = StatementsState::new();
+                last_admin = None;
+                store = history_path_fn
+                    .as_ref()
+                    .and_then(|f| f(Some(&name)))
+                    .map(HistoryStore::new);
+                if let Some(store) = &store {
+                    for point in store.load(DEFAULT_CAP) {
+                        history.push(point);
+                    }
+                }
+            }
             SessionEnd::Error(msg) => {
                 if polled_ok {
                     // The session worked before failing: start backoff fresh.
@@ -492,6 +575,9 @@ enum SessionEnd {
     Closed,
     /// Connect/prepare/query failure — reconnect after backoff.
     Error(String),
+    /// U2: the frontend requested a different database — reconnect
+    /// immediately (no backoff) with this dbname.
+    SwitchDatabase(String),
 }
 
 /// One connection worth of polling; ensures the spawned `Connection` task is
@@ -515,6 +601,7 @@ async fn session(
     store: Option<&HistoryStore>,
     appends_since_compact: &mut usize,
     shutdown_rx: &mut watch::Receiver<bool>,
+    db_switch_rx: &mut mpsc::Receiver<String>,
 ) -> SessionEnd {
     // The base config is never mutated: the resolved password goes into a
     // per-attempt clone (and is dropped with it).
@@ -532,19 +619,25 @@ async fn session(
         Ok(pair) => pair,
         Err(e) => return SessionEnd::Error(format!("connect failed: {e}")),
     };
-    // Captured up front (owned — no borrow held), so the shutdown branch can
-    // cancel whatever query poll_loop has in flight without conflicting with
-    // its `&mut client`.
+    // Captured up front (owned — no borrow held), so the shutdown/switch
+    // branches can cancel whatever query poll_loop has in flight without
+    // conflicting with its `&mut client`.
     let cancel = client.cancel_token();
-    // Race the poll loop against a shutdown request. On shutdown, send a
-    // CancelRequest so a running server-side query (notably the heavy bloat
-    // estimate) stops immediately instead of lingering until it finishes or
-    // hits statement_timeout — the socket dropping alone does NOT cancel it.
+    // Race the poll loop against a shutdown request AND a database-switch
+    // request. Either way, send a CancelRequest so a running server-side
+    // query (notably the heavy bloat estimate) stops immediately instead of
+    // lingering until it finishes or hits statement_timeout — the socket
+    // dropping alone does NOT cancel it. `biased`: shutdown wins over a
+    // switch request racing it at the exact same instant.
     let end = tokio::select! {
         biased;
         _ = wait_shutdown(shutdown_rx) => {
             let _ = cancel.cancel_query(NoTls).await;
             SessionEnd::Closed
+        }
+        name = wait_db_switch(db_switch_rx) => {
+            let _ = cancel.cancel_query(NoTls).await;
+            SessionEnd::SwitchDatabase(name)
         }
         end = poll_loop(
             &mut client,
@@ -881,6 +974,10 @@ async fn poll_once(
     // `collect_vacuum_progress`.
     let vacuum_progress = collect_vacuum_progress(client, q).await;
 
+    // Databases (U2) are best-effort on the fast tick too — the picker
+    // simply has nothing to show this tick on any failure.
+    let databases = collect_databases(client, q).await;
+
     let now = Instant::now();
     let xact_total = info.xact_commit + info.xact_rollback;
     let cumulative_ratio = hit_ratio(info.blks_hit, info.blks_read);
@@ -966,6 +1063,7 @@ async fn poll_once(
         replication_slots,
         vacuum_progress,
         checkpointer: Some(checkpointer_stats),
+        databases,
         status: PollerStatus::Ok,
     })
 }
@@ -1208,6 +1306,21 @@ async fn collect_vacuum_progress(
     Some(out)
 }
 
+/// Best-effort database list (U2, `queries/databases.sql`), refreshed every
+/// fast tick. Returns `None` on ANY query or parse failure — the picker
+/// simply has nothing to show this tick, same contract as
+/// [`collect_vacuum_progress`]; it must never fail the poll.
+async fn collect_databases(client: &mut Client, q: &queries::QuerySet) -> Option<Vec<DatabaseRow>> {
+    let tx = begin_read(client).await.ok()?;
+    let rows = tx.query(q.databases, &[]).await.ok()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        out.push(db::database_from_row(row).ok()?);
+    }
+    tx.commit().await.ok()?;
+    Some(out)
+}
+
 /// Turns a tokio-postgres error into the richest message available. The raw
 /// `Display` is frequently just "db error", which hides the actual server
 /// message — pull it (and the SQLSTATE) out of the `DbError` when present.
@@ -1383,6 +1496,14 @@ mod tests {
         rx
     }
 
+    /// A database-switch channel whose sender stays alive (leaked) — the
+    /// shape every non-switch test wants: open but silent (U2).
+    fn db_switch_rx() -> mpsc::Receiver<String> {
+        let (tx, rx) = mpsc::channel(4);
+        std::mem::forget(tx);
+        rx
+    }
+
     fn spawn_mock_default(ms: u64) -> watch::Receiver<Arc<DbSnapshot>> {
         spawn_mock(interval_rx(ms), refresh_rx(), admin_rx())
     }
@@ -1486,6 +1607,7 @@ mod tests {
             admin_rx(),
             None,
             no_shutdown(),
+            db_switch_rx(),
         );
 
         assert!(matches!(rx.borrow().status, PollerStatus::Connecting));
@@ -1523,6 +1645,7 @@ mod tests {
             admin_rx(),
             None,
             no_shutdown(),
+            db_switch_rx(),
         );
 
         tokio::time::timeout(Duration::from_secs(5), rx.changed())
@@ -1566,6 +1689,7 @@ mod tests {
             admin_rx(),
             None,
             no_shutdown(),
+            db_switch_rx(),
         );
 
         // First attempt at ~0s, second after the 1s backoff. Poll the file
@@ -1593,6 +1717,27 @@ mod tests {
     fn hit_ratio_guards_division_by_zero() {
         assert_eq!(hit_ratio(0, 0), 0.0);
         assert_eq!(hit_ratio(90, 10), 0.9);
+    }
+
+    // --- U2: database switch channel -----------------------------------------
+
+    /// The happy path: a sent dbname resolves the wait immediately.
+    #[tokio::test]
+    async fn wait_db_switch_resolves_with_the_sent_name() {
+        let (tx, mut rx) = mpsc::channel::<String>(1);
+        tx.send("warehouse".to_string()).await.expect("receiver alive");
+        assert_eq!(wait_db_switch(&mut rx).await, "warehouse");
+    }
+
+    /// A dropped sender (no picker wired up — `--mock`/`serve` today) must
+    /// never resolve again, so it can never win a `tokio::select!` against
+    /// the real work — same "no busy loop" contract as `wait_shutdown`.
+    #[tokio::test]
+    async fn wait_db_switch_never_resolves_after_the_sender_drops() {
+        let (tx, mut rx) = mpsc::channel::<String>(1);
+        drop(tx);
+        let outcome = tokio::time::timeout(Duration::from_millis(50), wait_db_switch(&mut rx)).await;
+        assert!(outcome.is_err(), "must stay pending, not resolve");
     }
 
     // --- Fase S1: slow schema cadence ---------------------------------------
@@ -1696,6 +1841,34 @@ mod tests {
             "bloat carried forward"
         );
         assert!(matches!(after.status, SchemaStatus::Ok));
+    }
+
+    /// U2: unlike a poll error, a database switch must DROP the last
+    /// collection entirely — the old data described a different database's
+    /// objects, so carrying it forward under the new name would mislead.
+    #[test]
+    fn schema_state_reset_drops_the_last_collection() {
+        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx());
+        let good = SchemaSnapshot::mock();
+        schema.store(SchemaCollection {
+            tables: good.tables.clone(),
+            vacuum_cluster_age: good.vacuum_cluster_age.clone(),
+            vacuum_tables: good.vacuum_tables.clone(),
+            indexes: good.indexes.clone(),
+            stats_reset_epoch_secs: good.stats_reset_epoch_secs,
+            bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
+        });
+        assert!(schema.current.is_some(), "collected before the switch");
+        let now = Instant::now();
+        schema.last_attempt = Some(now);
+
+        schema.reset();
+
+        assert!(schema.current.is_none(), "old database's data must not survive");
+        assert!(schema.last_attempt.is_none(), "cadence timer restarts too");
+        // The next tick is due immediately (no need to wait out the old
+        // database's cadence before the new one gets its first collection).
+        assert_eq!(schema.due(now), Some(false));
     }
 
     /// A failed slow collection keeps the last good tables (and their

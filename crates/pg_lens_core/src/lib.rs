@@ -23,7 +23,7 @@ pub use history::{HistoryPoint, SnapshotHistory};
 pub use index_advisor::{IndexCatalogRow, classify as classify_indexes};
 pub use models::{
     ActivityRow, AdminActionResult, AdminCommand, AdminKind, AdminOutcome, BloatRow,
-    CheckpointerStats, DbSnapshot, IndexFinding, IndexRow, LockRow, PollerStatus,
+    CheckpointerStats, DatabaseRow, DbSnapshot, IndexFinding, IndexRow, LockRow, PollerStatus,
     ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus, ServerVitals,
     StatementRow, StatementsSnapshot, StatementsStatus, TableStatRow, VacuumClusterAge,
     VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow,

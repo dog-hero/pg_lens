@@ -2,6 +2,7 @@
 
 pub mod format;
 mod confirm;
+mod db_picker;
 mod index_lens;
 mod macro_lens;
 mod micro_lens;
@@ -79,9 +80,13 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         Tab::QueryLens => query_lens::draw(app, frame, body_area),
     }
     draw_statusbar(app, frame, statusbar_area);
-    // The admin confirmation modal draws over everything else, last.
+    // Overlays draw over everything else, last — mutually exclusive by
+    // construction (`app::handle_key` never lets both be `Some` at once).
     if app.confirm.is_some() {
         confirm::draw(app, frame);
+    }
+    if app.db_picker.is_some() {
+        db_picker::draw(app, frame);
     }
 }
 
@@ -117,11 +122,17 @@ fn draw_status_banner(app: &App, frame: &mut Frame, area: Rect) {
 
 fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
     let vitals = &app.snapshot.vitals;
+    // `db {vitals.database}` names the ACTUAL connected database — distinct
+    // from `app.host` (the connection label: user@host, never changes on a
+    // database switch). U2's picker reconnects to a different `dbname`, so
+    // this is the one header field that must visibly follow it — confirming
+    // a switch landed without needing to open the Schema Lens.
     let header = Line::from(format!(
-        " pg_lens v{} \u{2502} PG {} @ {} \u{2502} up {} \u{2502} {}/{} conns",
+        " pg_lens v{} \u{2502} PG {} @ {} \u{2502} db {} \u{2502} up {} \u{2502} {}/{} conns",
         env!("CARGO_PKG_VERSION"),
         vitals.server_version,
         app.host,
+        vitals.database,
         format::human_uptime(vitals.uptime_secs),
         vitals.connections_total,
         vitals.max_connections,
@@ -295,7 +306,6 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         format!(": refresh={:.1}s", app.refresh_interval.as_secs_f64()),
         true,
     );
-    spans.push(sep.clone());
     // While paused the staleness turns yellow: it grows on purpose (the
     // freeze holds `last_snapshot_at` still) and doubles as the "how old is
     // this frozen picture" readout next to the header's PAUSED indicator.
@@ -304,7 +314,26 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         style::label_style()
     };
-    spans.push(Span::styled(format!("data: {staleness}"), staleness_style));
+    let data_span = Span::styled(format!("data: {staleness}"), staleness_style);
+    // U2's `d: database` hint works from any lens, but the tight lenses
+    // (Micro/Schema/Query, already carrying filter/admin/sort/R hints) can
+    // run out of the 120-col budget — rather than let ratatui silently clip
+    // existing content, only add it when it actually fits.
+    let [dk, dd] = style::hint("d", ": database");
+    let fits = Line::from(spans.clone()).width()
+        + sep.width()
+        + dk.width()
+        + dd.width()
+        + sep.width()
+        + data_span.width()
+        <= area.width as usize;
+    if fits {
+        spans.push(sep.clone());
+        spans.push(dk);
+        spans.push(dd);
+    }
+    spans.push(sep);
+    spans.push(data_span);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -867,6 +896,45 @@ mod tests {
         assert!(screen.contains(&format!("Terminate backend PID {pid}")));
         assert!(screen.contains("The connection will be killed."));
         assert!(screen.contains("y: confirm"));
+    }
+
+    // --- in-session database picker (U2) --------------------------------------
+
+    #[test]
+    fn db_picker_overlay_renders_the_mock_list_with_the_current_marker() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Char('d'));
+        let screen = render(&mut app);
+        assert!(screen.contains("select a database"), "{screen}");
+        assert!(screen.contains("shop"), "{screen}");
+        assert!(screen.contains("warehouse"), "{screen}");
+        assert!(screen.contains("analytics"), "{screen}");
+        assert!(screen.contains("(current)"), "current-db marker: {screen}");
+        // The best-effort size dash for the one database without a readable
+        // size (see `DbSnapshot::mock`'s `analytics` entry).
+        assert!(screen.contains('\u{2014}'), "size dash: {screen}");
+        assert!(screen.contains("Enter: connect"));
+        assert!(screen.contains("Esc: close"));
+        // The dashboard underneath is still there (it's an overlay, not a
+        // full-screen mode like the startup picker).
+        assert!(screen.contains("Macro Lens"), "{screen}");
+    }
+
+    #[test]
+    fn db_picker_overlay_fits_a_small_terminal() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Char('d'));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("select a database"), "{screen}");
     }
 
     #[test]
