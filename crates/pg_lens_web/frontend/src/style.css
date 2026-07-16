@@ -786,6 +786,71 @@ table#statements {
   color: var(--warn);
 }
 
+/* U3: the collapsible complete waits list under the activity table (the
+   strip above only shows the top few). Same Lock/IO severity tint. */
+.waits-detail {
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+
+.waits-detail summary {
+  cursor: pointer;
+  color: var(--fg-dim);
+  user-select: none;
+}
+
+.waits-detail summary:hover {
+  color: var(--fg);
+}
+
+.waits-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.waits-list .wait-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0;
+}
+
+.waits-list .wait-row-label {
+  min-width: 260px;
+  white-space: nowrap;
+}
+
+.waits-list .wait-row-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--bg-raised);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.waits-list .wait-row-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--fg-dim);
+}
+
+.waits-list .wait-lock .wait-row-bar-fill {
+  background: var(--bad);
+}
+
+.waits-list .wait-lock .wait-row-label {
+  color: var(--bad);
+}
+
+.waits-list .wait-io .wait-row-bar-fill {
+  background: var(--warn);
+}
+
+.waits-list .wait-io .wait-row-label {
+  color: var(--warn);
+}
+
 .empty-row td {
   text-align: center;
   color: var(--fg-dim);

@@ -538,6 +538,13 @@ impl SchemaSnapshot {
             max_age_xids: 182_400_000 + churn.max(0),
             worst_database: "shop".to_string(),
         });
+        // U3: six rows (not just the three the old compact footer showed) so
+        // the Vacuum sub-view's worst-tables list has enough rows to demo
+        // j/k scrolling under `--mock`. `pgbench_branches` joins a real
+        // `tables` row (exercising the "last (auto)vacuum" join); the last
+        // two are synthetic (no `tables` partner), exercising the "no join"
+        // fallback the same way a table dropped from `table_stats`'s LIMIT
+        // would.
         let vacuum_tables = vec![
             VacuumTableRow {
                 schema: "public".to_string(),
@@ -552,6 +559,27 @@ impl SchemaSnapshot {
                 age_xids: 96_200_000,
                 n_dead_tup: 14_205 + jitter(seq, 20, 9_000) as i64,
                 n_live_tup: 500_000,
+            },
+            VacuumTableRow {
+                schema: "public".to_string(),
+                name: "pgbench_branches".to_string(),
+                age_xids: 61_500_000,
+                n_dead_tup: 88,
+                n_live_tup: 5,
+            },
+            VacuumTableRow {
+                schema: "public".to_string(),
+                name: "pgbench_history".to_string(),
+                age_xids: 58_900_000,
+                n_dead_tup: 2_014,
+                n_live_tup: 812_400,
+            },
+            VacuumTableRow {
+                schema: "audit".to_string(),
+                name: "login_events".to_string(),
+                age_xids: 50_100_000,
+                n_dead_tup: 512,
+                n_live_tup: 128_000,
             },
             VacuumTableRow {
                 schema: "audit".to_string(),

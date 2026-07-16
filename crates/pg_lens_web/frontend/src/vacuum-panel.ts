@@ -3,13 +3,15 @@
 // XID wraparound headline, the worst per-table ages with their dead-tuple
 // ratio, and any in-flight pg_stat_progress_vacuum row (a calm "no vacuum
 // running" in the common empty case).
+//
+// U3: unlike the TUI (which needed a `v` sub-view to make room), the web
+// panel already sits below the full Schema table with plenty of vertical
+// room, so it renders the COMPLETE worst-tables list (all
+// `VACUUM_TABLES_LIMIT` rows the query ships) — no toggle needed here.
 
 import type { SchemaSnapshot, VacuumProgressRow } from "./types";
 import { humanCount } from "./format";
 import { ageSeverity } from "./vacuum";
-
-/** Capped like the TUI's VACUUM_TABLE_ROWS, so the panel stays compact. */
-const WORST_TABLES_SHOWN = 3;
 
 function deadPct(dead: number, live: number): number {
   const total = dead + live;
@@ -55,7 +57,7 @@ export class VacuumPanel {
       this.tables.replaceChildren(li);
       return;
     }
-    const items = rows.slice(0, WORST_TABLES_SHOWN).map((t) => {
+    const items = rows.map((t) => {
       const sev = ageSeverity(t.age_xids);
       const li = document.createElement("li");
       li.className = sev ? `vacuum-table ${sev}` : "vacuum-table";

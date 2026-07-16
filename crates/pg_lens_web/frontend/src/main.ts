@@ -12,7 +12,7 @@ import { IndexAdvisor } from "./index-advisor";
 import { VacuumPanel } from "./vacuum-panel";
 import { StatementsLens } from "./statements";
 import { renderReplication } from "./replication";
-import { renderWaits } from "./waits";
+import { renderWaits, renderWaitsList } from "./waits";
 import {
   clearToken,
   openStream,
@@ -56,6 +56,9 @@ const table = new ActivityTable(
 );
 const vitalsContainer = el<HTMLElement>("vitals");
 const waitsStrip = el<HTMLDivElement>("waits-strip");
+const waitsDetail = el<HTMLDetailsElement>("waits-detail");
+const waitsDetailSummary = el<HTMLElement>("waits-detail-summary");
+const waitsList = el<HTMLUListElement>("waits-list");
 const replicationBody = el<HTMLElement>("replication");
 const replicationPlaceholder = el<HTMLParagraphElement>("replication-placeholder");
 const schemaLens = new SchemaLens(
@@ -169,6 +172,9 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   // subset — it answers "what is the server stuck on"), mirroring the
   // TUI's strip above the activity table.
   renderWaits(waitsStrip, snapshot.activity);
+  // U3: the complete ranked list, collapsed under the activity table (the
+  // strip above only ever shows the top few).
+  renderWaitsList(waitsDetail, waitsDetailSummary, waitsList, snapshot.activity);
   table.update(snapshot.activity, snapshot.locks);
   schemaLens.update(snapshot.schema, snapshot.vitals.database);
   indexAdvisor.update(snapshot.schema, snapshot.vitals.database);

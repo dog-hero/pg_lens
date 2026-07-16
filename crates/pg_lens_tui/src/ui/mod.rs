@@ -25,7 +25,7 @@ use ratatui::{
     widgets::{Paragraph, Tabs},
 };
 
-use crate::app::{App, Tab};
+use crate::app::{App, SchemaView, Tab};
 
 /// Root layout: header / tabs / [status banner] / body / statusbar. The
 /// banner row collapses to zero height while the poller is healthy.
@@ -209,6 +209,18 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             None,
             false,
         ),
+        // U3: the Vacuum sub-view has its own cursor/row-count and no user
+        // sort mode of its own (fixed worst-first order) — same `None`
+        // sort_label convention as the Index/Replication Lenses.
+        Tab::SchemaLens if app.schema_view == SchemaView::Vacuum => (
+            app.vacuum_table_state.selected(),
+            app.snapshot
+                .schema
+                .as_deref()
+                .map_or(0, |s| s.vacuum_tables.len()),
+            None,
+            true,
+        ),
         Tab::SchemaLens => (
             app.schema_table_state.selected(),
             app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len()),
@@ -287,6 +299,12 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         push_hint(&mut spans, "Enter", ": detail".into(), true);
     }
+    // U3: `v` toggles the Schema Lens's Vacuum sub-view — always advertised
+    // there (the bar has room; unlike `w` below, this lens doesn't already
+    // carry a filter/admin block competing for the budget).
+    if app.active_tab == Tab::SchemaLens {
+        push_hint(&mut spans, "v", ": vacuum".into(), true);
+    }
     if let Some(sort_label) = sort_label {
         push_hint(&mut spans, "s", format!(": sort={sort_label}"), true);
     }
@@ -315,6 +333,25 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         style::label_style()
     };
     let data_span = Span::styled(format!("data: {staleness}"), staleness_style);
+    // U3: `w` opens the Micro Lens's full waits panel — "where width
+    // allows" (the PRD spec's own words): that lens already carries the
+    // filter/cancel/kill block, so only add it when it actually fits,
+    // same budget discipline as the `d` hint below.
+    if app.active_tab == Tab::MicroLens {
+        let [wk, wd] = style::hint("w", ": waits");
+        let fits = Line::from(spans.clone()).width()
+            + sep.width()
+            + wk.width()
+            + wd.width()
+            + sep.width()
+            + data_span.width()
+            <= area.width as usize;
+        if fits {
+            spans.push(sep.clone());
+            spans.push(wk);
+            spans.push(wd);
+        }
+    }
     // U2's `d: database` hint works from any lens, but the tight lenses
     // (Micro/Schema/Query, already carrying filter/admin/sort/R hints) can
     // run out of the 120-col budget — rather than let ratatui silently clip
@@ -495,25 +532,76 @@ mod tests {
     /// cluster headline, worst-tables list, and the mock's in-flight vacuum
     /// progress line.
     #[test]
-    fn schema_lens_renders_the_vacuum_section() {
+    fn schema_lens_renders_the_compact_vacuum_footer() {
         let mut app = App::new();
         app.active_tab = Tab::SchemaLens;
         let screen = render(&mut app);
-        assert!(screen.contains("Vacuum / wraparound"), "{screen}");
+        // U3: the Tables view keeps only the one-line headline + hint — the
+        // worst-tables list and progress moved to the `v` sub-view.
         assert!(screen.contains("wraparound:"), "{screen}");
         assert!(screen.contains("worst db: shop"), "{screen}");
-        // Worst per-table ages (mock: order_items has the oldest XID age).
-        assert!(screen.contains("public.order_items"), "{screen}");
-        assert!(screen.contains("dead"), "dead-tuple ratio shown: {screen}");
+        assert!(screen.contains("v: vacuum detail"), "{screen}");
+        assert!(!screen.contains("vacuuming order_items"), "{screen}");
+    }
+
+    /// U3: `v` toggles the full-height Vacuum sub-view — cluster headline,
+    /// the COMPLETE worst-tables list (mock: 6 rows, more than the old
+    /// 3-row compact footer ever showed), and the in-flight progress.
+    #[test]
+    fn schema_vacuum_view_renders_worst_tables_and_progress() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        press(&mut app, crossterm::event::KeyCode::Char('v'));
+        assert_eq!(app.schema_view, crate::app::SchemaView::Vacuum);
+        let screen = render(&mut app);
+        assert!(screen.contains("cluster wraparound:"), "{screen}");
+        assert!(screen.contains("worst db: shop"), "{screen}");
+        assert!(screen.contains("Worst tables by XID age"), "{screen}");
+        // Every mock row renders, not just the old compact footer's top 3.
+        for name in [
+            "public.order_items",
+            "public.pgbench_accounts",
+            "public.pgbench_branches",
+            "public.pgbench_history",
+            "audit.login_events",
+            "audit.raw_events",
+        ] {
+            assert!(screen.contains(name), "missing row {name}: {screen}");
+        }
+        assert!(screen.contains("Dead%"), "{screen}");
+        assert!(screen.contains("Last (auto)vacuum"), "{screen}");
         // The mock's one in-flight autovacuum, calmly shown mid-progress.
-        assert!(screen.contains("vacuuming order_items"), "{screen}");
+        assert!(screen.contains("vacuuming: order_items"), "{screen}");
         assert!(screen.contains("vacuuming heap"), "{screen}");
+        // `v` inert on `s` (no user sort mode in this sub-view).
+        assert!(!screen.contains("sort="), "{screen}");
+    }
+
+    /// `v` toggles back to the Tables view; `j`/`k` scroll the Vacuum
+    /// view's own cursor over its own row set, independent of the Tables
+    /// selection.
+    #[test]
+    fn schema_vacuum_view_toggles_and_scrolls_independently() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        press(&mut app, crossterm::event::KeyCode::Char('v'));
+        assert_eq!(app.vacuum_table_state.selected(), Some(0));
+        press(&mut app, crossterm::event::KeyCode::Char('j'));
+        assert_eq!(app.vacuum_table_state.selected(), Some(1));
+        // The Tables cursor never moved.
+        assert_eq!(app.schema_table_state.selected(), Some(0));
+
+        press(&mut app, crossterm::event::KeyCode::Char('v'));
+        assert_eq!(app.schema_view, crate::app::SchemaView::Tables);
+        let screen = render(&mut app);
+        assert!(!screen.contains("Worst tables by XID age"), "{screen}");
     }
 
     /// Below the yellow threshold the cluster headline renders un-alarming
     /// (no `!`/`!!` marker before "wraparound:"); past it, the marker and
-    /// severity color kick in. Also proves the calm "no vacuum running"
-    /// state when the collection succeeded but found nothing in flight.
+    /// severity color kick in (proven on the compact footer). The full
+    /// Vacuum view separately proves the calm "no vacuum running" state
+    /// when the collection succeeded but found nothing in flight.
     #[test]
     fn vacuum_section_reflects_severity_and_calm_progress_state() {
         use std::sync::Arc;
@@ -531,6 +619,10 @@ mod tests {
         crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
         let screen = render(&mut app);
         assert!(screen.contains("worst db: warehouse"), "{screen}");
+        assert!(screen.contains('!'), "bad-tier marker visible: {screen}");
+
+        press(&mut app, crossterm::event::KeyCode::Char('v'));
+        let screen = render(&mut app);
         assert!(screen.contains("no vacuum running"), "{screen}");
     }
 

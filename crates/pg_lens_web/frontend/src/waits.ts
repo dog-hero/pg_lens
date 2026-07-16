@@ -45,6 +45,50 @@ export function topWaits(activity: ActivityRow[]): WaitSummary {
 const TOP_N = 5;
 
 /**
+ * U3: the complete ranked wait list, rendered inside a `<details>` element
+ * under the activity table — mirrors the TUI's `w` panel: every distinct
+ * wait_event (not just the strip's top-5), each with its share of WAITING
+ * sessions and a bar proportional to the busiest wait. `details.hidden`
+ * follows the same "nothing waits" rule as the strip.
+ */
+export function renderWaitsList(
+  details: HTMLDetailsElement,
+  summaryEl: HTMLElement,
+  list: HTMLElement,
+  activity: ActivityRow[],
+): void {
+  const summary = topWaits(activity);
+  if (summary.ranked.length === 0) {
+    details.hidden = true;
+    list.replaceChildren();
+    return;
+  }
+  details.hidden = false;
+  summaryEl.textContent = `All waits (${summary.waiting}/${summary.total} waiting)`;
+  const maxCount = Math.max(...summary.ranked.map(([, count]) => count));
+  const items = summary.ranked.map(([wait, count]) => {
+    const pct = summary.waiting > 0 ? (100 * count) / summary.waiting : 0;
+    const barPct = maxCount > 0 ? (100 * count) / maxCount : 0;
+    const li = document.createElement("li");
+    li.classList.add("wait-row");
+    if (wait.startsWith("Lock:")) li.classList.add("wait-lock");
+    else if (wait.startsWith("IO:")) li.classList.add("wait-io");
+    const label = document.createElement("span");
+    label.className = "wait-row-label";
+    label.textContent = `${wait} ×${count} (${pct.toFixed(1)}%)`;
+    const bar = document.createElement("span");
+    bar.className = "wait-row-bar";
+    const fill = document.createElement("span");
+    fill.className = "wait-row-bar-fill";
+    fill.style.width = `${barPct}%`;
+    bar.append(fill);
+    li.append(label, bar);
+    return li;
+  });
+  list.replaceChildren(...items);
+}
+
+/**
  * Render the strip into `container`: waiting/total ratio plus the top
  * entries, Lock:* tinted red and IO:* yellow (mirrors the TUI's severity
  * colors). Hidden entirely when nothing waits.

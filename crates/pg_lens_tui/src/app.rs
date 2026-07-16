@@ -143,6 +143,33 @@ impl SchemaSortMode {
     }
 }
 
+/// Which sub-view of the Schema Lens is on screen (U3, `v` toggles). Mirrors
+/// U1's retired `SchemaView::{Tables,Indexes}` toggle in shape — a full-
+/// height sub-view instead of a squeezed footer — but this one stays INSIDE
+/// the Schema Lens: XID wraparound/vacuum debt is per-database schema
+/// health, not its own top-level lens the way the index advisor became.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SchemaView {
+    /// The per-table stats + estimated bloat list (the lens's default). The
+    /// vacuum/wraparound block shrinks to a one-line headline + hint here —
+    /// see `ui/schema_lens.rs::draw_vacuum_footer`.
+    #[default]
+    Tables,
+    /// Full-height: cluster wraparound headline, the COMPLETE worst-tables
+    /// list (all `VACUUM_TABLES_LIMIT` rows, scrollable via its own
+    /// `vacuum_table_state`), and the in-flight vacuum progress section.
+    Vacuum,
+}
+
+impl SchemaView {
+    pub fn next(self) -> Self {
+        match self {
+            SchemaView::Tables => SchemaView::Vacuum,
+            SchemaView::Vacuum => SchemaView::Tables,
+        }
+    }
+}
+
 /// Fixed severity order of one [`pg_lens_core::IndexFinding`] — lower sorts
 /// first. `Unused` (red) is the strongest, cheapest-to-verify claim;
 /// `DuplicatePrefix` (dim-yellow) the weakest. Shared by [`resort_indexes`]
@@ -228,6 +255,22 @@ pub fn find_table_bloat<'a>(
         .table_bloat
         .iter()
         .find(|b| b.schema == table.schema && b.name == table.name)
+}
+
+/// The `tables` row matching a Vacuum sub-view worst-table row, joined by
+/// (schema, name) — the U3 twin of [`find_table_bloat`], used to show "last
+/// (auto)vacuum" without a new SQL column: `vacuum_table_ages.sql`'s own doc
+/// comment already promises every row has a `table_stats` partner (both
+/// share the `pg_stat_user_tables` scope), though a table that fell out of
+/// `table_stats`'s own row cap is handled gracefully (`None`, never a panic).
+pub fn find_table_for_vacuum_row<'a>(
+    schema: &'a pg_lens_core::SchemaSnapshot,
+    row: &pg_lens_core::VacuumTableRow,
+) -> Option<&'a pg_lens_core::TableStatRow> {
+    schema
+        .tables
+        .iter()
+        .find(|t| t.schema == row.schema && t.name == row.name)
 }
 
 /// One selectable row of the startup service picker. Built in `main.rs`
@@ -348,6 +391,15 @@ pub struct App {
     /// Schema Lens selection, independent from the Micro Lens one so
     /// switching lenses never loses either cursor.
     pub schema_table_state: TableState,
+    /// Which Schema Lens sub-view is on screen (U3, `v` toggles); see
+    /// [`SchemaView`].
+    pub schema_view: SchemaView,
+    /// Vacuum sub-view's worst-tables selection (U3), independent from
+    /// `schema_table_state` — switching `v` never loses either cursor. Reads
+    /// `snapshot.schema.vacuum_tables` directly: that vector is already
+    /// worst-first from its own `ORDER BY` and carries no user sort/filter,
+    /// so (unlike `schema_row_order`) no separate display-order vec exists.
+    pub vacuum_table_state: TableState,
     /// Indices into `snapshot.schema.indexes` in severity-then-size display
     /// order (the Index Lens's twin of `schema_row_order`; no sort mode of
     /// its own — see [`index_finding_rank`]).
@@ -375,6 +427,11 @@ pub struct App {
     /// selection (the panel follows it), `Enter`/`Esc` close the panel,
     /// `Tab` closes it and switches lens, `q` quits as always.
     pub detail_open: bool,
+    /// Whether the Micro Lens's full waits panel is open (U3, `w` toggles).
+    /// Overlay semantics like `detail_open` (they are mutually exclusive —
+    /// opening one closes the other): `Esc` closes it WITHOUT arming the
+    /// top-level quit barrier, `Tab` closes it and switches lens.
+    pub waits_open: bool,
     /// Times `R` was pressed (schema force-recollect). The main loop mirrors
     /// this counter into the poller's `watch::Sender<u64>` after every
     /// update — the same message-passing pattern as `refresh_interval`.
@@ -473,6 +530,8 @@ impl App {
             schema_row_order: Vec::new(),
             schema_sort_mode: SchemaSortMode::default(),
             schema_table_state: TableState::default().with_selected(0),
+            schema_view: SchemaView::default(),
+            vacuum_table_state: TableState::default().with_selected(0),
             index_row_order: Vec::new(),
             index_table_state: TableState::default().with_selected(0),
             replication_row_order: Vec::new(),
@@ -481,6 +540,7 @@ impl App {
             statements_sort_mode: StatementsSortMode::default(),
             statements_table_state: TableState::default().with_selected(0),
             detail_open: false,
+            waits_open: false,
             schema_refresh_requests: 0,
             host: "localhost".to_string(),
             refresh_interval: DEFAULT_REFRESH,
@@ -728,6 +788,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc => {
             if app.detail_open {
                 app.detail_open = false;
+            } else if app.waits_open {
+                app.waits_open = false;
             } else if app
                 .esc_quit_armed_until
                 .is_some_and(|until| app.tick_count <= until)
@@ -756,12 +818,18 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // (Micro: session query; Schema: table stats + index bloat; Index
         // Lens: indexdef + duplicate partner, if any). The Replication Lens
         // has no detail panel (U1): every slot field already fits in its
-        // row, so Enter is a no-op there, same as the Macro Lens.
+        // row, so Enter is a no-op there, same as the Macro Lens. If the
+        // waits panel (U3, `w`) is open, Enter closes it first — overlays
+        // never stack, the same "close before open" rule Esc follows.
         KeyCode::Enter => {
             if app.detail_open {
                 app.detail_open = false;
+            } else if app.waits_open {
+                app.waits_open = false;
             } else if (app.active_tab == Tab::MicroLens && app.table_state.selected().is_some())
-                || (app.active_tab == Tab::SchemaLens && app.selected_table().is_some())
+                || (app.active_tab == Tab::SchemaLens
+                    && app.schema_view == SchemaView::Tables
+                    && app.selected_table().is_some())
                 || (app.active_tab == Tab::IndexLens && app.selected_index().is_some())
                 || (app.active_tab == Tab::QueryLens && app.selected_statement().is_some())
             {
@@ -770,6 +838,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Tab => {
             app.detail_open = false;
+            app.waits_open = false;
             app.active_tab = app.active_tab.next();
         }
         // `/` starts (or resumes) editing the Micro Lens activity filter.
@@ -777,6 +846,24 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('/') if app.active_tab == Tab::MicroLens => {
             app.filter_saved = app.filter.clone();
             app.filter_editing = true;
+        }
+        // `w` (U3): the Micro Lens's full ranked-waits panel — the one-line
+        // strip only ever shows the top few; this is the complete list.
+        // Toggle, Micro Lens only; opening it closes any open detail panel
+        // (overlays never stack — see the Enter/Esc handling above/below).
+        KeyCode::Char('w') if app.active_tab == Tab::MicroLens => {
+            app.waits_open = !app.waits_open;
+            if app.waits_open {
+                app.detail_open = false;
+            }
+        }
+        // `v` (U3): toggles the Schema Lens between the Tables list and the
+        // full-height Vacuum sub-view (see [`SchemaView`]). Schema Lens
+        // only; closes any open Tables-view detail panel (the Vacuum view
+        // has none of its own).
+        KeyCode::Char('v') if app.active_tab == Tab::SchemaLens => {
+            app.schema_view = app.schema_view.next();
+            app.detail_open = false;
         }
         // `d` opens the database picker (U2) from ANY lens — reconnecting is
         // a cluster-wide, not a per-lens, action.
@@ -787,12 +874,15 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // own mode, so tabbing away and back never loses the choice). The
         // Index Lens and Replication Lens have no sort mode of their own
         // (fixed severity order — see `index_finding_rank`/
-        // `slot_severity_rank`), so `s` is inert there.
+        // `slot_severity_rank`), so `s` is inert there. The Schema Lens's
+        // Vacuum sub-view (U3) is the same story: `vacuum_tables` is a fixed
+        // worst-first order, not a user-chosen sort.
         KeyCode::Char('s') => match app.active_tab {
-            Tab::SchemaLens => {
+            Tab::SchemaLens if app.schema_view == SchemaView::Tables => {
                 app.schema_sort_mode = app.schema_sort_mode.next();
                 resort_schema(app);
             }
+            Tab::SchemaLens => {}
             Tab::QueryLens => {
                 app.statements_sort_mode = app.statements_sort_mode.next();
                 resort_statements(app);
@@ -1037,6 +1127,14 @@ fn move_selection(app: &mut App, delta: i64) {
             &mut app.replication_table_state,
             app.replication_row_order.len(),
         ),
+        // U3: the Vacuum sub-view keeps its own cursor over its own row set.
+        Tab::SchemaLens if app.schema_view == SchemaView::Vacuum => (
+            &mut app.vacuum_table_state,
+            app.snapshot
+                .schema
+                .as_deref()
+                .map_or(0, |s| s.vacuum_tables.len()),
+        ),
         Tab::SchemaLens => (
             &mut app.schema_table_state,
             app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len()),
@@ -1098,6 +1196,24 @@ fn clamp_selection(app: &mut App) {
             .unwrap_or(0)
             .min(schema_len - 1);
         app.schema_table_state.select(Some(clamped));
+    }
+
+    // Vacuum sub-view (U3): no detail panel to close, just a cursor to keep
+    // valid — same shape as the Replication Lens's clamp below.
+    let vacuum_len = app
+        .snapshot
+        .schema
+        .as_deref()
+        .map_or(0, |s| s.vacuum_tables.len());
+    if vacuum_len == 0 {
+        app.vacuum_table_state.select(None);
+    } else {
+        let clamped = app
+            .vacuum_table_state
+            .selected()
+            .unwrap_or(0)
+            .min(vacuum_len - 1);
+        app.vacuum_table_state.select(Some(clamped));
     }
 
     let index_len = app.index_row_order.len();
@@ -1395,6 +1511,152 @@ mod tests {
             app.esc_quit_armed_until.is_none(),
             "closing an overlay must not arm the quit barrier"
         );
+    }
+
+    // --- U3: waits panel (`w`) / vacuum sub-view (`v`) ---------------------
+
+    #[test]
+    fn w_toggles_the_waits_panel_on_the_micro_lens_only() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('w')));
+        assert!(app.waits_open);
+        update(&mut app, press(KeyCode::Char('w')));
+        assert!(!app.waits_open);
+
+        // Inert on every other lens.
+        for tab in [
+            Tab::MacroLens,
+            Tab::ReplicationLens,
+            Tab::SchemaLens,
+            Tab::IndexLens,
+            Tab::QueryLens,
+        ] {
+            let mut app = App::new();
+            app.active_tab = tab;
+            update(&mut app, press(KeyCode::Char('w')));
+            assert!(!app.waits_open, "{tab:?}");
+        }
+    }
+
+    #[test]
+    fn w_and_enter_detail_are_mutually_exclusive_overlays() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        // Opening the waits panel closes the detail panel.
+        update(&mut app, press(KeyCode::Char('w')));
+        assert!(app.waits_open);
+        assert!(!app.detail_open);
+        // Enter, with the waits panel open, closes IT first (never opens
+        // detail underneath — overlays never stack).
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.waits_open);
+        assert!(!app.detail_open);
+    }
+
+    /// Esc closes the waits panel WITHOUT arming the top-level quit barrier
+    /// — the same overlay-dismissal rule the detail panel follows.
+    #[test]
+    fn esc_closing_the_waits_panel_does_not_arm_quitting() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('w')));
+        assert!(app.waits_open);
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.waits_open);
+        assert!(!app.should_quit);
+        assert!(
+            app.esc_quit_armed_until.is_none(),
+            "closing an overlay must not arm the quit barrier"
+        );
+    }
+
+    #[test]
+    fn tab_switch_closes_the_waits_panel() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('w')));
+        assert!(app.waits_open);
+        update(&mut app, press(KeyCode::Tab));
+        assert!(!app.waits_open);
+    }
+
+    #[test]
+    fn v_toggles_the_schema_lens_vacuum_view_only() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        assert_eq!(app.schema_view, SchemaView::Tables);
+        update(&mut app, press(KeyCode::Char('v')));
+        assert_eq!(app.schema_view, SchemaView::Vacuum);
+        update(&mut app, press(KeyCode::Char('v')));
+        assert_eq!(app.schema_view, SchemaView::Tables);
+
+        // Inert on every other lens.
+        for tab in [
+            Tab::MacroLens,
+            Tab::MicroLens,
+            Tab::ReplicationLens,
+            Tab::IndexLens,
+            Tab::QueryLens,
+        ] {
+            let mut app = App::new();
+            app.active_tab = tab;
+            update(&mut app, press(KeyCode::Char('v')));
+            assert_eq!(app.schema_view, SchemaView::Tables, "{tab:?}");
+        }
+    }
+
+    #[test]
+    fn v_closes_the_tables_view_detail_panel() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        update(&mut app, press(KeyCode::Char('v')));
+        assert_eq!(app.schema_view, SchemaView::Vacuum);
+        assert!(!app.detail_open);
+    }
+
+    /// The Vacuum sub-view has no detail panel of its own — Enter is inert
+    /// there (mirrors the Replication Lens's "no detail panel" contract).
+    #[test]
+    fn enter_is_inert_in_the_vacuum_view() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Char('v')));
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.detail_open);
+    }
+
+    /// `s` (sort) is inert in the Vacuum sub-view (fixed worst-first order),
+    /// but still cycles the Tables view's own sort mode once toggled back.
+    #[test]
+    fn s_is_inert_in_the_vacuum_view() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Char('v')));
+        let before = app.schema_sort_mode;
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.schema_sort_mode, before, "sort mode must not change");
+    }
+
+    /// The Vacuum sub-view's cursor is independent from the Tables cursor —
+    /// `j`/`k` there move `vacuum_table_state`, never `schema_table_state`.
+    #[test]
+    fn vacuum_view_scrolls_its_own_independent_cursor() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_eq!(app.schema_table_state.selected(), Some(1));
+
+        update(&mut app, press(KeyCode::Char('v')));
+        assert_eq!(app.vacuum_table_state.selected(), Some(0));
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_eq!(app.vacuum_table_state.selected(), Some(1));
+        // Tables cursor untouched by Vacuum-view navigation.
+        assert_eq!(app.schema_table_state.selected(), Some(1));
     }
 
     #[test]
