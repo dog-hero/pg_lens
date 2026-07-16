@@ -17,44 +17,58 @@ Show
 # Macro Lens: vitals, sparklines, checkpointer, replication summary
 Sleep 3s
 
+# Database selector: pick a database on the cluster (d), then Esc out (mock)
+Type "d"
+Sleep 2s
+Escape
+Sleep 800ms
+
 # Micro Lens: activity + top-waits strip
 Tab
-Sleep 2.5s
+Sleep 2s
 # filter live
 Type "/"
 Sleep 500ms
 Type "bench"
 Sleep 1.5s
 Enter
-Sleep 1.5s
-# clear the filter again
+Sleep 1.2s
 Type "/"
 Backspace 5
 Enter
-Sleep 800ms
-# open a query detail
+Sleep 600ms
+# full waits panel (w), then close
+Type "w"
+Sleep 2.5s
+Type "w"
+Sleep 500ms
+# a query detail
 Type "j"
 Sleep 400ms
 Enter
-Sleep 2s
+Sleep 1.8s
 Escape
-Sleep 800ms
+Sleep 600ms
 
-# Replication Lens: senders + all slots
+# Replication Lens: senders + all slots (scrollable)
 Tab
 Sleep 3s
 
-# Schema Lens: tables + vacuum/wraparound
+# Schema Lens: tables, then the full Vacuum sub-view (v)
 Tab
+Sleep 2s
+Type "v"
 Sleep 3s
+Type "v"
+Sleep 600ms
 
-# Index Lens: advisor findings
+# Index Lens: advisor findings + detail
 Tab
 Sleep 2s
 Type "j"
 Sleep 300ms
 Enter
-Sleep 2.2s
+Sleep 2s
 Escape
 Sleep 600ms
 
@@ -62,6 +76,5 @@ Sleep 600ms
 Tab
 Sleep 2.5s
 
-# quit (double-Esc barrier demo would confuse the loop — use q)
 Type "q"
 Sleep 500ms

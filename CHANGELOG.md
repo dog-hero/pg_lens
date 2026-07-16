@@ -4,7 +4,10 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
-## [Unreleased] — v0.8 "Room to breathe" (in progress)
+## [Unreleased] — v0.8 "Room to breathe"
+
+Give the v0.7 data room to breathe: dedicated tabs, scrollable lists,
+per-database navigation. Implemented, awaiting release.
 
 ### Added
 - **Index Lens** — the index advisor promoted to its own tab (full-height
@@ -21,9 +24,13 @@ All notable changes to pg_lens. Format inspired by
   chosen database with per-database state (schema/queries/history) reset.
   The header now names the current database. Web switching deferred (the
   web follows the poller's database).
-
-### Planned
-- Waits & vacuum visibility (`w` full waits panel; vacuum sub-view with room).
+- **Full waits panel** — `w` in the Micro Lens opens the complete ranked
+  wait list (count, % of waiting sessions, proportional bar), beyond the
+  one-line strip. Web: a collapsible waits list under the activity table.
+- **Vacuum sub-view** — `v` in the Schema Lens switches to a full-height
+  vacuum view: cluster wraparound headline, all worst tables by XID age
+  (scrollable, with dead-tuple ratio and last-vacuum age), and live
+  `pg_stat_progress_vacuum`. Web renders the full worst-tables list.
 
 ## [0.7.1] — 2026-07-16
 
