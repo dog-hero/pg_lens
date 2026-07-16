@@ -37,6 +37,9 @@ section on release.
 
 ## Shipped
 
+- **v0.7.1** — `serve` Ctrl+C no longer hangs with SSE clients attached
+  (`b2b9856`), replication slots no longer pushed out by many active WAL
+  senders (`b2b9856`), TUI double-Esc quit barrier (`14b3e78`).
 - **v0.7.0** — "What should I go fix": top waits panel (`4e94fe0`), vacuum
   health & XID wraparound (`9ed90dd`), replication slots view (`7addcd5`),
   index advisor for unused/duplicate/prefix-redundant indexes (`ad3c2d8`),
