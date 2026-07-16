@@ -79,7 +79,23 @@ pub fn ensure_listen_allowed(addr: &SocketAddr, has_token: bool) -> Result<(), S
 ///
 /// Lives here (not in the CLI) so frontends never need their own axum
 /// dependency: bind a `TcpListener`, build a [`router`], hand both over.
-pub async fn serve(listener: tokio::net::TcpListener, router: Router) -> std::io::Result<()> {
+///
+/// `on_shutdown` runs AFTER Ctrl+C but BEFORE axum's graceful shutdown is
+/// signalled. This ordering is load-bearing: graceful shutdown waits for
+/// every open connection to finish, and `/api/stream` SSE connections only
+/// finish when the poller drops the snapshot channel — so the caller must
+/// use this hook to stop the poller (which also cancels its in-flight
+/// query). Running it after `serve` returned instead would deadlock: axum
+/// waits on SSE, SSE waits on the poller, the poller waits on axum.
+pub async fn serve<F, Fut>(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    on_shutdown: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
             // If installing the signal handler fails, pending() would hang
@@ -88,6 +104,7 @@ pub async fn serve(listener: tokio::net::TcpListener, router: Router) -> std::io
                 eprintln!("warning: Ctrl+C handler unavailable ({error}); stop with SIGTERM/kill");
                 std::future::pending::<()>().await;
             }
+            on_shutdown().await;
         })
         .await
 }

@@ -511,10 +511,16 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
             "disabled (loopback bind without PG_LENS_AUTH_TOKEN)"
         }
     );
-    // serve() returns on Ctrl+C — then cancel the poller's in-flight query
-    // before the runtime tears down (same reason as the TUI path).
-    pg_lens_web::serve(listener, router).await?;
-    shutdown_poller(&shutdown_tx, poller_handle).await;
+    // The poller must be stopped INSIDE the graceful-shutdown window (see
+    // pg_lens_web::serve): open SSE streams only end when the poller drops
+    // the snapshot channel, and axum's graceful shutdown waits for exactly
+    // those connections — stopping the poller afterwards would deadlock
+    // Ctrl+C whenever a browser tab is attached. Stopping it here also
+    // cancels the in-flight query (same reason as the TUI path).
+    pg_lens_web::serve(listener, router, move || async move {
+        shutdown_poller(&shutdown_tx, poller_handle).await;
+    })
+    .await?;
     Ok(())
 }
 

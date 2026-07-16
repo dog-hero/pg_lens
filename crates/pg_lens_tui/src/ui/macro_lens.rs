@@ -168,18 +168,35 @@ fn slot_line(slot: &ReplicationSlotRow) -> Line<'static> {
     ])
 }
 
+/// Cap on WAL-sender rows in the panel: a CDC/fleet primary can have 10+
+/// active senders, and before this cap they pushed every slot row out of the
+/// height-limited panel — the exact rows the F2.5 feature exists to show.
+const SENDERS_SHOWN: usize = 4;
+/// Cap on slot rows (worst-severity first, so what clips is the calm tail).
+const SLOTS_SHOWN: usize = 6;
+
 /// The replication panel's lines, or `None` when there is nothing worth a
 /// panel (a primary with no replicas and no slots). A standby's
-/// sender/receiver section always shows a line; slot rows (F2.5) are
-/// appended below it, and contribute nothing when the slots list is empty
-/// (no extra "no slots" section — silence is the calm state).
+/// sender/receiver section always shows a line; slot rows (F2.5) follow,
+/// ranked worst-first, and contribute nothing when the slots list is empty
+/// (no extra "no slots" section — silence is the calm state). Both sections
+/// clip with an explicit dim `… +N more` line instead of silently dropping
+/// rows.
 fn replication_lines(
     repl: Option<&ReplicationInfo>,
     slots: Option<&[ReplicationSlotRow]>,
 ) -> Option<Vec<Line<'static>>> {
+    let more_line = |n: usize, what: &str| {
+        Line::from(Span::styled(format!("   \u{2026} +{n} more {what}"), style::label_style()))
+    };
     let mut lines: Vec<Line<'static>> = match repl {
         Some(ReplicationInfo::Primary { senders }) => {
-            senders.iter().map(sender_line).collect()
+            let mut lines: Vec<Line<'static>> =
+                senders.iter().take(SENDERS_SHOWN).map(sender_line).collect();
+            if senders.len() > SENDERS_SHOWN {
+                lines.push(more_line(senders.len() - SENDERS_SHOWN, "replicas"));
+            }
+            lines
         }
         Some(ReplicationInfo::Standby { receiver: Some(r) }) => vec![receiver_line(r)],
         Some(ReplicationInfo::Standby { receiver: None }) => vec![Line::from(Span::styled(
@@ -188,8 +205,21 @@ fn replication_lines(
         ))],
         None => Vec::new(),
     };
-    if let Some(slots) = slots {
-        lines.extend(slots.iter().map(slot_line));
+    if let Some(slots) = slots
+        && !slots.is_empty()
+    {
+        // Worst first (Bad > Warn > Ok), then by retained bytes descending
+        // (the SQL's order), so clipping drops the healthiest slots.
+        let mut ranked: Vec<&ReplicationSlotRow> = slots.iter().collect();
+        ranked.sort_by_key(|s| match slot_severity(s) {
+            Lag::Bad => 0u8,
+            Lag::Warn => 1,
+            Lag::Ok => 2,
+        });
+        lines.extend(ranked.iter().take(SLOTS_SHOWN).map(|s| slot_line(s)));
+        if ranked.len() > SLOTS_SHOWN {
+            lines.push(more_line(ranked.len() - SLOTS_SHOWN, "slots"));
+        }
     }
     if lines.is_empty() { None } else { Some(lines) }
 }
@@ -317,9 +347,11 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     // Reserve a bordered panel only when there is replication to show;
     // otherwise the vitals panel keeps the whole bottom area (layout
     // unchanged for non-replicated servers).
+    // Content is already capped upstream (SENDERS_SHOWN/SLOTS_SHOWN + their
+    // "+N more" lines = at most 12 rows), so the +2 border fits in 14.
     let repl_height = repl_lines
         .as_ref()
-        .map(|l| (l.len() as u16 + 2).min(8))
+        .map(|l| (l.len() as u16 + 2).min(14))
         .unwrap_or(0);
 
     let [banner_area, gauge_area, tps_area, active_area, bottom_area] = Layout::vertical([
@@ -529,6 +561,59 @@ mod tests {
     fn empty_slots_list_renders_no_extra_rows() {
         let repl = ReplicationInfo::Primary { senders: vec![] };
         assert!(replication_lines(Some(&repl), Some(&[])).is_none());
+    }
+
+    /// Regression (field report, v0.7.0): a CDC primary with many active
+    /// senders pushed EVERY slot row out of the height-capped panel — the
+    /// exact rows F2.5 exists to show. Senders now clip at SENDERS_SHOWN and
+    /// slots always get their section, worst first.
+    #[test]
+    fn many_senders_do_not_push_slots_out_of_the_panel() {
+        let sender = |name: &str| WalSenderRow {
+            application_name: name.to_string(),
+            client: "10.0.0.1".to_string(),
+            state: "streaming".to_string(),
+            sync_state: "async".to_string(),
+            replay_lag_bytes: Some(0),
+            replay_lag_secs: Some(0.0),
+        };
+        let senders: Vec<WalSenderRow> = (0..10).map(|i| sender(&format!("cdc_{i}"))).collect();
+        let repl = ReplicationInfo::Primary { senders };
+        let slots: Vec<ReplicationSlotRow> = (0..10)
+            .map(|i| {
+                let mut s = slot(false, Some("extended"), Some(1_000_000 * (i + 1)));
+                s.slot_name = format!("slot_{i}");
+                s
+            })
+            .collect();
+        let lines = replication_lines(Some(&repl), Some(&slots)).expect("panel renders");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        // Senders clipped with an explicit indicator…
+        assert!(text.contains("+6 more replicas"), "{text}");
+        // …and slots are PRESENT (the bug was zero slot rows here).
+        assert!(text.contains("slot_"), "slot rows must render: {text}");
+        assert!(text.contains("+4 more slots"), "{text}");
+        // Total stays within the panel's height budget (12 content lines).
+        assert!(lines.len() <= 12, "got {} lines", lines.len());
+    }
+
+    /// Worst slots surface first, so clipping drops the calm tail.
+    #[test]
+    fn slots_rank_worst_severity_first() {
+        let mut lost = slot(false, Some("lost"), Some(10));
+        lost.slot_name = "lost_slot".to_string();
+        let mut calm = slot(true, Some("reserved"), Some(999_999_999));
+        calm.slot_name = "calm_slot".to_string();
+        let mut warn = slot(false, Some("extended"), Some(5_000));
+        warn.slot_name = "warn_slot".to_string();
+        let slots = vec![calm, warn, lost];
+        let lines = replication_lines(None, Some(&slots)).expect("panel renders");
+        let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(first.contains("lost_slot"), "red first: {first}");
     }
 
     #[test]
