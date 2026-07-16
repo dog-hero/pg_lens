@@ -8,31 +8,6 @@ section on release.
 
 ---
 
-## v0.8 — "Room to breathe" (owner UX feedback 2026-07-16, in progress)
-
-Field feedback after using v0.7 on a real cluster: the new data is there but
-buried — the index advisor hides behind a toggle, slots share a cramped
-panel, waits/vacuum are easy to miss, and everything is locked to the DSN's
-database on clusters with many databases.
-
-- [ ] **U1 — Tab restructure: Index Lens + Replication Lens** *(M)* — six
-  tabs: Macro │ Micro │ Replication │ Schema │ Indexes │ Queries. The index
-  advisor gets its own lens (own selection/detail/statusbar hints; the `i`
-  toggle inside Schema goes away). The Replication Lens shows
-  senders/receiver at the top and ALL slots as a scrollable (j/k) table —
-  no more "+N more" clipping; the Macro panel stays as the compact summary.
-- [ ] **U2 — Database selector** *(M/L)* — `d` opens a database picker
-  (`pg_database` list, sizes, current highlighted). Selecting reconnects the
-  poller to the same host/creds with the chosen `dbname` (PostgreSQL cannot
-  switch databases in-session), reusing the startup-picker UI and the
-  poller's existing reconnect machinery. Per-database lenses
-  (Schema/Indexes/Queries) follow automatically; header shows the database.
-- [ ] **U3 — Waits & vacuum visibility** *(S/M)* — Micro: `w` toggles a full
-  waits panel (complete ranked list with counts/percent, not just the
-  one-line strip). Schema: the vacuum/wraparound block becomes a proper
-  sub-view with room (worst tables list + progress), not a footer squeezed
-  under the tables.
-
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
 - [ ] **I/O profile** — `pg_stat_io` (PG 16+ only), backend_type × context
@@ -62,6 +37,11 @@ database on clusters with many databases.
 
 ## Shipped
 
+- **v0.8.0** — "Room to breathe": Index Lens and Replication Lens as their
+  own tabs (six tabs total; all replication slots scrollable), database
+  selector (`d` reconnects the poller to any database on the cluster), full
+  waits panel (`w`) and a Vacuum sub-view (`v`) — all in both TUI and Web
+  Lens.
 - **v0.7.1** — `serve` Ctrl+C no longer hangs with SSE clients attached
   (`b2b9856`), replication slots no longer pushed out by many active WAL
   senders (`b2b9856`), TUI double-Esc quit barrier (`14b3e78`).

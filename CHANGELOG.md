@@ -4,10 +4,10 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
-## [Unreleased] — v0.8 "Room to breathe"
+## [0.8.0] — 2026-07-16 — "Room to breathe"
 
 Give the v0.7 data room to breathe: dedicated tabs, scrollable lists,
-per-database navigation. Implemented, awaiting release.
+per-database navigation.
 
 ### Added
 - **Index Lens** — the index advisor promoted to its own tab (full-height
