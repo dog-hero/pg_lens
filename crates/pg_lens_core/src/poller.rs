@@ -31,7 +31,7 @@ use crate::history_store::HistoryStore;
 use crate::models::{
     AdminActionResult, AdminCommand, AdminOutcome, BloatRow, DbSnapshot, PollerStatus,
     ReplicationInfo, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
-    StatementsStatus,
+    StatementsStatus, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
 };
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
@@ -119,6 +119,8 @@ impl SchemaState {
             tables: collection.tables,
             table_bloat,
             index_bloat,
+            vacuum_cluster_age: collection.vacuum_cluster_age,
+            vacuum_tables: collection.vacuum_tables,
             status,
         }));
     }
@@ -133,6 +135,8 @@ impl SchemaState {
             tables: previous.map(|p| p.tables.clone()).unwrap_or_default(),
             table_bloat: previous.map(|p| p.table_bloat.clone()).unwrap_or_default(),
             index_bloat: previous.map(|p| p.index_bloat.clone()).unwrap_or_default(),
+            vacuum_cluster_age: previous.and_then(|p| p.vacuum_cluster_age.clone()),
+            vacuum_tables: previous.map(|p| p.vacuum_tables.clone()).unwrap_or_default(),
             status: SchemaStatus::Error(msg),
         }));
     }
@@ -734,6 +738,11 @@ async fn poll_once(
     // runs.
     let replication = collect_replication(client, q, info.is_in_recovery).await;
 
+    // Vacuum progress (F2) is likewise best-effort on the fast tick: absent
+    // (`None`) on any failure, never a poll fault — see
+    // `collect_vacuum_progress`.
+    let vacuum_progress = collect_vacuum_progress(client, q).await;
+
     let now = Instant::now();
     let xact_total = info.xact_commit + info.xact_rollback;
     let cumulative_ratio = hit_ratio(info.blks_hit, info.blks_read);
@@ -809,6 +818,7 @@ async fn poll_once(
         statements: None,
         last_admin_action: None,
         replication,
+        vacuum_progress,
         status: PollerStatus::Ok,
     })
 }
@@ -823,6 +833,12 @@ type BloatEstimate = Result<(Vec<BloatRow>, Vec<BloatRow>), String>;
 
 struct SchemaCollection {
     tables: Vec<crate::models::TableStatRow>,
+    /// F2 cluster-wide wraparound headline, collected alongside `tables` in
+    /// the same essential transaction (a missing row would mean an empty
+    /// `pg_database`, which cannot happen).
+    vacuum_cluster_age: Option<VacuumClusterAge>,
+    /// F2 per-table XID ages, same essential transaction as `tables`.
+    vacuum_tables: Vec<VacuumTableRow>,
     /// `None` when bloat was not requested this cycle (auto tick — keep the
     /// last on-demand estimate); `Some(_)` when a force refresh asked for a
     /// fresh estimate.
@@ -849,6 +865,29 @@ async fn collect_schema(
     for row in &table_rows {
         tables.push(db::table_stat_from_row(row).map_err(|e| e.to_string())?);
     }
+
+    // Vacuum health / XID wraparound (F2): cheap catalog reads, run in the
+    // same essential transaction as table_stats — their failure fails the
+    // whole schema collection just like table_stats (a role that can read
+    // pg_stat_user_tables can read pg_database/pg_class too).
+    let cluster_age_rows = stx
+        .query(q.vacuum_cluster_age, &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    let vacuum_cluster_age = cluster_age_rows
+        .first()
+        .map(db::vacuum_cluster_age_from_row)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let vacuum_table_rows = stx
+        .query(q.vacuum_table_ages, &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut vacuum_tables = Vec::with_capacity(vacuum_table_rows.len());
+    for row in &vacuum_table_rows {
+        vacuum_tables.push(db::vacuum_table_from_row(row).map_err(|e| e.to_string())?);
+    }
+
     let bloat = if with_bloat {
         let (bloat_table_rows, bloat_index_rows) = tokio::join!(
             stx.query(q.bloat_tables, &[]),
@@ -876,7 +915,12 @@ async fn collect_schema(
     if !matches!(&bloat, Some(Err(_))) {
         stx.commit().await.map_err(|e| e.to_string())?;
     }
-    Ok(SchemaCollection { tables, bloat })
+    Ok(SchemaCollection {
+        tables,
+        vacuum_cluster_age,
+        vacuum_tables,
+        bloat,
+    })
 }
 
 /// Parses one estimated-bloat result set (tables and indexes share the
@@ -930,6 +974,27 @@ async fn collect_replication(
     // Best-effort: a failed commit just means no panel this tick.
     tx.commit().await.ok()?;
     Some(info)
+}
+
+/// Best-effort in-flight vacuum progress (F2, `pg_stat_progress_vacuum`),
+/// refreshed every fast tick. Returns `None` on ANY query or parse failure —
+/// a restricted role or a server that hides the view degrades to "no panel
+/// this tick", exactly like [`collect_replication`]; it must never fail the
+/// poll. `Some(vec![])` (the common case) means the collection succeeded and
+/// found nothing running — the calm "no vacuum running" state, not an error.
+async fn collect_vacuum_progress(
+    client: &mut Client,
+    q: &queries::QuerySet,
+) -> Option<Vec<VacuumProgressRow>> {
+    let tx = begin_read(client).await.ok()?;
+    let rows = tx.query(q.vacuum_progress, &[]).await.ok()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        out.push(db::vacuum_progress_from_row(row).ok()?);
+    }
+    // Best-effort: a failed commit just means no panel this tick.
+    tx.commit().await.ok()?;
+    Some(out)
 }
 
 /// Turns a tokio-postgres error into the richest message available. The raw
@@ -1396,12 +1461,16 @@ mod tests {
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
+            vacuum_cluster_age: good.vacuum_cluster_age.clone(),
+            vacuum_tables: good.vacuum_tables.clone(),
             bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
         let mut fresh = good.tables.clone();
         fresh.pop();
         schema.store(SchemaCollection {
             tables: fresh.clone(),
+            vacuum_cluster_age: good.vacuum_cluster_age.clone(),
+            vacuum_tables: good.vacuum_tables.clone(),
             bloat: None, // auto tick: no bloat this cycle
         });
         let after = schema.current.clone().expect("stored");
@@ -1423,6 +1492,8 @@ mod tests {
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
+            vacuum_cluster_age: good.vacuum_cluster_age.clone(),
+            vacuum_tables: good.vacuum_tables.clone(),
             bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
         let stored = schema.current.clone().expect("stored");
@@ -1447,6 +1518,8 @@ mod tests {
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
+            vacuum_cluster_age: good.vacuum_cluster_age.clone(),
+            vacuum_tables: good.vacuum_tables.clone(),
             bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
 
@@ -1454,6 +1527,8 @@ mod tests {
         fresh_tables.pop(); // observably different from the previous set
         schema.store(SchemaCollection {
             tables: fresh_tables.clone(),
+            vacuum_cluster_age: good.vacuum_cluster_age.clone(),
+            vacuum_tables: good.vacuum_tables.clone(),
             bloat: Some(Err("canceling statement due to statement timeout".to_string())),
         });
 

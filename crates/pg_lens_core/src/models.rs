@@ -160,6 +160,44 @@ pub struct BloatRow {
     pub is_na: bool,
 }
 
+/// Cluster-wide XID wraparound distance (F2): the worst `age(datfrozenxid)`
+/// across every database in the cluster, plus the database that owns it.
+/// Collected on the slow schema cadence (`queries/vacuum_cluster_age.sql`) —
+/// cheap catalog read, but cluster-wide by nature, not per-connected-db like
+/// the rest of the Schema Lens.
+#[derive(Clone, Debug, Serialize)]
+pub struct VacuumClusterAge {
+    pub max_age_xids: i64,
+    pub worst_database: String,
+}
+
+/// One table's XID age + dead-tuple ratio ("vacuum debt"), F2. Worst N of
+/// the connected database's user tables, collected alongside `tables` on
+/// the same slow cadence (`queries/vacuum_table_ages.sql`).
+#[derive(Clone, Debug, Serialize)]
+pub struct VacuumTableRow {
+    pub schema: String,
+    pub name: String,
+    pub age_xids: i64,
+    pub n_dead_tup: i64,
+    pub n_live_tup: i64,
+}
+
+/// One in-flight `pg_stat_progress_vacuum` row, F2. Collected on the FAST
+/// tick, best-effort (see [`DbSnapshot::vacuum_progress`]).
+#[derive(Clone, Debug, Serialize)]
+pub struct VacuumProgressRow {
+    pub pid: i32,
+    /// Target relation name, or `"?"` if it was dropped mid-scan.
+    pub relation: String,
+    /// `initializing`, `scanning heap`, `vacuuming indexes`, `vacuuming
+    /// heap`, `cleaning up indexes`, `truncating heap`, `performing final
+    /// cleanup`.
+    pub phase: String,
+    pub heap_blks_total: i64,
+    pub heap_blks_scanned: i64,
+}
+
 /// Health of the *slow* schema collection, separate from [`PollerStatus`]:
 /// a failing schema query must never taint the 2s activity pipeline.
 #[derive(Clone, Debug, Serialize)]
@@ -183,6 +221,12 @@ pub struct SchemaSnapshot {
     pub table_bloat: Vec<BloatRow>,
     /// Estimated btree index bloat (empty until Fase S2).
     pub index_bloat: Vec<BloatRow>,
+    /// Cluster-wide XID wraparound headline (F2). `None` only before the
+    /// first successful slow collection of a session (kept, like `tables`,
+    /// across a collection error — see [`crate::poller`]).
+    pub vacuum_cluster_age: Option<VacuumClusterAge>,
+    /// Worst N tables by XID age, F2 (the query caps at 20 rows).
+    pub vacuum_tables: Vec<VacuumTableRow>,
     pub status: SchemaStatus,
 }
 
@@ -362,11 +406,47 @@ impl SchemaSnapshot {
             fillfactor: Some(90),
             is_na: false,
         }];
+        // F2: cluster age deliberately sits just BELOW the yellow threshold
+        // (200M) — a calm default so `--mock` doesn't open on an alarm; the
+        // severity tiers themselves are unit-tested directly, not only
+        // demoed. Per-table ages mirror the table-stats rows above, with
+        // `order_items` (the bloated-looking one) also carrying the oldest
+        // XID age, dead-tuple ratio included so the "vacuum debt" view reads
+        // consistently with the Tables list.
+        let vacuum_cluster_age = Some(VacuumClusterAge {
+            max_age_xids: 182_400_000 + churn.max(0),
+            worst_database: "shop".to_string(),
+        });
+        let vacuum_tables = vec![
+            VacuumTableRow {
+                schema: "public".to_string(),
+                name: "order_items".to_string(),
+                age_xids: 179_800_000 + churn.max(0),
+                n_dead_tup: 1_050_000 + churn,
+                n_live_tup: 1_300_000,
+            },
+            VacuumTableRow {
+                schema: "public".to_string(),
+                name: "pgbench_accounts".to_string(),
+                age_xids: 96_200_000,
+                n_dead_tup: 14_205 + jitter(seq, 20, 9_000) as i64,
+                n_live_tup: 500_000,
+            },
+            VacuumTableRow {
+                schema: "audit".to_string(),
+                name: "raw_events".to_string(),
+                age_xids: 41_050_000,
+                n_dead_tup: 0,
+                n_live_tup: 273_000 + churn,
+            },
+        ];
         Self {
             collected_at_epoch_ms: epoch_ms_now(),
             tables,
             table_bloat,
             index_bloat,
+            vacuum_cluster_age,
+            vacuum_tables,
             status: SchemaStatus::Ok,
         }
     }
@@ -696,6 +776,12 @@ pub struct DbSnapshot {
     /// Replication role and topology, refreshed every fast tick. `None` only
     /// before the first successful poll of a session.
     pub replication: Option<ReplicationInfo>,
+    /// In-flight `pg_stat_progress_vacuum` rows (F2), refreshed every fast
+    /// tick, best-effort like `replication`: `None` when the collection
+    /// failed this tick (restricted role, hidden view, ...), `Some(vec![])`
+    /// when it succeeded and simply found no vacuum running (the common
+    /// case — rendered as a calm "no vacuum running", never an error).
+    pub vacuum_progress: Option<Vec<VacuumProgressRow>>,
     pub status: PollerStatus,
 }
 
@@ -883,6 +969,16 @@ impl DbSnapshot {
                     },
                 ],
             }),
+            // F2: one in-flight autovacuum, progressing between snapshots so
+            // `--mock` visibly moves — 60% at seq 0, wrapping back to a low
+            // percentage as `heap_blks_scanned` cycles under the fixed total.
+            vacuum_progress: Some(vec![VacuumProgressRow {
+                pid: 4650,
+                relation: "order_items".to_string(),
+                phase: "vacuuming heap".to_string(),
+                heap_blks_total: 24_000,
+                heap_blks_scanned: (14_400 + (seq as i64) * 350) % 24_000,
+            }]),
             status: PollerStatus::Ok,
         }
     }
@@ -916,6 +1012,7 @@ impl DbSnapshot {
             statements: None,
             last_admin_action: None,
             replication: None,
+            vacuum_progress: None,
             status: PollerStatus::Connecting,
         }
     }
@@ -932,6 +1029,43 @@ mod tests {
         assert!(snapshot.vitals.connections_total <= snapshot.vitals.max_connections);
         assert!((0.0..=1.0).contains(&snapshot.vitals.cache_hit_ratio));
         assert!(matches!(snapshot.status, PollerStatus::Ok));
+    }
+
+    /// F2: the mock's cluster age sits below the yellow threshold (200M) —
+    /// a calm default, per-table ages are present and ordered by age like
+    /// the SQL, and the one in-flight vacuum's progress is well-formed
+    /// (scanned <= total).
+    #[test]
+    fn mock_snapshot_carries_calm_vacuum_data() {
+        let snapshot = DbSnapshot::mock();
+        let schema = snapshot.schema.as_ref().expect("mock must carry schema");
+        let cluster_age = schema
+            .vacuum_cluster_age
+            .as_ref()
+            .expect("mock must carry a cluster age");
+        assert!(
+            cluster_age.max_age_xids < 200_000_000,
+            "calm default: below the yellow threshold, got {}",
+            cluster_age.max_age_xids
+        );
+        assert!(!cluster_age.worst_database.is_empty());
+        assert!(!schema.vacuum_tables.is_empty());
+        for pair in schema.vacuum_tables.windows(2) {
+            assert!(
+                pair[0].age_xids >= pair[1].age_xids,
+                "vacuum_tables must be worst-first, like the SQL's ORDER BY"
+            );
+        }
+
+        let progress = snapshot
+            .vacuum_progress
+            .as_ref()
+            .expect("mock must carry vacuum progress");
+        assert_eq!(progress.len(), 1, "one in-flight autovacuum in the mock");
+        let p = &progress[0];
+        assert!(p.heap_blks_scanned <= p.heap_blks_total);
+        assert!(!p.relation.is_empty());
+        assert!(!p.phase.is_empty());
     }
 
     #[test]

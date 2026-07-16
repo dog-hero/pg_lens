@@ -6,7 +6,7 @@
 //!
 //! [`DbSnapshot::history`]: pg_lens_core::DbSnapshot
 
-use pg_lens_core::{ReplicationInfo, WalReceiverRow, WalSenderRow};
+use pg_lens_core::{ReplicationInfo, SchemaSnapshot, WalReceiverRow, WalSenderRow};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -16,7 +16,7 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::ui::{format, style};
+use crate::ui::{format, style, vacuum};
 
 /// Bordered block with the panel title in the shared accent style.
 fn titled_block(title: &'static str) -> Block<'static> {
@@ -134,9 +134,35 @@ fn replication_lines(repl: Option<&ReplicationInfo>) -> Option<Vec<Line<'static>
     }
 }
 
+/// F2's Macro Lens warning: one line, loud only when the cluster's XID
+/// wraparound distance has crossed yellow/red — `None` (no banner) while
+/// healthy or before the first slow collection, mirroring the replication
+/// panel's "nothing worth showing → nothing rendered" rule.
+fn vacuum_banner_line(schema: Option<&SchemaSnapshot>) -> Option<Line<'static>> {
+    let age = schema?.vacuum_cluster_age.as_ref()?;
+    let sev = vacuum::age_severity(age.max_age_xids);
+    if sev == vacuum::Severity::Ok {
+        return None;
+    }
+    Some(Line::from(vec![
+        Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
+        Span::styled(
+            format!(
+                "XID wraparound: {} xids old (worst db: {}) \u{2014} VACUUM attention needed",
+                format::human_count(age.max_age_xids),
+                age.worst_database,
+            ),
+            Style::new().fg(sev.color()).bold(),
+        ),
+    ]))
+}
+
 pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     let vitals = &app.snapshot.vitals;
     let history = &app.snapshot.history;
+
+    let vacuum_banner = vacuum_banner_line(app.snapshot.schema.as_deref());
+    let vacuum_banner_height = u16::from(vacuum_banner.is_some());
 
     let repl_lines = replication_lines(app.snapshot.replication.as_ref());
     // Reserve a bordered panel only when there is replication to show;
@@ -147,13 +173,17 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
         .map(|l| (l.len() as u16 + 2).min(8))
         .unwrap_or(0);
 
-    let [gauge_area, tps_area, active_area, bottom_area] = Layout::vertical([
+    let [banner_area, gauge_area, tps_area, active_area, bottom_area] = Layout::vertical([
+        Constraint::Length(vacuum_banner_height),
         Constraint::Length(3),
         Constraint::Length(5),
         Constraint::Length(5),
         Constraint::Min(0),
     ])
     .areas(area);
+    if let Some(line) = vacuum_banner {
+        frame.render_widget(Paragraph::new(line), banner_area);
+    }
     let [vitals_area, repl_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(repl_height)]).areas(bottom_area);
     let [conn_gauge_area, cache_gauge_area] =
@@ -276,5 +306,43 @@ mod tests {
     fn lag_text_handles_missing_measures() {
         assert_eq!(lag_text(None, None), "—");
         assert!(lag_text(Some(1024 * 1024), Some(1.5)).contains('·'));
+    }
+
+    // --- F2: vacuum wraparound banner -----------------------------------
+
+    fn schema_with_age(max_age_xids: i64) -> SchemaSnapshot {
+        let mut schema = SchemaSnapshot::mock();
+        schema.vacuum_cluster_age = Some(pg_lens_core::VacuumClusterAge {
+            max_age_xids,
+            worst_database: "shop".to_string(),
+        });
+        schema
+    }
+
+    #[test]
+    fn vacuum_banner_is_absent_below_the_yellow_threshold() {
+        assert!(vacuum_banner_line(None).is_none(), "no schema yet");
+        let mut schema = SchemaSnapshot::mock();
+        schema.vacuum_cluster_age = None;
+        assert!(
+            vacuum_banner_line(Some(&schema)).is_none(),
+            "no collection yet"
+        );
+        let schema = schema_with_age(150_000_000);
+        assert!(vacuum_banner_line(Some(&schema)).is_none(), "healthy: no banner");
+    }
+
+    #[test]
+    fn vacuum_banner_appears_past_yellow_and_red() {
+        let yellow = schema_with_age(250_000_000);
+        let line = vacuum_banner_line(Some(&yellow)).expect("yellow crosses the threshold");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("XID wraparound"));
+        assert!(text.contains("shop"));
+
+        let red = schema_with_age(600_000_000);
+        let line = vacuum_banner_line(Some(&red)).expect("red crosses the threshold");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("XID wraparound"));
     }
 }

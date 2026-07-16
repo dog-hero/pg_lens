@@ -108,12 +108,39 @@ export interface BloatRow {
   is_na: boolean;
 }
 
+/** Cluster-wide XID wraparound headline (F2), `age(datfrozenxid)`. */
+export interface VacuumClusterAge {
+  max_age_xids: number;
+  worst_database: string;
+}
+
+/** One table's XID age + dead-tuple ratio ("vacuum debt"), F2. */
+export interface VacuumTableRow {
+  schema: string;
+  name: string;
+  age_xids: number;
+  n_dead_tup: number;
+  n_live_tup: number;
+}
+
+/** One in-flight `pg_stat_progress_vacuum` row (F2). */
+export interface VacuumProgressRow {
+  pid: number;
+  relation: string;
+  phase: string;
+  heap_blks_total: number;
+  heap_blks_scanned: number;
+}
+
 /** Slow-cadence Schema Lens collection; null until the first one lands. */
 export interface SchemaSnapshot {
   collected_at_epoch_ms: number;
   tables: TableStatRow[];
   table_bloat: BloatRow[];
   index_bloat: BloatRow[];
+  /** null only before the first successful slow collection of a session. */
+  vacuum_cluster_age: VacuumClusterAge | null;
+  vacuum_tables: VacuumTableRow[];
   status: SchemaStatus;
 }
 
@@ -198,6 +225,13 @@ export interface DbSnapshot {
   schema: SchemaSnapshot | null;
   statements: StatementsSnapshot | null;
   replication: ReplicationInfo | null;
+  /**
+   * In-flight vacuum progress (F2), refreshed every fast tick, best-effort:
+   * null when the collection failed this tick (restricted role, hidden
+   * view, ...); an empty array means it succeeded and found nothing running
+   * — the common, calm case, never rendered as an error.
+   */
+  vacuum_progress: VacuumProgressRow[] | null;
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
 }

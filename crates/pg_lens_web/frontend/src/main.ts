@@ -8,6 +8,7 @@ import { renderVitals } from "./vitals";
 import { HistoryChart } from "./chart";
 import { ActivityTable } from "./table";
 import { SchemaLens } from "./schema";
+import { VacuumPanel } from "./vacuum-panel";
 import { StatementsLens } from "./statements";
 import { renderReplication } from "./replication";
 import { renderWaits } from "./waits";
@@ -61,6 +62,11 @@ const schemaLens = new SchemaLens(
   el<HTMLParagraphElement>("schema-staleness"),
   el<HTMLParagraphElement>("schema-warning"),
   el<HTMLParagraphElement>("schema-placeholder"),
+);
+const vacuumPanel = new VacuumPanel(
+  el<HTMLParagraphElement>("vacuum-cluster"),
+  el<HTMLUListElement>("vacuum-tables"),
+  el<HTMLParagraphElement>("vacuum-progress"),
 );
 const statementsLens = new StatementsLens(
   el<HTMLTableElement>("statements"),
@@ -136,7 +142,11 @@ function onSnapshot(snapshot: DbSnapshot): void {
 
 function renderSnapshot(snapshot: DbSnapshot): void {
   renderStatus(snapshot.status);
-  renderVitals(vitalsContainer, snapshot.vitals);
+  renderVitals(
+    vitalsContainer,
+    snapshot.vitals,
+    snapshot.schema?.vacuum_cluster_age ?? null,
+  );
   renderReplication(replicationPanel, replicationBody, snapshot.replication);
   chart.update(snapshot.history);
   // Top waits: aggregated over the FULL activity set (never the filtered
@@ -145,6 +155,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   renderWaits(waitsStrip, snapshot.activity);
   table.update(snapshot.activity, snapshot.locks);
   schemaLens.update(snapshot.schema, snapshot.vitals.database);
+  vacuumPanel.update(snapshot.schema, snapshot.vacuum_progress);
   statementsLens.update(snapshot.statements, snapshot.vitals.database);
   announceAdmin(snapshot.last_admin_action);
   const v = snapshot.vitals;

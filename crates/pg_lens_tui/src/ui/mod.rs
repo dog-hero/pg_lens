@@ -10,6 +10,7 @@ mod schema_lens;
 mod splash;
 mod sql;
 mod style;
+mod vacuum;
 
 use pg_lens_core::PollerStatus;
 use ratatui::{
@@ -394,6 +395,49 @@ mod tests {
         // and the on-demand re-estimate hint.
         assert!(screen.contains("ESTIMATED"), "estimate label is mandatory");
         assert!(screen.contains("R: refresh + bloat"), "schema R hint: {screen}");
+    }
+
+    /// F2: the "Vacuum / wraparound" section renders under the tables list —
+    /// cluster headline, worst-tables list, and the mock's in-flight vacuum
+    /// progress line.
+    #[test]
+    fn schema_lens_renders_the_vacuum_section() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let screen = render(&mut app);
+        assert!(screen.contains("Vacuum / wraparound"), "{screen}");
+        assert!(screen.contains("wraparound:"), "{screen}");
+        assert!(screen.contains("worst db: shop"), "{screen}");
+        // Worst per-table ages (mock: order_items has the oldest XID age).
+        assert!(screen.contains("public.order_items"), "{screen}");
+        assert!(screen.contains("dead"), "dead-tuple ratio shown: {screen}");
+        // The mock's one in-flight autovacuum, calmly shown mid-progress.
+        assert!(screen.contains("vacuuming order_items"), "{screen}");
+        assert!(screen.contains("vacuuming heap"), "{screen}");
+    }
+
+    /// Below the yellow threshold the cluster headline renders un-alarming
+    /// (no `!`/`!!` marker before "wraparound:"); past it, the marker and
+    /// severity color kick in. Also proves the calm "no vacuum running"
+    /// state when the collection succeeded but found nothing in flight.
+    #[test]
+    fn vacuum_section_reflects_severity_and_calm_progress_state() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let mut snap = app.snapshot.as_ref().clone();
+        let mut schema = snap.schema.as_deref().expect("mock schema").clone();
+        schema.vacuum_cluster_age = Some(pg_lens_core::VacuumClusterAge {
+            max_age_xids: 600_000_000,
+            worst_database: "warehouse".to_string(),
+        });
+        snap.schema = Some(Arc::new(schema));
+        snap.vacuum_progress = Some(Vec::new());
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
+        let screen = render(&mut app);
+        assert!(screen.contains("worst db: warehouse"), "{screen}");
+        assert!(screen.contains("no vacuum running"), "{screen}");
     }
 
     #[test]

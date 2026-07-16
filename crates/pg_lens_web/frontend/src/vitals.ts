@@ -1,7 +1,8 @@
 // Macro Lens: vitals cards rendered from ServerVitals.
 
-import type { ServerVitals } from "./types";
+import type { ServerVitals, VacuumClusterAge } from "./types";
 import { humanBytes, humanCount, humanDuration, humanPercent } from "./format";
+import { ageSeverity } from "./vacuum";
 
 interface Card {
   label: string;
@@ -13,10 +14,30 @@ interface Card {
   tone: "" | "warn" | "bad";
 }
 
-function cards(v: ServerVitals): Card[] {
+/**
+ * F2's warning chip: only present once the cluster's XID wraparound
+ * distance has crossed yellow/red — absent (no extra card) while healthy,
+ * so the vitals row never grows for a non-issue.
+ */
+function vacuumCard(age: VacuumClusterAge | null): Card | null {
+  if (age === null) return null;
+  const sev = ageSeverity(age.max_age_xids);
+  if (sev === "") return null;
+  return {
+    label: "XID wraparound",
+    value: `${humanCount(age.max_age_xids)} xids`,
+    detail: `worst db: ${age.worst_database} — VACUUM attention needed`,
+    meter: null,
+    tone: sev,
+  };
+}
+
+function cards(v: ServerVitals, vacuumAge: VacuumClusterAge | null): Card[] {
   const saturation =
     v.max_connections > 0 ? v.connections_total / v.max_connections : 0;
+  const warning = vacuumCard(vacuumAge);
   return [
+    ...(warning ? [warning] : []),
     {
       label: "Connections",
       value: `${v.connections_total} / ${v.max_connections}`,
@@ -55,9 +76,13 @@ function cards(v: ServerVitals): Card[] {
   ];
 }
 
-export function renderVitals(container: HTMLElement, v: ServerVitals): void {
+export function renderVitals(
+  container: HTMLElement,
+  v: ServerVitals,
+  vacuumAge: VacuumClusterAge | null = null,
+): void {
   container.replaceChildren(
-    ...cards(v).map((card) => {
+    ...cards(v, vacuumAge).map((card) => {
       const el = document.createElement("div");
       el.className = card.tone === "" ? "card" : `card ${card.tone}`;
       const meter =

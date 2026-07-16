@@ -8,7 +8,8 @@ use tokio::task::JoinHandle;
 use tokio_postgres::{Client, Config, NoTls, Row, Transaction};
 
 use crate::models::{
-    ActivityRow, BloatRow, LockRow, StatementRow, TableStatRow, WalReceiverRow, WalSenderRow,
+    ActivityRow, BloatRow, LockRow, StatementRow, TableStatRow, VacuumClusterAge,
+    VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow,
 };
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
@@ -320,6 +321,37 @@ pub fn statement_from_row(row: &Row) -> Result<StatementRow, tokio_postgres::Err
         rows: row.try_get("rows")?,
         shared_blks_hit: row.try_get("shared_blks_hit")?,
         shared_blks_read: row.try_get("shared_blks_read")?,
+    })
+}
+
+/// Maps the single row of `queries/vacuum_cluster_age.sql` onto
+/// [`VacuumClusterAge`] — the cluster-wide XID wraparound headline.
+pub fn vacuum_cluster_age_from_row(row: &Row) -> Result<VacuumClusterAge, tokio_postgres::Error> {
+    Ok(VacuumClusterAge {
+        max_age_xids: row.try_get("max_age_xids")?,
+        worst_database: row.try_get("worst_database")?,
+    })
+}
+
+/// Maps one row of `queries/vacuum_table_ages.sql` onto [`VacuumTableRow`].
+pub fn vacuum_table_from_row(row: &Row) -> Result<VacuumTableRow, tokio_postgres::Error> {
+    Ok(VacuumTableRow {
+        schema: row.try_get("schemaname")?,
+        name: row.try_get("relname")?,
+        age_xids: row.try_get("age_xids")?,
+        n_dead_tup: row.try_get("n_dead_tup")?,
+        n_live_tup: row.try_get("n_live_tup")?,
+    })
+}
+
+/// Maps one row of `queries/vacuum_progress.sql` onto [`VacuumProgressRow`].
+pub fn vacuum_progress_from_row(row: &Row) -> Result<VacuumProgressRow, tokio_postgres::Error> {
+    Ok(VacuumProgressRow {
+        pid: row.try_get("pid")?,
+        relation: row.try_get("relation")?,
+        phase: row.try_get("phase")?,
+        heap_blks_total: row.try_get("heap_blks_total")?,
+        heap_blks_scanned: row.try_get("heap_blks_scanned")?,
     })
 }
 

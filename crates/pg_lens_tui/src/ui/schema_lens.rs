@@ -24,12 +24,12 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Clear, Paragraph, Row, Table, Wrap},
 };
 
 use crate::app::{App, find_table_bloat};
-use crate::ui::{format, style};
+use crate::ui::{format, style, vacuum};
 
 /// Fixed widths of every column except the flexible Table one, in order:
 /// severity, Size, Live, Dead, Bloat%, Bloat, Last AV, Seq/Idx.
@@ -98,14 +98,16 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
         SchemaStatus::Ok => 0,
         SchemaStatus::Error(_) => 1,
     };
-    let [table_area, error_area, footer_area] = Layout::vertical([
+    let [table_area, vacuum_area, error_area, footer_area] = Layout::vertical([
         Constraint::Min(0),
+        Constraint::Length(vacuum_section_height()),
         Constraint::Length(error_height),
         Constraint::Length(1),
     ])
     .areas(area);
 
     draw_table(app, &schema, frame, table_area);
+    draw_vacuum(app, &schema, frame, vacuum_area);
     if let SchemaStatus::Error(msg) = &schema.status {
         let line = Line::from(format!(" schema: {msg} \u{2014} showing last collection"))
             .style(Style::new().fg(Color::White).bg(Color::Red).bold());
@@ -115,6 +117,102 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     if app.detail_open {
         draw_detail(app, &schema, frame, area);
     }
+}
+
+/// How many worst-table rows the vacuum section shows — fixed so the panel
+/// never jitters in height as the collection's row count varies.
+const VACUUM_TABLE_ROWS: usize = 3;
+
+/// Fixed height of the "Vacuum / wraparound" section: 2 border rows, one
+/// cluster headline, up to [`VACUUM_TABLE_ROWS`] worst-table rows, and one
+/// in-flight-progress row.
+fn vacuum_section_height() -> u16 {
+    2 + 1 + VACUUM_TABLE_ROWS as u16 + 1
+}
+
+/// Dead-tuple ratio as a percentage; `0.0` on an empty table (never NaN).
+fn dead_pct(dead: i64, live: i64) -> f64 {
+    let total = dead + live;
+    if total > 0 {
+        dead as f64 / total as f64 * 100.0
+    } else {
+        0.0
+    }
+}
+
+/// F2's "Vacuum / wraparound" section: the cluster-wide XID wraparound
+/// headline (severity-colored), the worst per-table ages with their
+/// dead-tuple ratio, and any in-flight `pg_stat_progress_vacuum` row —
+/// rendered as a calm "no vacuum running" when the (usual) case is empty.
+fn draw_vacuum(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    match &schema.vacuum_cluster_age {
+        Some(age) => {
+            let sev = vacuum::age_severity(age.max_age_xids);
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
+                Span::styled("wraparound: ", style::label_style()),
+                Span::styled(
+                    format!("{} xids", format::human_count(age.max_age_xids)),
+                    Style::new().fg(sev.color()).bold(),
+                ),
+                Span::styled(
+                    format!(" (worst db: {})", age.worst_database),
+                    style::label_style(),
+                ),
+            ]));
+        }
+        None => lines.push(Line::from(" wraparound: collecting\u{2026}").dim()),
+    }
+
+    if schema.vacuum_tables.is_empty() {
+        lines.push(Line::from("  (no per-table XID ages collected yet)").dim());
+    } else {
+        for table in schema.vacuum_tables.iter().take(VACUUM_TABLE_ROWS) {
+            let sev = vacuum::age_severity(table.age_xids);
+            let pct = dead_pct(table.n_dead_tup, table.n_live_tup);
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
+                Span::raw(format!("{}.{}  ", table.schema, table.name)),
+                Span::styled(
+                    format!("{} xids", format::human_count(table.age_xids)),
+                    Style::new().fg(sev.color()),
+                ),
+                Span::styled(format!("  \u{b7} {pct:.1}% dead"), style::label_style()),
+            ]));
+        }
+    }
+    // Pad to the fixed row count so the panel height stays constant.
+    while lines.len() < 1 + VACUUM_TABLE_ROWS {
+        lines.push(Line::default());
+    }
+
+    match app.snapshot.vacuum_progress.as_deref() {
+        Some([]) => lines.push(Line::from("  no vacuum running").dim()),
+        Some(rows) => {
+            // Usually one; if several run concurrently, the first is enough
+            // for this compact strip (the full list would need its own view).
+            if let Some(row) = rows.first() {
+                let pct = if row.heap_blks_total > 0 {
+                    100.0 * row.heap_blks_scanned as f64 / row.heap_blks_total as f64
+                } else {
+                    0.0
+                };
+                lines.push(Line::from(format!(
+                    "  vacuuming {} \u{2014} {} ({pct:.0}%)",
+                    row.relation, row.phase
+                )));
+            } else {
+                lines.push(Line::from("  no vacuum running").dim());
+            }
+        }
+        None => lines.push(Line::from("  vacuum progress: unavailable").dim()),
+    }
+
+    let panel =
+        Paragraph::new(lines).block(Block::bordered().title("Vacuum / wraparound"));
+    frame.render_widget(panel, area);
 }
 
 fn draw_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {

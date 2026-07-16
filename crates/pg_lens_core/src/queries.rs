@@ -26,6 +26,16 @@ pub struct QuerySet {
     /// WAL receiver of a standby (`pg_stat_wal_receiver`). Runs per fast tick.
     /// Empty on a primary.
     pub wal_receiver: &'static str,
+    /// Cluster-wide XID wraparound distance (`pg_database.datfrozenxid`
+    /// age), F2. Runs on the slow schema cadence, same essential
+    /// transaction as `table_stats`.
+    pub vacuum_cluster_age: &'static str,
+    /// Per-table XID age + dead-tuple ratio ("vacuum debt"), F2. Same
+    /// cadence/transaction as `vacuum_cluster_age`.
+    pub vacuum_table_ages: &'static str,
+    /// In-flight `pg_stat_progress_vacuum`, F2. Runs on the fast tick,
+    /// best-effort (absent on any failure, like `replication`).
+    pub vacuum_progress: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -34,6 +44,9 @@ pub const TABLE_STATS_LIMIT: usize = 200;
 
 /// Row cap of the statements query (top N by total execution time).
 pub const STATEMENTS_LIMIT: usize = 100;
+
+/// Row cap of the vacuum per-table ages query (worst N by XID age).
+pub const VACUUM_TABLES_LIMIT: usize = 20;
 
 const ACTIVITY_POST_140000: &str = include_str!("../queries/activity_post_140000.sql");
 const ACTIVITY_POST_130000: &str = include_str!("../queries/activity_post_130000.sql");
@@ -63,6 +76,12 @@ const DO_TERMINATE_BACKEND: &str = include_str!("../queries/do_terminate_backend
 // each serves the whole supported range.
 const REPLICATION: &str = include_str!("../queries/replication.sql");
 const WAL_RECEIVER: &str = include_str!("../queries/wal_receiver.sql");
+// Vacuum health / XID wraparound (F2). All version-independent 13+ (plain
+// catalog + pg_stat_progress_vacuum, present since PG 9.6/13's stable
+// shape), so one file each serves the whole supported range.
+const VACUUM_CLUSTER_AGE: &str = include_str!("../queries/vacuum_cluster_age.sql");
+const VACUUM_TABLE_AGES: &str = include_str!("../queries/vacuum_table_ages.sql");
+const VACUUM_PROGRESS: &str = include_str!("../queries/vacuum_progress.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -80,6 +99,9 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             terminate_backend: DO_TERMINATE_BACKEND,
             replication: REPLICATION,
             wal_receiver: WAL_RECEIVER,
+            vacuum_cluster_age: VACUUM_CLUSTER_AGE,
+            vacuum_table_ages: VACUUM_TABLE_AGES,
+            vacuum_progress: VACUUM_PROGRESS,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -94,6 +116,9 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             terminate_backend: DO_TERMINATE_BACKEND,
             replication: REPLICATION,
             wal_receiver: WAL_RECEIVER,
+            vacuum_cluster_age: VACUUM_CLUSTER_AGE,
+            vacuum_table_ages: VACUUM_TABLE_AGES,
+            vacuum_progress: VACUUM_PROGRESS,
         })
     } else {
         Err(format!(
@@ -197,6 +222,23 @@ mod tests {
             // LSN diff guarded against evaluation during recovery.
             assert!(q.replication.contains("pg_is_in_recovery()"));
             assert!(q.wal_receiver.contains("pg_stat_wal_receiver"));
+        }
+    }
+
+    #[test]
+    fn vacuum_queries_serve_pg13_and_up_with_conventions() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.vacuum_cluster_age.contains("pg_database"));
+            assert!(q.vacuum_cluster_age.contains("age(datfrozenxid)"));
+            assert!(q.vacuum_table_ages.contains("pg_stat_user_tables"));
+            assert!(q.vacuum_table_ages.contains("relfrozenxid"));
+            assert!(
+                q.vacuum_table_ages
+                    .contains(&format!("LIMIT {VACUUM_TABLES_LIMIT}")),
+                "SQL row cap must match VACUUM_TABLES_LIMIT"
+            );
+            assert!(q.vacuum_progress.contains("pg_stat_progress_vacuum"));
         }
     }
 

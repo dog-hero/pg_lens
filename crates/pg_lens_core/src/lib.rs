@@ -22,7 +22,8 @@ pub use history::{HistoryPoint, SnapshotHistory};
 pub use models::{
     ActivityRow, AdminActionResult, AdminCommand, AdminKind, AdminOutcome, BloatRow, DbSnapshot,
     LockRow, PollerStatus, ReplicationInfo, SchemaSnapshot, SchemaStatus, ServerVitals,
-    StatementRow, StatementsSnapshot, StatementsStatus, TableStatRow, WalReceiverRow, WalSenderRow,
+    StatementRow, StatementsSnapshot, StatementsStatus, TableStatRow, VacuumClusterAge,
+    VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow,
 };
 pub use services::PasswordSource;
 pub use waits::{WaitSummary, top_waits};

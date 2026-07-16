@@ -456,6 +456,67 @@ table#schema {
   background: var(--bg-raised);
 }
 
+/* ── vacuum / wraparound section (F2) ──────────────────────────────── */
+
+.vacuum-section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.vacuum-section h3 {
+  margin: 0 0 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+}
+
+.vacuum-cluster,
+.vacuum-progress {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+}
+
+.vacuum-cluster.warn,
+.vacuum-progress.warn {
+  color: var(--warn);
+}
+
+.vacuum-cluster.bad,
+.vacuum-progress.bad {
+  color: var(--bad);
+}
+
+.vacuum-progress.dim {
+  color: var(--fg-dim);
+}
+
+.vacuum-tables {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-size: 0.82rem;
+}
+
+.vacuum-tables li {
+  padding: 2px 0;
+}
+
+.vacuum-tables li.warn {
+  color: var(--warn);
+}
+
+.vacuum-tables li.bad {
+  color: var(--bad);
+}
+
+.vacuum-tables li.vacuum-empty {
+  color: var(--fg-dim);
+  list-style: none;
+  margin-left: -18px;
+}
+
 /* ── statements (Queries) table ─────────────────────────────────────── */
 
 table#statements {
