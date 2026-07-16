@@ -2,10 +2,13 @@
 
 pub mod format;
 mod confirm;
+mod index_lens;
 mod macro_lens;
 mod micro_lens;
 mod picker;
 mod query_lens;
+mod replication;
+mod replication_lens;
 mod schema_lens;
 mod splash;
 mod sql;
@@ -21,7 +24,7 @@ use ratatui::{
     widgets::{Paragraph, Tabs},
 };
 
-use crate::app::{App, SchemaView, Tab};
+use crate::app::{App, Tab};
 
 /// Root layout: header / tabs / [status banner] / body / statusbar. The
 /// banner row collapses to zero height while the poller is healthy.
@@ -70,7 +73,9 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     match app.active_tab {
         Tab::MacroLens => macro_lens::draw(app, frame, body_area),
         Tab::MicroLens => micro_lens::draw(app, frame, body_area),
+        Tab::ReplicationLens => replication_lens::draw(app, frame, body_area),
         Tab::SchemaLens => schema_lens::draw(app, frame, body_area),
+        Tab::IndexLens => index_lens::draw(app, frame, body_area),
         Tab::QueryLens => query_lens::draw(app, frame, body_area),
     }
     draw_statusbar(app, frame, statusbar_area);
@@ -173,17 +178,25 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         None => "waiting".to_string(),
     };
     // Row counter and sort label follow the active lens (the Schema Lens
-    // keeps its own selection and sort mode); `R: recollect` is a Schema
-    // Lens hint (the key itself works from any lens).
-    // `sort_label` is `None` for the Schema Lens's Indexes view (F3): it has
-    // no sort mode of its own (fixed severity-then-size order) — the `s`
+    // keeps its own selection and sort mode); `R: recollect` is a Schema/
+    // Index Lens hint (the key itself works from any lens).
+    // `sort_label` is `None` for the Index Lens and the Replication Lens:
+    // neither has a sort mode of its own (fixed severity order) — the `s`
     // hint stays hidden there instead of advertising an inert key.
     let (selected, len, sort_label, slow_lens_extra) = match app.active_tab {
-        Tab::SchemaLens if app.schema_view == SchemaView::Indexes => (
+        Tab::IndexLens => (
             app.index_table_state.selected(),
             app.index_row_order.len(),
             None,
             true,
+        ),
+        // Replication is a fast-tick source (no shared slow cadence with
+        // Schema/Query), so it gets no `R: recollect` hint.
+        Tab::ReplicationLens => (
+            app.replication_table_state.selected(),
+            app.replication_row_order.len(),
+            None,
+            false,
         ),
         Tab::SchemaLens => (
             app.schema_table_state.selected(),
@@ -263,16 +276,6 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         push_hint(&mut spans, "Enter", ": detail".into(), true);
     }
-    // `i` toggles the Schema Lens's Tables/Indexes sub-view (F3) — the hint
-    // names the view a press would switch TO, matching the Space/pause
-    // hint's convention of describing the resulting action.
-    if app.active_tab == Tab::SchemaLens {
-        let desc = match app.schema_view {
-            SchemaView::Tables => ": indexes",
-            SchemaView::Indexes => ": tables",
-        };
-        push_hint(&mut spans, "i", desc.into(), true);
-    }
     if let Some(sort_label) = sort_label {
         push_hint(&mut spans, "s", format!(": sort={sort_label}"), true);
     }
@@ -340,6 +343,16 @@ mod tests {
         assert!(screen.contains("pressure"), "{screen}");
     }
 
+    /// U1: all six tabs render in the tab bar, in the documented order.
+    #[test]
+    fn six_lens_titles_render_in_the_tab_bar() {
+        let mut app = App::new();
+        let screen = render(&mut app);
+        for title in Tab::TITLES {
+            assert!(screen.contains(title), "missing tab {title}: {screen}");
+        }
+    }
+
     /// F2.5: the mock's replication slots render under the senders in the
     /// Macro Lens's Replication panel — the calm active slot with no
     /// marker text worth asserting on, and the inactive/retaining one with
@@ -348,6 +361,20 @@ mod tests {
     fn macro_lens_renders_replication_slots_with_severity_marker() {
         let mut app = App::new();
         let screen = render(&mut app);
+        assert!(screen.contains("replica_1_slot"), "{screen}");
+        assert!(screen.contains("analytics_cdc"), "{screen}");
+        assert!(screen.contains('!'), "warn marker must be visible: {screen}");
+    }
+
+    /// U1: the Replication Lens shows ALL of the mock's slots (unlike the
+    /// Macro Lens's capped panel), with severity markers intact.
+    #[test]
+    fn replication_lens_renders_all_slots() {
+        let mut app = App::new();
+        app.active_tab = Tab::ReplicationLens;
+        let screen = render(&mut app);
+        assert!(screen.contains("Role"), "{screen}");
+        assert!(screen.contains("Slots"), "{screen}");
         assert!(screen.contains("replica_1_slot"), "{screen}");
         assert!(screen.contains("analytics_cdc"), "{screen}");
         assert!(screen.contains('!'), "warn marker must be visible: {screen}");
@@ -530,27 +557,15 @@ mod tests {
         assert!(screen.contains("35.0%"), "index bloat pct shown");
     }
 
-    /// F3: `i` toggles the Schema Lens between Tables and Indexes, the
-    /// statusbar hint flips with it, and the Indexes view renders its
-    /// columns + the mock's three findings (unused, exact dup, prefix).
+    /// U1: the Index Lens is its own tab now (no more `i` toggle) — it
+    /// renders its columns + the mock's three findings (unused, exact dup,
+    /// prefix) directly.
     #[test]
-    fn schema_lens_i_toggles_to_the_indexes_view_and_back() {
+    fn index_lens_renders_its_own_tab() {
         let mut app = App::new();
-        app.active_tab = Tab::SchemaLens;
+        app.active_tab = Tab::IndexLens;
         let screen = render(&mut app);
-        assert!(screen.contains("i: indexes"), "tables-view hint: {screen}");
-        assert!(!screen.contains("i: tables"), "{screen}");
-
-        crate::app::update(
-            &mut app,
-            crate::app::Action::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('i'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-        );
-        let screen = render(&mut app);
-        assert!(screen.contains("i: tables"), "indexes-view hint: {screen}");
-        assert_eq!(app.schema_view, crate::app::SchemaView::Indexes);
+        assert!(screen.contains("Indexes"), "tab title/panel: {screen}");
         for header in ["Index", "Table", "Size", "Scans", "Tup Read", "Flag"] {
             assert!(screen.contains(header), "missing column {header}: {screen}");
         }
@@ -565,34 +580,17 @@ mod tests {
         // Footer shows the stats-reset freshness caveat, not just staleness.
         assert!(screen.contains("stats reset"), "freshness header: {screen}");
         assert!(screen.contains("signal, not verdict"), "{screen}");
-
-        // Toggle back.
-        crate::app::update(
-            &mut app,
-            crate::app::Action::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('i'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-        );
-        assert_eq!(app.schema_view, crate::app::SchemaView::Tables);
-        let screen = render(&mut app);
-        assert!(screen.contains("i: indexes"), "{screen}");
+        // Fixed severity order, no sort hint (like the Query Lens's `s`).
+        assert!(!screen.contains("sort="), "{screen}");
     }
 
-    /// Enter on a selected Indexes-view row opens the detail panel: the
-    /// full indexdef verbatim, and — for a duplicate — the partner's name
-    /// spelled out as evidence, not just a bare "DUP" label.
+    /// Enter on a selected Index Lens row opens the detail panel: the full
+    /// indexdef verbatim, and — for a duplicate — the partner's name spelled
+    /// out as evidence, not just a bare "DUP" label.
     #[test]
     fn index_detail_shows_indexdef_and_duplicate_partner() {
         let mut app = App::new();
-        app.active_tab = Tab::SchemaLens;
-        crate::app::update(
-            &mut app,
-            crate::app::Action::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('i'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-        );
+        app.active_tab = Tab::IndexLens;
         // Severity-then-size order puts an UNUSED row first (rank 0).
         app.detail_open = true;
         let screen = render(&mut app);

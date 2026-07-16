@@ -456,13 +456,7 @@ table#schema {
   background: var(--bg-raised);
 }
 
-/* ── index advisor (F3) ────────────────────────────────────────────── */
-
-.schema-subtabs {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 10px;
-}
+/* ── index advisor (U1: its own top-level tab) ─────────────────────── */
 
 #indexes {
   width: 100%;

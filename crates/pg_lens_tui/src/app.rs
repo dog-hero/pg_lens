@@ -33,28 +33,45 @@ pub enum Tab {
     #[default]
     MacroLens,
     MicroLens,
+    /// The full replication view (U1): all senders/receiver + every slot as
+    /// a scrollable table. The Macro Lens keeps its own compact, capped
+    /// summary — this lens is where nothing clips.
+    ReplicationLens,
     SchemaLens,
+    /// The index advisor (U1), promoted out of the Schema Lens's old `i`
+    /// toggle into its own full-height tab.
+    IndexLens,
     QueryLens,
 }
 
 impl Tab {
-    pub const TITLES: [&'static str; 4] =
-        ["Macro Lens", "Micro Lens", "Schema Lens", "Query Lens"];
+    pub const TITLES: [&'static str; 6] = [
+        "Macro Lens",
+        "Micro Lens",
+        "Replication",
+        "Schema Lens",
+        "Indexes",
+        "Query Lens",
+    ];
 
     pub fn index(self) -> usize {
         match self {
             Tab::MacroLens => 0,
             Tab::MicroLens => 1,
-            Tab::SchemaLens => 2,
-            Tab::QueryLens => 3,
+            Tab::ReplicationLens => 2,
+            Tab::SchemaLens => 3,
+            Tab::IndexLens => 4,
+            Tab::QueryLens => 5,
         }
     }
 
     pub fn next(self) -> Self {
         match self {
             Tab::MacroLens => Tab::MicroLens,
-            Tab::MicroLens => Tab::SchemaLens,
-            Tab::SchemaLens => Tab::QueryLens,
+            Tab::MicroLens => Tab::ReplicationLens,
+            Tab::ReplicationLens => Tab::SchemaLens,
+            Tab::SchemaLens => Tab::IndexLens,
+            Tab::IndexLens => Tab::QueryLens,
             Tab::QueryLens => Tab::MacroLens,
         }
     }
@@ -126,31 +143,12 @@ impl SchemaSortMode {
     }
 }
 
-/// Which table the Schema Lens shows: per-table stats (the lens's original
-/// content) or the F3 index advisor. `i` toggles it while the Schema Lens
-/// is active. Deliberately has no sort mode of its own (v1): the Indexes
-/// view is always ordered severity-then-size — see [`index_finding_rank`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SchemaView {
-    #[default]
-    Tables,
-    Indexes,
-}
-
-impl SchemaView {
-    pub fn toggle(self) -> Self {
-        match self {
-            SchemaView::Tables => SchemaView::Indexes,
-            SchemaView::Indexes => SchemaView::Tables,
-        }
-    }
-}
-
 /// Fixed severity order of one [`pg_lens_core::IndexFinding`] — lower sorts
 /// first. `Unused` (red) is the strongest, cheapest-to-verify claim;
 /// `DuplicatePrefix` (dim-yellow) the weakest. Shared by [`resort_indexes`]
-/// (row order) and `ui/schema_lens.rs` (marker/color), so the two never
-/// disagree about which finding is "worse".
+/// (row order) and `ui/index_lens.rs` (marker/color), so the two never
+/// disagree about which finding is "worse". The Index Lens (U1) has no
+/// user-chosen sort mode of its own — this fixed order is it.
 pub fn index_finding_rank(finding: &pg_lens_core::IndexFinding) -> u8 {
     match finding {
         pg_lens_core::IndexFinding::Unused => 0,
@@ -158,6 +156,30 @@ pub fn index_finding_rank(finding: &pg_lens_core::IndexFinding) -> u8 {
         pg_lens_core::IndexFinding::DuplicatePrefix { .. } => 2,
         pg_lens_core::IndexFinding::None => 3,
     }
+}
+
+/// Fixed severity rank of one [`pg_lens_core::ReplicationSlotRow`] — lower
+/// sorts first (worse first). Mirrors the Macro Lens's original
+/// `slot_severity` rule exactly: `wal_status` of `unreserved`/`lost` is
+/// always worst; otherwise an inactive slot retaining WAL is a rising
+/// concern (>10 GB is as bad as it gets), and anything else is calm. Pure
+/// core logic (no ratatui) so it can be the single source of truth for both
+/// [`resort_replication`] (row order) and `ui/replication.rs` (marker/color)
+/// — the two must never disagree about which slot is worse.
+pub fn slot_severity_rank(slot: &pg_lens_core::ReplicationSlotRow) -> u8 {
+    if matches!(slot.wal_status.as_deref(), Some("unreserved") | Some("lost")) {
+        return 0;
+    }
+    if !slot.active {
+        let retained = slot.retained_wal_bytes.unwrap_or(0);
+        if retained > 10 * 1024 * 1024 * 1024 {
+            return 0;
+        }
+        if retained > 0 {
+            return 1;
+        }
+    }
+    2
 }
 
 /// Sort column of the Query Lens table; `s` cycles through the variants
@@ -298,17 +320,21 @@ pub struct App {
     /// Schema Lens selection, independent from the Micro Lens one so
     /// switching lenses never loses either cursor.
     pub schema_table_state: TableState,
-    /// Which Schema Lens sub-view is on screen: Tables or Indexes (F3),
-    /// toggled by `i`. Independent of `active_tab` so switching to another
-    /// lens and back keeps the choice.
-    pub schema_view: SchemaView,
     /// Indices into `snapshot.schema.indexes` in severity-then-size display
-    /// order (the Indexes view's twin of `schema_row_order`; no sort mode
-    /// of its own — see [`SchemaView`]).
+    /// order (the Index Lens's twin of `schema_row_order`; no sort mode of
+    /// its own — see [`index_finding_rank`]).
     pub index_row_order: Vec<usize>,
-    /// Indexes view selection, independent from the Tables one so toggling
-    /// `i` never loses either cursor.
+    /// Index Lens selection, independent from every other lens's cursor
+    /// (U1: it used to share `SchemaView::Indexes`'s state before the
+    /// promotion to its own tab; the field name is unchanged).
     pub index_table_state: TableState,
+    /// Indices into `snapshot.replication_slots` in severity-then-retained
+    /// display order (the Replication Lens's twin of `index_row_order`; see
+    /// [`slot_severity_rank`]).
+    pub replication_row_order: Vec<usize>,
+    /// Replication Lens slot-table selection, independent from every other
+    /// lens's cursor.
+    pub replication_table_state: TableState,
     /// Indices into `snapshot.statements.statements` in display order
     /// (Query Lens twin of `row_order`; see `statements_sort_mode`).
     pub statements_row_order: Vec<usize>,
@@ -405,9 +431,10 @@ impl App {
             schema_row_order: Vec::new(),
             schema_sort_mode: SchemaSortMode::default(),
             schema_table_state: TableState::default().with_selected(0),
-            schema_view: SchemaView::default(),
             index_row_order: Vec::new(),
             index_table_state: TableState::default().with_selected(0),
+            replication_row_order: Vec::new(),
+            replication_table_state: TableState::default().with_selected(0),
             statements_row_order: Vec::new(),
             statements_sort_mode: StatementsSortMode::default(),
             statements_table_state: TableState::default().with_selected(0),
@@ -435,6 +462,7 @@ impl App {
         resort(&mut app);
         resort_schema(&mut app);
         resort_indexes(&mut app);
+        resort_replication(&mut app);
         resort_statements(&mut app);
         app
     }
@@ -538,6 +566,7 @@ fn apply_snapshot(app: &mut App, snapshot: Arc<DbSnapshot>) {
     resort(app);
     resort_schema(app);
     resort_indexes(app);
+    resort_replication(app);
     resort_statements(app);
     clamp_selection(app);
 }
@@ -672,18 +701,16 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('c') => open_confirm(app, false),
         KeyCode::Char('K') => open_confirm(app, true),
         // Enter toggles the detail panel of the active lens's selected row
-        // (Micro: session query; Schema/Tables: table stats + index bloat;
-        // Schema/Indexes: indexdef + duplicate partner, if any).
+        // (Micro: session query; Schema: table stats + index bloat; Index
+        // Lens: indexdef + duplicate partner, if any). The Replication Lens
+        // has no detail panel (U1): every slot field already fits in its
+        // row, so Enter is a no-op there, same as the Macro Lens.
         KeyCode::Enter => {
             if app.detail_open {
                 app.detail_open = false;
             } else if (app.active_tab == Tab::MicroLens && app.table_state.selected().is_some())
-                || (app.active_tab == Tab::SchemaLens
-                    && app.schema_view == SchemaView::Tables
-                    && app.selected_table().is_some())
-                || (app.active_tab == Tab::SchemaLens
-                    && app.schema_view == SchemaView::Indexes
-                    && app.selected_index().is_some())
+                || (app.active_tab == Tab::SchemaLens && app.selected_table().is_some())
+                || (app.active_tab == Tab::IndexLens && app.selected_index().is_some())
                 || (app.active_tab == Tab::QueryLens && app.selected_statement().is_some())
             {
                 app.detail_open = true;
@@ -699,18 +726,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.filter_saved = app.filter.clone();
             app.filter_editing = true;
         }
-        // `i` toggles the Schema Lens between Tables and Indexes (F3).
-        // Schema Lens only — the other lenses have no such sub-view.
-        // Closes any open detail panel: the two views show different row
-        // types, so a stale detail (wrong shape) must never linger.
-        KeyCode::Char('i') if app.active_tab == Tab::SchemaLens => {
-            app.schema_view = app.schema_view.toggle();
-            app.detail_open = false;
-        }
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
         // `s` cycles the sort of whichever lens is active (each keeps its
-        // own mode, so tabbing away and back never loses the choice).
+        // own mode, so tabbing away and back never loses the choice). The
+        // Index Lens and Replication Lens have no sort mode of their own
+        // (fixed severity order — see `index_finding_rank`/
+        // `slot_severity_rank`), so `s` is inert there.
         KeyCode::Char('s') => match app.active_tab {
             Tab::SchemaLens => {
                 app.schema_sort_mode = app.schema_sort_mode.next();
@@ -720,6 +742,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 app.statements_sort_mode = app.statements_sort_mode.next();
                 resort_statements(app);
             }
+            Tab::IndexLens | Tab::ReplicationLens => {}
             _ => {
                 app.sort_mode = app.sort_mode.next();
                 resort(app);
@@ -894,9 +917,11 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) {
 /// Lens cursor there (harmless, matches the pre-S3 behavior).
 fn move_selection(app: &mut App, delta: i64) {
     let (state, len) = match app.active_tab {
-        Tab::SchemaLens if app.schema_view == SchemaView::Indexes => {
-            (&mut app.index_table_state, app.index_row_order.len())
-        }
+        Tab::IndexLens => (&mut app.index_table_state, app.index_row_order.len()),
+        Tab::ReplicationLens => (
+            &mut app.replication_table_state,
+            app.replication_row_order.len(),
+        ),
         Tab::SchemaLens => (
             &mut app.schema_table_state,
             app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len()),
@@ -948,7 +973,7 @@ fn clamp_selection(app: &mut App) {
     let schema_len = app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len());
     if schema_len == 0 {
         app.schema_table_state.select(None);
-        if app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables {
+        if app.active_tab == Tab::SchemaLens {
             app.detail_open = false;
         }
     } else {
@@ -963,7 +988,7 @@ fn clamp_selection(app: &mut App) {
     let index_len = app.index_row_order.len();
     if index_len == 0 {
         app.index_table_state.select(None);
-        if app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Indexes {
+        if app.active_tab == Tab::IndexLens {
             app.detail_open = false;
         }
     } else {
@@ -973,6 +998,20 @@ fn clamp_selection(app: &mut App) {
             .unwrap_or(0)
             .min(index_len - 1);
         app.index_table_state.select(Some(clamped));
+    }
+
+    // Replication Lens has no detail panel (see the Enter keymap), so there
+    // is nothing to clear here — only the cursor needs clamping.
+    let replication_len = app.replication_row_order.len();
+    if replication_len == 0 {
+        app.replication_table_state.select(None);
+    } else {
+        let clamped = app
+            .replication_table_state
+            .selected()
+            .unwrap_or(0)
+            .min(replication_len - 1);
+        app.replication_table_state.select(Some(clamped));
     }
 
     let statements_len = app
@@ -1083,10 +1122,10 @@ fn resort_schema(app: &mut App) {
     app.schema_row_order = order;
 }
 
-/// Recomputes `index_row_order` from the current snapshot (the Indexes
-/// view's twin of [`resort_schema`]). Fixed severity-then-size order (no
-/// user-chosen sort in v1 — see [`SchemaView`]); ties break by schema/table/
-/// name ascending so the order is deterministic.
+/// Recomputes `index_row_order` from the current snapshot (the Index Lens's
+/// twin of [`resort_schema`]). Fixed severity-then-size order (no
+/// user-chosen sort — see [`index_finding_rank`]); ties break by
+/// schema/table/name ascending so the order is deterministic.
 fn resort_indexes(app: &mut App) {
     let Some(schema) = app.snapshot.schema.as_deref() else {
         app.index_row_order = Vec::new();
@@ -1104,6 +1143,30 @@ fn resort_indexes(app: &mut App) {
             })
     });
     app.index_row_order = order;
+}
+
+/// Recomputes `replication_row_order` from the current snapshot (the
+/// Replication Lens's twin of [`resort_indexes`]). Fixed severity-then-
+/// retained order (no user-chosen sort — see [`slot_severity_rank`]); ties
+/// break by slot name ascending so the order is deterministic.
+fn resort_replication(app: &mut App) {
+    let Some(slots) = app.snapshot.replication_slots.as_deref() else {
+        app.replication_row_order = Vec::new();
+        return;
+    };
+    let mut order: Vec<usize> = (0..slots.len()).collect();
+    order.sort_by(|&a, &b| {
+        slot_severity_rank(&slots[a])
+            .cmp(&slot_severity_rank(&slots[b]))
+            .then_with(|| {
+                slots[b]
+                    .retained_wal_bytes
+                    .unwrap_or(0)
+                    .cmp(&slots[a].retained_wal_bytes.unwrap_or(0))
+            })
+            .then_with(|| slots[a].slot_name.cmp(&slots[b].slot_name))
+    });
+    app.replication_row_order = order;
 }
 
 /// Recomputes `statements_row_order` from the current snapshot + sort mode
@@ -1220,13 +1283,17 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_the_four_lenses() {
+    fn tab_cycles_the_six_lenses() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::MacroLens);
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::MicroLens);
         update(&mut app, press(KeyCode::Tab));
+        assert_eq!(app.active_tab, Tab::ReplicationLens);
+        update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::SchemaLens);
+        update(&mut app, press(KeyCode::Tab));
+        assert_eq!(app.active_tab, Tab::IndexLens);
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::QueryLens);
         update(&mut app, press(KeyCode::Tab));
@@ -1442,7 +1509,7 @@ mod tests {
         // Tab closes the panel and switches lens.
         update(&mut app, press(KeyCode::Tab));
         assert!(!app.detail_open);
-        assert_eq!(app.active_tab, Tab::SchemaLens);
+        assert_eq!(app.active_tab, Tab::ReplicationLens);
     }
 
     /// Rows of the Schema Lens in display order, projected by `field`.
@@ -1460,8 +1527,10 @@ mod tests {
     #[test]
     fn schema_sort_cycles_and_reorders_rows() {
         let mut app = App::new();
-        update(&mut app, press(KeyCode::Tab));
-        update(&mut app, press(KeyCode::Tab)); // → Schema Lens
+        for _ in 0..3 {
+            update(&mut app, press(KeyCode::Tab));
+        }
+        assert_eq!(app.active_tab, Tab::SchemaLens);
 
         // Default: total size descending (mock's biggest: pgbench_accounts).
         assert_eq!(app.schema_sort_mode, SchemaSortMode::TotalSize);
@@ -1517,8 +1586,10 @@ mod tests {
     #[test]
     fn schema_lens_has_its_own_selection_and_detail() {
         let mut app = App::new();
-        update(&mut app, press(KeyCode::Tab));
-        update(&mut app, press(KeyCode::Tab)); // → Schema Lens
+        for _ in 0..3 {
+            update(&mut app, press(KeyCode::Tab));
+        }
+        assert_eq!(app.active_tab, Tab::SchemaLens);
 
         // j moves the SCHEMA selection, not the activity one.
         assert_eq!(app.schema_table_state.selected(), Some(0));
@@ -1551,8 +1622,10 @@ mod tests {
         assert_eq!(app.schema_refresh_requests, 1);
 
         // Schema Lens: R keeps counting; lowercase r does nothing.
-        update(&mut app, press(KeyCode::Tab));
-        update(&mut app, press(KeyCode::Tab));
+        for _ in 0..3 {
+            update(&mut app, press(KeyCode::Tab));
+        }
+        assert_eq!(app.active_tab, Tab::SchemaLens);
         update(&mut app, press(KeyCode::Char('R')));
         assert_eq!(app.schema_refresh_requests, 2);
         update(&mut app, press(KeyCode::Char('r')));
@@ -1624,10 +1697,11 @@ mod tests {
 
     // --- Query Lens (pg_stat_statements) --------------------------------------
 
-    /// App on the Query Lens (three Tabs from Macro).
+    /// App on the Query Lens (five Tabs from Macro: Micro, Replication,
+    /// Schema, Index, Query).
     fn query_lens_app() -> App {
         let mut app = App::new();
-        for _ in 0..3 {
+        for _ in 0..5 {
             update(&mut app, press(KeyCode::Tab));
         }
         assert_eq!(app.active_tab, Tab::QueryLens);

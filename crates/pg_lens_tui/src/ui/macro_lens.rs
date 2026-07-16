@@ -6,10 +6,7 @@
 //!
 //! [`DbSnapshot::history`]: pg_lens_core::DbSnapshot
 
-use pg_lens_core::{
-    CheckpointerStats, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, WalReceiverRow,
-    WalSenderRow,
-};
+use pg_lens_core::{CheckpointerStats, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -19,153 +16,12 @@ use ratatui::{
 };
 
 use crate::app::App;
+use crate::ui::replication::{Severity as Lag, receiver_line, sender_line, slot_line, slot_severity};
 use crate::ui::{format, style, vacuum};
 
 /// Bordered block with the panel title in the shared accent style.
 fn titled_block(title: &'static str) -> Block<'static> {
     Block::bordered().title(Line::from(title).style(style::accent_style()))
-}
-
-/// Lag severity for replication rows. Thresholds (either dimension trips the
-/// tier): yellow > 10 MB or > 10 s, red > 100 MB or > 60 s.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Lag {
-    Ok,
-    Warn,
-    Bad,
-}
-
-fn lag_severity(bytes: Option<i64>, secs: Option<f64>) -> Lag {
-    // 0 bytes outstanding = definitively caught up. The seconds measure on the
-    // standby side is `now() - pg_last_xact_replay_timestamp()`, which grows
-    // unboundedly on an idle primary even when the standby is perfectly in
-    // sync — so it must never raise an alarm on its own.
-    if bytes == Some(0) {
-        return Lag::Ok;
-    }
-    let b = bytes.unwrap_or(0);
-    let s = secs.unwrap_or(0.0);
-    if b > 100 * 1024 * 1024 || s > 60.0 {
-        Lag::Bad
-    } else if b > 10 * 1024 * 1024 || s > 10.0 {
-        Lag::Warn
-    } else {
-        Lag::Ok
-    }
-}
-
-impl Lag {
-    /// 1-char textual marker (like the Micro Lens B/W markers) so severity is
-    /// provable in VT captures without relying on color.
-    fn marker(self) -> &'static str {
-        match self {
-            Lag::Ok => "  ",
-            Lag::Warn => "! ",
-            Lag::Bad => "!!",
-        }
-    }
-    fn color(self) -> Color {
-        match self {
-            Lag::Ok => Color::Green,
-            Lag::Warn => Color::Yellow,
-            Lag::Bad => Color::Red,
-        }
-    }
-}
-
-/// Formats the two lag measures as `12 MB · 1.2s`, `—` when both absent.
-fn lag_text(bytes: Option<i64>, secs: Option<f64>) -> String {
-    match (bytes, secs) {
-        (Some(b), Some(s)) => format!("{} · {}", format::human_bytes(b), format::human_duration(s)),
-        (Some(b), None) => format::human_bytes(b),
-        (None, Some(s)) => format::human_duration(s),
-        (None, None) => "—".to_string(),
-    }
-}
-
-fn sender_line(s: &WalSenderRow) -> Line<'static> {
-    let sev = lag_severity(s.replay_lag_bytes, s.replay_lag_secs);
-    Line::from(vec![
-        Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
-        Span::styled(
-            format!("{}/{}", s.application_name, s.client),
-            style::accent_style(),
-        ),
-        Span::styled(
-            format!("  {}/{}  ", s.state, s.sync_state),
-            style::label_style(),
-        ),
-        Span::styled("lag: ", style::label_style()),
-        Span::styled(
-            lag_text(s.replay_lag_bytes, s.replay_lag_secs),
-            Style::new().fg(sev.color()),
-        ),
-    ])
-}
-
-fn receiver_line(r: &WalReceiverRow) -> Line<'static> {
-    let sev = lag_severity(r.replay_lag_bytes, r.replay_lag_secs);
-    let upstream = match (&r.sender_host, r.sender_port) {
-        (Some(h), Some(p)) => format!("{h}:{p}"),
-        (Some(h), None) => h.clone(),
-        _ => "upstream".to_string(),
-    };
-    Line::from(vec![
-        Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
-        Span::styled("standby", style::accent_style()),
-        Span::styled(format!("  {}  ", r.status), style::label_style()),
-        Span::styled(format!("from {upstream}  "), style::value_style()),
-        Span::styled("replay lag: ", style::label_style()),
-        Span::styled(
-            lag_text(r.replay_lag_bytes, r.replay_lag_secs),
-            Style::new().fg(sev.color()),
-        ),
-    ])
-}
-
-/// Severity of one replication slot (F2.5). The point of the feature: an
-/// INACTIVE slot that keeps retaining WAL is the classic full-disk incident
-/// — nothing is consuming it, so WAL piles up in `pg_wal` until the disk
-/// fills. Red trumps yellow: `wal_status` of `unreserved`/`lost` (the slot
-/// has already lost the WAL it promised to keep, or is about to) is red
-/// regardless of the retained-bytes reading; otherwise an inactive slot is
-/// yellow once it is retaining anything, and red once that climbs past
-/// 10 GB. An active, `reserved` slot is calm — the default, healthy case.
-fn slot_severity(slot: &ReplicationSlotRow) -> Lag {
-    if matches!(slot.wal_status.as_deref(), Some("unreserved") | Some("lost")) {
-        return Lag::Bad;
-    }
-    if !slot.active {
-        let retained = slot.retained_wal_bytes.unwrap_or(0);
-        if retained > 10 * 1024 * 1024 * 1024 {
-            return Lag::Bad;
-        }
-        if retained > 0 {
-            return Lag::Warn;
-        }
-    }
-    Lag::Ok
-}
-
-fn slot_line(slot: &ReplicationSlotRow) -> Line<'static> {
-    let sev = slot_severity(slot);
-    let retained = match slot.retained_wal_bytes {
-        Some(b) => format::human_bytes(b),
-        None => "—".to_string(),
-    };
-    let active_text = if slot.active { "active" } else { "inactive" };
-    let status = slot.wal_status.as_deref().unwrap_or("—");
-    Line::from(vec![
-        Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
-        Span::styled(
-            format!("slot {}/{}", slot.slot_name, slot.slot_type),
-            style::accent_style(),
-        ),
-        Span::styled(format!("  {active_text}  "), style::label_style()),
-        Span::styled("retained: ", style::label_style()),
-        Span::styled(retained, Style::new().fg(sev.color())),
-        Span::styled(format!("  ({status})"), style::label_style()),
-    ])
 }
 
 /// Cap on WAL-sender rows in the panel: a CDC/fleet primary can have 10+
@@ -189,12 +45,14 @@ fn replication_lines(
     let more_line = |n: usize, what: &str| {
         Line::from(Span::styled(format!("   \u{2026} +{n} more {what}"), style::label_style()))
     };
+    let mut clipped = false;
     let mut lines: Vec<Line<'static>> = match repl {
         Some(ReplicationInfo::Primary { senders }) => {
             let mut lines: Vec<Line<'static>> =
                 senders.iter().take(SENDERS_SHOWN).map(sender_line).collect();
             if senders.len() > SENDERS_SHOWN {
                 lines.push(more_line(senders.len() - SENDERS_SHOWN, "replicas"));
+                clipped = true;
             }
             lines
         }
@@ -219,7 +77,16 @@ fn replication_lines(
         lines.extend(ranked.iter().take(SLOTS_SHOWN).map(|s| slot_line(s)));
         if ranked.len() > SLOTS_SHOWN {
             lines.push(more_line(ranked.len() - SLOTS_SHOWN, "slots"));
+            clipped = true;
         }
+    }
+    // U1: this panel stays capped/compact by design — the full,
+    // never-clipped picture lives one Tab away.
+    if clipped {
+        lines.push(Line::from(Span::styled(
+            "   Tab \u{2192} Replication for all",
+            style::label_style(),
+        )));
     }
     if lines.is_empty() { None } else { Some(lines) }
 }
@@ -348,10 +215,11 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     // otherwise the vitals panel keeps the whole bottom area (layout
     // unchanged for non-replicated servers).
     // Content is already capped upstream (SENDERS_SHOWN/SLOTS_SHOWN + their
-    // "+N more" lines = at most 12 rows), so the +2 border fits in 14.
+    // "+N more" lines + the U1 "Tab → Replication" hint when clipped = at
+    // most 13 rows), so the +2 border fits in 15.
     let repl_height = repl_lines
         .as_ref()
-        .map(|l| (l.len() as u16 + 2).min(14))
+        .map(|l| (l.len() as u16 + 2).min(15))
         .unwrap_or(0);
 
     let [banner_area, gauge_area, tps_area, active_area, bottom_area] = Layout::vertical([
@@ -459,25 +327,11 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pg_lens_core::WalSenderRow;
 
-    #[test]
-    fn severity_tiers_by_bytes_and_secs() {
-        assert!(matches!(lag_severity(Some(0), Some(0.0)), Lag::Ok));
-        assert!(matches!(lag_severity(Some(20 * 1024 * 1024), None), Lag::Warn));
-        assert!(matches!(lag_severity(None, Some(12.0)), Lag::Warn));
-        assert!(matches!(
-            lag_severity(Some(200 * 1024 * 1024), None),
-            Lag::Bad
-        ));
-        assert!(matches!(lag_severity(None, Some(90.0)), Lag::Bad));
-    }
-
-    #[test]
-    fn zero_bytes_is_caught_up_regardless_of_the_stale_time_measure() {
-        // Idle-primary case: 0 bytes outstanding but the last-replay age is
-        // minutes old — must stay OK, not flag red.
-        assert!(matches!(lag_severity(Some(0), Some(240.0)), Lag::Ok));
-    }
+    // Lag/slot severity math itself is tested in `ui/replication.rs`, the
+    // module that now owns it — these tests cover the compact panel's own
+    // behavior (caps, ranking, the "+N more" / "Tab → Replication" hints).
 
     #[test]
     fn primary_without_replicas_hides_the_panel() {
@@ -504,57 +358,6 @@ mod tests {
             wal_status: wal_status.map(str::to_string),
             safe_wal_size: None,
         }
-    }
-
-    #[test]
-    fn active_reserved_slot_is_calm() {
-        assert!(matches!(
-            slot_severity(&slot(true, Some("reserved"), Some(0))),
-            Lag::Ok
-        ));
-        // Active is calm even while retaining a lot — it's a live replica
-        // consuming the WAL, not an abandoned one.
-        assert!(matches!(
-            slot_severity(&slot(true, Some("reserved"), Some(20 * 1024 * 1024 * 1024))),
-            Lag::Ok
-        ));
-    }
-
-    #[test]
-    fn inactive_slot_retaining_wal_is_yellow_then_red() {
-        assert!(matches!(
-            slot_severity(&slot(false, Some("extended"), Some(0))),
-            Lag::Ok
-        ), "inactive but retaining nothing stays calm");
-        assert!(matches!(
-            slot_severity(&slot(false, Some("extended"), Some(1024))),
-            Lag::Warn
-        ));
-        assert!(matches!(
-            slot_severity(&slot(
-                false,
-                Some("extended"),
-                Some(11 * 1024 * 1024 * 1024)
-            )),
-            Lag::Bad
-        ));
-    }
-
-    #[test]
-    fn unreserved_or_lost_wal_status_is_always_red() {
-        assert!(matches!(
-            slot_severity(&slot(false, Some("unreserved"), Some(1024))),
-            Lag::Bad
-        ));
-        assert!(matches!(
-            slot_severity(&slot(false, Some("lost"), None)),
-            Lag::Bad
-        ));
-        // Even an active slot: unreserved/lost is a red flag on its own.
-        assert!(matches!(
-            slot_severity(&slot(true, Some("unreserved"), Some(0))),
-            Lag::Bad
-        ));
     }
 
     #[test]
@@ -597,8 +400,26 @@ mod tests {
         // …and slots are PRESENT (the bug was zero slot rows here).
         assert!(text.contains("slot_"), "slot rows must render: {text}");
         assert!(text.contains("+4 more slots"), "{text}");
-        // Total stays within the panel's height budget (12 content lines).
-        assert!(lines.len() <= 12, "got {} lines", lines.len());
+        // U1: clipping shows the way to the full picture.
+        assert!(text.contains("Tab \u{2192} Replication for all"), "{text}");
+        // Total stays within the panel's height budget (13 content lines).
+        assert!(lines.len() <= 13, "got {} lines", lines.len());
+    }
+
+    /// U1: an unclipped panel (nothing capped) carries no "Tab → Replication"
+    /// hint — it would be pointless noise when the panel already shows
+    /// everything.
+    #[test]
+    fn unclipped_panel_has_no_tab_hint() {
+        let repl = ReplicationInfo::Primary { senders: vec![] };
+        let slots = vec![slot(false, Some("extended"), Some(2_600_000_000))];
+        let lines = replication_lines(Some(&repl), Some(&slots)).expect("panel renders");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(!text.contains("Tab \u{2192}"), "{text}");
     }
 
     /// Worst slots surface first, so clipping drops the calm tail.
@@ -625,12 +446,6 @@ mod tests {
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("probe_slot"));
         assert!(text.contains('!'), "warn marker must be visible: {text}");
-    }
-
-    #[test]
-    fn lag_text_handles_missing_measures() {
-        assert_eq!(lag_text(None, None), "—");
-        assert!(lag_text(Some(1024 * 1024), Some(1.5)).contains('·'));
     }
 
     // --- F2: vacuum wraparound banner -----------------------------------

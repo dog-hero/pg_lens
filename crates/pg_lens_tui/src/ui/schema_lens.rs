@@ -1,5 +1,6 @@
 //! Schema Lens: per-table stats + ESTIMATED bloat of the connected database
-//! (Fase S3).
+//! (Fase S3). U1 promoted the index advisor out of this lens into its own
+//! `ui/index_lens.rs` tab — this lens is Tables + the vacuum section again.
 //!
 //! Row semantics (mirroring the Micro Lens's textual-marker precedent, so
 //! PTY captures prove severity without colors):
@@ -19,7 +20,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use pg_lens_core::{BloatRow, IndexFinding, IndexRow, SchemaSnapshot, SchemaStatus};
+use pg_lens_core::{BloatRow, SchemaSnapshot, SchemaStatus};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -28,7 +29,7 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph, Row, Table, Wrap},
 };
 
-use crate::app::{App, SchemaView, find_table_bloat};
+use crate::app::{App, find_table_bloat};
 use crate::ui::{format, style, vacuum};
 
 /// Fixed widths of every column except the flexible Table one, in order:
@@ -106,10 +107,7 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     ])
     .areas(area);
 
-    match app.schema_view {
-        SchemaView::Tables => draw_table(app, &schema, frame, table_area),
-        SchemaView::Indexes => draw_indexes_table(app, &schema, frame, table_area),
-    }
+    draw_table(app, &schema, frame, table_area);
     draw_vacuum(app, &schema, frame, vacuum_area);
     if let SchemaStatus::Error(msg) = &schema.status {
         let line = Line::from(format!(" schema: {msg} \u{2014} showing last collection"))
@@ -118,10 +116,7 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     }
     draw_footer(app, &schema, frame, footer_area);
     if app.detail_open {
-        match app.schema_view {
-            SchemaView::Tables => draw_detail(app, &schema, frame, area),
-            SchemaView::Indexes => draw_index_detail(app, &schema, frame, area),
-        }
+        draw_detail(app, &schema, frame, area);
     }
 }
 
@@ -317,230 +312,30 @@ fn table_column_width(area_width: u16) -> usize {
     usize::from(area_width.saturating_sub(overhead))
 }
 
-/// `db: shop · 4 tables · collected 12s ago · ESTIMATED bloat` (Tables view)
-/// or `db: shop · 7 indexes · collected 12s ago · stats reset 12d ago`
-/// (Indexes view, F3) — which database (the lens is per-database), how
-/// fresh the slow collection is, and either the mandatory bloat-estimate
-/// label or the stats-reset age: an `idx_scan = 0` UNUSED claim means
-/// nothing if counters were zeroed five minutes ago (PRD pillar 6).
+/// `db: shop · 4 tables · collected 12s ago · ESTIMATED bloat` — which
+/// database (the lens is per-database), how fresh the slow collection is,
+/// and either the mandatory bloat-estimate label or how to get one: an
+/// `idx_scan = 0`-style claim means nothing if counters were zeroed five
+/// minutes ago (PRD pillar 6).
 fn draw_footer(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
     let staleness_secs =
         (pg_lens_core::history::epoch_ms_now().saturating_sub(schema.collected_at_epoch_ms))
             / 1_000;
-    let line = match app.schema_view {
-        SchemaView::Tables => {
-            // Bloat is on-demand (its queries are slow): the auto cadence
-            // refreshes only the table stats, so the footer says how to get
-            // bloat, or that the shown estimate is on-demand.
-            let bloat_note = if schema.table_bloat.is_empty() && schema.index_bloat.is_empty() {
-                "R: estimate bloat (slow, on-demand)"
-            } else {
-                "ESTIMATED bloat (needs fresh ANALYZE) \u{b7} R: re-estimate"
-            };
-            Line::from(format!(
-                " db: {db} \u{b7} {n} tables \u{b7} collected {staleness_secs}s ago \u{b7} \
-                 {bloat_note}",
-                db = app.snapshot.vitals.database,
-                n = schema.tables.len(),
-            ))
-        }
-        SchemaView::Indexes => {
-            let now = now_epoch_secs();
-            let reset_age = match schema.stats_reset_epoch_secs {
-                Some(_) => format!(
-                    "stats reset {}",
-                    format::human_ago(schema.stats_reset_epoch_secs, now)
-                ),
-                None => "stats reset: unknown".to_string(),
-            };
-            Line::from(format!(
-                " db: {db} \u{b7} {n} indexes \u{b7} collected {staleness_secs}s ago \u{b7} \
-                 {reset_age} \u{b7} signal, not verdict \u{2014} verify against the workload",
-                db = app.snapshot.vitals.database,
-                n = schema.indexes.len(),
-            ))
-        }
-    }
+    // Bloat is on-demand (its queries are slow): the auto cadence refreshes
+    // only the table stats, so the footer says how to get bloat, or that the
+    // shown estimate is on-demand.
+    let bloat_note = if schema.table_bloat.is_empty() && schema.index_bloat.is_empty() {
+        "R: estimate bloat (slow, on-demand)"
+    } else {
+        "ESTIMATED bloat (needs fresh ANALYZE) \u{b7} R: re-estimate"
+    };
+    let line = Line::from(format!(
+        " db: {db} \u{b7} {n} tables \u{b7} collected {staleness_secs}s ago \u{b7} {bloat_note}",
+        db = app.snapshot.vitals.database,
+        n = schema.tables.len(),
+    ))
     .dim();
     frame.render_widget(Paragraph::new(line), area);
-}
-
-/// `!!` red (Unused), `DUP` yellow (exact duplicate), `pre` dim-yellow
-/// (prefix-redundant), or blank — the Indexes view's textual marker,
-/// mirroring the Tables view's bloat-severity convention (provable in VT
-/// captures without color). Ranked by [`crate::app::index_finding_rank`].
-fn index_marker_and_style(finding: &IndexFinding) -> (&'static str, Style) {
-    match finding {
-        IndexFinding::Unused => ("UNUSED", Style::new().fg(Color::Red).bold()),
-        IndexFinding::DuplicateExact { .. } => ("DUP", Style::new().fg(Color::Yellow)),
-        IndexFinding::DuplicatePrefix { .. } => ("prefix", Style::new().fg(Color::Yellow).dim()),
-        IndexFinding::None => ("", Style::new()),
-    }
-}
-
-/// Fixed widths of every Indexes-view column except the flexible Index one,
-/// in order: Table, Size, Scans, Tup Read, Flag.
-const INDEX_FIXED_WIDTHS: [u16; 5] = [16, 9, 8, 9, 7];
-
-fn draw_indexes_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
-    let header = Row::new(["Index", "Table", "Size", "Scans", "Tup Read", "Flag"])
-        .style(Style::new().bold());
-
-    let index_width = index_column_width(area.width);
-
-    let rows = app
-        .index_row_order
-        .iter()
-        .filter_map(|&i| schema.indexes.get(i))
-        .map(|idx| {
-            let (marker, style) = index_marker_and_style(&idx.finding);
-            Row::new([
-                format::truncate_with_ellipsis(&idx.name, index_width),
-                format::truncate_with_ellipsis(&idx.table, INDEX_FIXED_WIDTHS[0] as usize),
-                format::human_bytes(idx.index_bytes),
-                format::human_count(idx.idx_scan),
-                format::human_count(idx.idx_tup_read),
-                marker.to_string(),
-            ])
-            .style(style)
-        });
-
-    let widths = [
-        Constraint::Min(8),
-        Constraint::Length(INDEX_FIXED_WIDTHS[0]),
-        Constraint::Length(INDEX_FIXED_WIDTHS[1]),
-        Constraint::Length(INDEX_FIXED_WIDTHS[2]),
-        Constraint::Length(INDEX_FIXED_WIDTHS[3]),
-        Constraint::Length(INDEX_FIXED_WIDTHS[4]),
-    ];
-
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(Block::bordered().title("Indexes"))
-        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
-        .highlight_symbol("\u{25b6} ");
-
-    frame.render_stateful_widget(table, area, &mut app.index_table_state);
-}
-
-/// How many characters the flexible Index column can hold at this terminal
-/// width (same arithmetic as the Tables view's `table_column_width`).
-fn index_column_width(area_width: u16) -> usize {
-    let fixed: u16 = INDEX_FIXED_WIDTHS.iter().sum();
-    let overhead = 2 /* block borders */ + HIGHLIGHT_WIDTH + fixed + 5 * COLUMN_SPACING;
-    usize::from(area_width.saturating_sub(overhead))
-}
-
-/// Detail panel of the selected Indexes-view row: the full `CREATE INDEX`
-/// statement (never reconstructed from parts), usage counters, constraint
-/// flags, and — the whole point of a "signal, not verdict" advisor — the
-/// finding spelled out with its duplicate partner, if any.
-fn draw_index_detail(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
-    let Some(idx) = app.selected_index() else {
-        return;
-    };
-    let now = now_epoch_secs();
-
-    let [_, panel_area] =
-        Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
-
-    let title = format!(
-        "Index \u{2014} {}.{} on {} (Enter/Esc: close)",
-        idx.schema, idx.table, idx.name
-    );
-
-    let flags = index_flags_summary(idx);
-    let mut lines = vec![
-        style::kv("definition: ", idx.indexdef.clone()),
-        style::kv("size: ", format::human_bytes(idx.index_bytes)),
-        style::kv(
-            "scans: ",
-            format!(
-                "{} \u{b7} tuples read {} \u{b7} tuples fetched {}",
-                format::human_count(idx.idx_scan),
-                format::human_count(idx.idx_tup_read),
-                format::human_count(idx.idx_tup_fetch),
-            ),
-        ),
-        style::kv("flags: ", flags),
-        style::kv(
-            "stats freshness: ",
-            format!(
-                "counters {}",
-                format::human_ago(schema.stats_reset_epoch_secs, now)
-            ),
-        ),
-        Line::from("finding:").style(style::label_style()),
-    ];
-    lines.push(index_finding_line(&idx.finding));
-    lines.push(
-        Line::from("  signal, not verdict \u{2014} verify against the real workload before \
-                     dropping anything")
-            .dim(),
-    );
-
-    let panel = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(Block::bordered().title(title));
-    frame.render_widget(Clear, panel_area);
-    frame.render_widget(panel, panel_area);
-}
-
-/// `unique · primary key` or `plain` — which pg_index flags apply, so the
-/// detail explains WHY (if at all) `Unused` was withheld.
-fn index_flags_summary(idx: &IndexRow) -> String {
-    let mut flags = Vec::new();
-    if idx.is_primary {
-        flags.push("primary key");
-    } else if idx.is_unique {
-        flags.push("unique");
-    }
-    if idx.is_exclusion {
-        flags.push("exclusion");
-    }
-    if idx.is_constraint && !idx.is_primary {
-        flags.push("constraint-backed");
-    }
-    if flags.is_empty() {
-        "plain (non-unique, no constraint)".to_string()
-    } else {
-        flags.join(" \u{b7} ")
-    }
-}
-
-/// One descriptive line per finding — the detail panel's evidence, not a
-/// bare label.
-fn index_finding_line(finding: &IndexFinding) -> Line<'static> {
-    match finding {
-        IndexFinding::Unused => Line::from(vec![
-            Span::styled("  UNUSED", Style::new().fg(Color::Red).bold()),
-            Span::styled(
-                " \u{2014} zero scans since the last stats reset; serves no constraint",
-                style::label_style(),
-            ),
-        ]),
-        IndexFinding::DuplicateExact { partner } => Line::from(vec![
-            Span::styled("  DUP", Style::new().fg(Color::Yellow).bold()),
-            Span::styled(
-                format!(
-                    " \u{2014} exact duplicate of \u{2018}{partner}\u{2019} (same columns, \
-                     opclasses, predicate and uniqueness)"
-                ),
-                style::label_style(),
-            ),
-        ]),
-        IndexFinding::DuplicatePrefix { partner } => Line::from(vec![
-            Span::styled("  prefix", Style::new().fg(Color::Yellow).dim()),
-            Span::styled(
-                format!(
-                    " \u{2014} this index's columns are a strict prefix of \u{2018}{partner}\u{2019}\
-                     's; the wider index can likely serve both"
-                ),
-                style::label_style(),
-            ),
-        ]),
-        IndexFinding::None => Line::from("  no finding \u{2014} in use, or uniquely useful").dim(),
-    }
 }
 
 /// Detail panel over the lower part of the lens: full vacuum/analyze stats,

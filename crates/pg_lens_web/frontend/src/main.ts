@@ -56,8 +56,8 @@ const table = new ActivityTable(
 );
 const vitalsContainer = el<HTMLElement>("vitals");
 const waitsStrip = el<HTMLDivElement>("waits-strip");
-const replicationPanel = el<HTMLElement>("replication-panel");
 const replicationBody = el<HTMLElement>("replication");
+const replicationPlaceholder = el<HTMLParagraphElement>("replication-placeholder");
 const schemaLens = new SchemaLens(
   el<HTMLTableElement>("schema"),
   el<HTMLParagraphElement>("schema-staleness"),
@@ -70,23 +70,6 @@ const indexAdvisor = new IndexAdvisor(
   el<HTMLParagraphElement>("indexes-warning"),
   el<HTMLParagraphElement>("indexes-placeholder"),
 );
-// Schema sub-tabs (F3): Tables (the panel's original content) vs Indexes —
-// nested inside the Schema tab, mirroring the TUI's `i` toggle. Both keep
-// polling from the same snapshot; only the visible view differs.
-const schemaSubtabs: Array<[HTMLButtonElement, HTMLElement]> = [
-  [el<HTMLButtonElement>("schema-view-tables"), el<HTMLElement>("schema-tables-view")],
-  [el<HTMLButtonElement>("schema-view-indexes"), el<HTMLElement>("schema-indexes-view")],
-];
-for (const [button] of schemaSubtabs) {
-  button.addEventListener("click", () => {
-    for (const [other, view] of schemaSubtabs) {
-      const selected = other === button;
-      other.classList.toggle("active", selected);
-      other.setAttribute("aria-pressed", String(selected));
-      view.hidden = !selected;
-    }
-  });
-}
 const vacuumPanel = new VacuumPanel(
   el<HTMLParagraphElement>("vacuum-cluster"),
   el<HTMLUListElement>("vacuum-tables"),
@@ -100,11 +83,14 @@ const statementsLens = new StatementsLens(
   el<HTMLDivElement>("statements-unavailable"),
 );
 
-// Tab switcher: vitals cards + chart stay visible on both tabs; only the
-// bottom panel (Activity table vs Schema table) swaps.
+// Tab switcher (U1: five top-level tabs, mirroring the TUI's six lenses —
+// Macro/Micro stay merged into "Activity" here, vitals cards + chart stay
+// visible on all of them; only the bottom panel swaps).
 const tabs: Array<[HTMLButtonElement, HTMLElement]> = [
   [el<HTMLButtonElement>("tab-activity"), el<HTMLElement>("activity-panel")],
+  [el<HTMLButtonElement>("tab-replication"), el<HTMLElement>("replication-panel")],
   [el<HTMLButtonElement>("tab-schema"), el<HTMLElement>("schema-panel")],
+  [el<HTMLButtonElement>("tab-indexes"), el<HTMLElement>("indexes-panel")],
   [el<HTMLButtonElement>("tab-queries"), el<HTMLElement>("queries-panel")],
 ];
 for (const [button] of tabs) {
@@ -173,8 +159,8 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.checkpointer,
   );
   renderReplication(
-    replicationPanel,
     replicationBody,
+    replicationPlaceholder,
     snapshot.replication,
     snapshot.replication_slots,
   );

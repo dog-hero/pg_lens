@@ -20,10 +20,6 @@
       <div id="status-banner" hidden></div>
       <main>
         <section id="vitals" class="cards"></section>
-        <section id="replication-panel" class="panel" hidden>
-          <h2>Replication</h2>
-          <div id="replication"></div>
-        </section>
         <section class="panel">
           <h2>TPS &amp; active sessions</h2>
           <div id="chart"></div>
@@ -38,12 +34,28 @@
             Activity
           </button>
           <button
+            id="tab-replication"
+            role="tab"
+            aria-selected="false"
+            aria-controls="replication-panel"
+          >
+            Replication
+          </button>
+          <button
             id="tab-schema"
             role="tab"
             aria-selected="false"
             aria-controls="schema-panel"
           >
             Schema
+          </button>
+          <button
+            id="tab-indexes"
+            role="tab"
+            aria-selected="false"
+            aria-controls="indexes-panel"
+          >
+            Indexes
           </button>
           <button
             id="tab-queries"
@@ -72,6 +84,11 @@
             </table>
           </div>
         </section>
+        <section id="replication-panel" class="panel" role="tabpanel" hidden>
+          <h2>Replication</h2>
+          <p id="replication-placeholder" class="placeholder">collecting…</p>
+          <div id="replication"></div>
+        </section>
         <section id="schema-panel" class="panel" role="tabpanel" hidden>
           <h2>
             Schema <span class="panel-note">estimated bloat</span>
@@ -84,51 +101,32 @@
               Refresh
             </button>
           </h2>
-          <div id="schema-subtabs" class="schema-subtabs">
-            <button
-              id="schema-view-tables"
-              class="ghost-btn active"
-              type="button"
-              aria-pressed="true"
-            >
-              Tables
-            </button>
-            <button
-              id="schema-view-indexes"
-              class="ghost-btn"
-              type="button"
-              aria-pressed="false"
-            >
-              Indexes
-            </button>
-          </div>
-          <div id="schema-tables-view">
-            <p id="schema-staleness" class="staleness"></p>
-            <p id="schema-warning" class="inline-warning" hidden></p>
-            <p id="schema-placeholder" class="placeholder">collecting…</p>
-            <div class="table-wrap">
-              <table id="schema">
-                <thead></thead>
-                <tbody></tbody>
-              </table>
-            </div>
-          </div>
-          <div id="schema-indexes-view" hidden>
-            <p id="indexes-staleness" class="staleness"></p>
-            <p id="indexes-warning" class="inline-warning" hidden></p>
-            <p id="indexes-placeholder" class="placeholder">collecting…</p>
-            <div class="table-wrap">
-              <table id="indexes">
-                <thead></thead>
-                <tbody></tbody>
-              </table>
-            </div>
+          <p id="schema-staleness" class="staleness"></p>
+          <p id="schema-warning" class="inline-warning" hidden></p>
+          <p id="schema-placeholder" class="placeholder">collecting…</p>
+          <div class="table-wrap">
+            <table id="schema">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
           </div>
           <div id="vacuum-section" class="vacuum-section">
             <h3>Vacuum / wraparound</h3>
             <p id="vacuum-cluster" class="vacuum-cluster"></p>
             <ul id="vacuum-tables" class="vacuum-tables"></ul>
             <p id="vacuum-progress" class="vacuum-progress"></p>
+          </div>
+        </section>
+        <section id="indexes-panel" class="panel" role="tabpanel" hidden>
+          <h2>Indexes <span class="panel-note">unused / duplicate / prefix-redundant</span></h2>
+          <p id="indexes-staleness" class="staleness"></p>
+          <p id="indexes-warning" class="inline-warning" hidden></p>
+          <p id="indexes-placeholder" class="placeholder">collecting…</p>
+          <div class="table-wrap">
+            <table id="indexes">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
           </div>
         </section>
         <section id="queries-panel" class="panel" role="tabpanel" hidden>

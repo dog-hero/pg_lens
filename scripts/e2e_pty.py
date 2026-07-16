@@ -148,8 +148,11 @@ def main():
         # schema every 5 ticks, and the R-forces-recollection proof below
         # needs staleness to climb well past the check thresholds.
         send("+++"); pump(0.4)
-    # Fase S3: second Tab reaches the Schema Lens (also exercised in BASIC,
-    # proving the 80x24 layout doesn't panic).
+    # U1: second Tab now reaches the Replication Lens (Macro/Micro/
+    # Replication/Schema/Indexes/Queries) — also exercised in BASIC, proving
+    # the 80x24 layout doesn't panic.
+    send("\t"); pump(0.9); snaps["r1_replication"] = screen.snapshot()
+    # Third Tab reaches the Schema Lens (also exercised in BASIC).
     send("\t"); pump(0.9); snaps["s1_schema"] = screen.snapshot()
     if not BASIC:
         # s: size (default) -> dead tuples; order must visibly change.
@@ -176,8 +179,10 @@ def main():
         snaps["s6_after_R"] = screen.snapshot()
         m = stale_re.search(snaps["s6_after_R"])
         after = int(m.group(1)) if m else None
-    # Query Lens (pg_stat_statements): third Tab reaches it (also in BASIC,
-    # proving the 80x24 layout doesn't panic).
+    # U1: fourth Tab reaches the Index Lens (also in BASIC, proving the
+    # 80x24 layout doesn't panic).
+    send("\t"); pump(0.9); snaps["x1_index_lens"] = screen.snapshot()
+    # Query Lens (pg_stat_statements): fifth Tab reaches it (also in BASIC).
     send("\t"); pump(0.9); snaps["q1_query_lens"] = screen.snapshot()
     if not BASIC:
         # s: total (default) -> calls; order may change, label must.
@@ -265,8 +270,14 @@ def main():
               "refresh=0.5s" in snaps["t8_fast_a"])
         check("snapshots arrive at the faster cadence (screens 0.9s apart differ)",
               snaps["t8_fast_a"] != snaps["t9_fast_b"])
+    # --- U1: Replication Lens ----------------------------------------------
+    check("Tab x2 reached the Replication Lens (Role + Slots panels)",
+          "Role" in snaps["r1_replication"] and "Slots" in snaps["r1_replication"])
+    check("Replication Lens shows ALL mock slots, unlike the Macro summary",
+          "replica_1_slot" in snaps["r1_replication"]
+          and "analytics_cdc" in snaps["r1_replication"])
     # --- Fase S3: Schema Lens ---------------------------------------------
-    check("Tab x2 reached the Schema Lens (Tables + Bloat% columns)",
+    check("Tab x3 reached the Schema Lens (Tables + Bloat% columns)",
           "Tables" in snaps["s1_schema"] and "Bloat%" in snaps["s1_schema"])
     # At 80 cols the Table column ellipsis-truncates, so BASIC only asserts
     # the schema prefix; the full name is checked at the default 120 cols.
@@ -300,8 +311,13 @@ def main():
               "despite 2.8s more elapsing)",
               before is not None and after is not None and after < before
               and after <= 3)
+    # --- U1: Index Lens ------------------------------------------------------
+    check("Tab x4 reached the Index Lens (its own tab now, Flag column)",
+          "Indexes" in snaps["x1_index_lens"] and "Flag" in snaps["x1_index_lens"])
+    check("Index Lens shows the mock's findings (UNUSED/DUP/prefix)",
+          "UNUSED" in snaps["x1_index_lens"] and "DUP" in snaps["x1_index_lens"])
     # --- Query Lens (pg_stat_statements) -----------------------------------
-    check("Tab x3 reached the Query Lens (Statements + Hit% columns)",
+    check("Tab x5 reached the Query Lens (Statements + Hit% columns)",
           "Statements" in snaps["q1_query_lens"] and "Hit%" in snaps["q1_query_lens"])
     check("query lens footer: db + count + scope + staleness",
           "db: shop" in snaps["q1_query_lens"]

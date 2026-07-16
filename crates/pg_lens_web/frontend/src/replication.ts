@@ -113,41 +113,70 @@ function receiverRow(rc: WalReceiverRow): HTMLDivElement {
   return r;
 }
 
+function calmRow(text: string): HTMLDivElement {
+  const div = document.createElement("div");
+  div.className = "repl-row repl-state";
+  div.textContent = text;
+  return div;
+}
+
+/** Worst-severity-first, then retained bytes descending — the web twin of
+ * the TUI's `resort_replication` (see `crates/pg_lens_tui/src/app.rs`). */
+function sortedSlots(slots: ReplicationSlotRow[]): ReplicationSlotRow[] {
+  const rank = (s: ReplicationSlotRow): number => {
+    const sev = slotSeverity(s);
+    return sev === "bad" ? 0 : sev === "warn" ? 1 : 2;
+  };
+  return [...slots].sort((a, b) => {
+    const r = rank(a) - rank(b);
+    if (r !== 0) return r;
+    return (b.retained_wal_bytes ?? 0) - (a.retained_wal_bytes ?? 0);
+  });
+}
+
 /**
- * Renders the replication panel into `body`, toggling `panel`'s visibility.
- * Hidden when there is nothing to show (no data yet, and a primary with no
- * replicas and no slots) — matching the TUI. Slot rows (F2.5) render below
- * the senders/receiver section; an empty (or absent) slots list contributes
- * no extra rows — silence is the calm state, never an "no slots" line.
+ * Renders the Replication Lens (U1: a top-level tab now, not a panel that
+ * hides itself away) into `body`, toggling `placeholder` while nothing has
+ * been collected yet. Unlike the Macro dashboard's compact summary, this
+ * view shows EVERYTHING — every sender/receiver, every slot, no caps —
+ * with a calm line standing in for each section when it has nothing to
+ * report (never a bare empty table).
  */
 export function renderReplication(
-  panel: HTMLElement,
   body: HTMLElement,
+  placeholder: HTMLElement,
   repl: ReplicationInfo | null,
   slots: ReplicationSlotRow[] | null,
 ): void {
+  if (repl === null && slots === null) {
+    placeholder.hidden = false;
+    body.replaceChildren();
+    return;
+  }
+  placeholder.hidden = true;
+
   const rows: HTMLElement[] = [];
   if (repl && "Primary" in repl) {
-    for (const s of repl.Primary.senders) rows.push(senderRow(s));
+    if (repl.Primary.senders.length === 0) {
+      rows.push(calmRow("primary · no replicas connected"));
+    } else {
+      for (const s of repl.Primary.senders) rows.push(senderRow(s));
+    }
   } else if (repl && "Standby" in repl) {
     if (repl.Standby.receiver) {
       rows.push(receiverRow(repl.Standby.receiver));
     } else {
-      const div = document.createElement("div");
-      div.className = "repl-row repl-state";
-      div.textContent = "standby · waiting for a WAL sender…";
-      rows.push(div);
+      rows.push(calmRow("standby · waiting for a WAL sender…"));
     }
-  }
-  if (slots) {
-    for (const s of slots) rows.push(slotRow(s));
+  } else {
+    rows.push(calmRow("role: collecting…"));
   }
 
-  if (rows.length === 0) {
-    panel.hidden = true;
-    body.replaceChildren();
-    return;
+  if (slots && slots.length > 0) {
+    for (const s of sortedSlots(slots)) rows.push(slotRow(s));
+  } else {
+    rows.push(calmRow("no replication slots"));
   }
-  panel.hidden = false;
+
   body.replaceChildren(...rows);
 }
