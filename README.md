@@ -539,24 +539,10 @@ and never expose the server without TLS.
 
 ## Roadmap
 
-Shipped: Web Lens (`pg_lens serve`, with TUI parity — pause, schema refresh,
-token-gated admin), Schema Lens (table stats + on-demand bloat), Query Lens
-(`pg_stat_statements`), replication/WAL panel, admin actions
-(cancel/terminate), activity filtering, persistent history, `config.toml`
-defaults, services file with `password_cmd`, interactive service picker,
-Homebrew/deb/rpm/crates.io distribution.
-
-**Backlog (deliberately deprioritized):**
-
-- pg_service.conf / .pgpass compatibility (C3) and TUI service picker for them
-- Apple notarization (removes the cask quarantine postflight; needs a paid
-  Apple Developer account)
-- Prometheus `/metrics` export
-- Multi-instance monitoring (N servers, one screen)
-- Docker/GHCR image re-enable (one-line revert in release.yml; ideally moved
-  to a native arm64 runner first)
-- PgBouncer *transaction* pooling support (requires a `simple_query`
-  protocol rewrite — see [Connection poolers](#connection-poolers-pgbouncer--supavisor--rds-proxy))
+The full plan lives in [ROADMAP.md](ROADMAP.md) (product requirements in
+[PRD.md](PRD.md)). Currently in progress — **v0.7, "what should I go fix"**:
+a top-waits panel, vacuum health / XID-wraparound visibility, an
+unused/redundant index advisor, and a checkpointer panel.
 
 ## Contributing
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-pg_lens is a Rust TUI for live PostgreSQL observability (a pg_activity rebuild). `PLAN.md` is the authoritative phased development plan — phases 1–5 (MVP) are complete; phase 6 (Web Lens, an axum + SSE + TypeScript web frontend) is next. Read the relevant phase in PLAN.md before starting work: each phase carries its own verification checklist and anti-pattern list, and those checks are enforced before every commit.
+pg_lens is a Rust TUI + web dashboard for live PostgreSQL observability (a pg_activity rebuild). **`PRD.md` is the product source of truth** (vision, pillars, Definition of Done); **`ROADMAP.md` is the execution order** — read the active item there before starting work. Historical phase plans live in `docs/archive/` (reference only, do not follow). Specialized agents in `.claude/agents/` (feature-discovery, lens-builder, qa-tester, release-manager) execute most work; run `qa-tester` before any release.
 
 ## Commands
 
@@ -30,16 +30,19 @@ Static Linux binaries: this machine has Homebrew rust (no rustup), so musl cross
 
 ## Architecture
 
-Cargo workspace, two crates (a third, `pg_lens_web`, arrives in phase 6):
+Cargo workspace, three crates:
 
-- **`pg_lens_core`** — frontend-agnostic domain layer: `models.rs` (all `serde::Serialize` — the future web UI streams them as JSON), `db.rs`, `queries.rs` + `queries/*.sql`, `poller.rs`, `history.rs`.
-- **`pg_lens_tui`** — ratatui frontend using The Elm Architecture: `app.rs` holds the `App` model, the `Action` enum, and `update()` (the only place state mutates); `ui/` is pure synchronous rendering; `event.rs` turns crossterm events into `Action`s.
+- **`pg_lens_core`** — frontend-agnostic domain layer: `models.rs` (all `serde::Serialize` — the web UI streams them as JSON), `db.rs`, `queries.rs` + `queries/*.sql`, `poller.rs`, `history.rs`, `history_store.rs` (JSONL persistence), `settings.rs` (connection resolution + config.toml), `services.rs`.
+- **`pg_lens_tui`** — ratatui frontend using The Elm Architecture: `app.rs` holds the `App` model, the `Action` enum, and `update()` (the only place state mutates); `ui/` is pure synchronous rendering; `event.rs` turns crossterm events into `Action`s. `main.rs` also hosts the `serve` subcommand.
+- **`pg_lens_web`** — axum server (SSE + JSON API + token auth) with the Vite/TypeScript frontend embedded via rust-embed (`frontend/`; `dist/` is gitignored, built in CI, listed in the crate's `include`).
 
-Data flow: the poller task queries Postgres each tick and publishes `Arc<DbSnapshot>` on a `tokio::sync::watch` channel (last-value-wins, multi-consumer — the web UI will subscribe to the same channel). In the TUI, a bridge task converts watch updates into `Action::Snapshot` on the single `mpsc<Action>` that `main.rs`'s `select!` loop consumes. A second `watch<Duration>` flows the other way: `+`/`-` keys adjust the poll interval live. Poller errors never crash the UI — they travel as `PollerStatus::Error` inside the snapshot envelope (last good data retained, banner shown, reconnect with backoff).
+Data flow: the poller task queries Postgres each tick and publishes `Arc<DbSnapshot>` on a `tokio::sync::watch` channel (last-value-wins, multi-consumer — TUI and web subscribe to the same channel). In the TUI, a bridge task converts watch updates into `Action::Snapshot` on the single `mpsc<Action>` that `main.rs`'s `select!` loop consumes. Control flows back via channels: `watch<Duration>` (poll interval, `+`/`-`), `watch<u64>` (schema force-refresh, `R` / POST /api/schema/refresh), `mpsc<AdminCommand>` (cancel/terminate), `watch<bool>` (shutdown — the poller cancels its in-flight query via CancelRequest before the runtime tears down). Poller errors never crash the UI — they travel as `PollerStatus::Error` inside the snapshot envelope (last good data retained, banner shown, reconnect with backoff).
 
-SQL lives in `pg_lens_core/queries/*.sql` (adapted from dalibo/pg_activity), loaded via `include_str!` and selected by `server_version_num` — the `post_140000` suffix convention means "PG >= 14". Minimum supported version is PG 13; `query_id` only exists on 14+, which is why activity has two variants. `SnapshotHistory` (ring buffer, cap 120) is owned by the poller and a copy ships inside every snapshot so all frontends see the same series.
+SQL lives in `pg_lens_core/queries/*.sql` (adapted from dalibo/pg_activity), loaded via `include_str!` and selected by `server_version_num` — the `post_140000` suffix convention means "PG >= 14". Minimum supported version is PG 13; `query_id` only exists on 14+, which is why activity has two variants. `SnapshotHistory` (ring buffer, cap 1800 ≈ 1h at the 2s tick) is owned by the poller, persisted per target as JSONL under the XDG state dir, and a copy ships inside every snapshot so all frontends see the same series.
 
-## Hard invariants (grep-audited before commits; see PLAN.md phase 5)
+New-data-source pattern (follow it exactly — see Schema/Query Lens for precedents): SQL file → `queries.rs` QuerySet field → parser fn in `db.rs` (`Row::try_get`, no unwrap) → model struct in `models.rs` (Serialize) → collected in `poller.rs` (fast tick if cheap, slow cadence if not, best-effort if the view/privilege is optional) → TUI panel in `ui/` → web rendering in `pg_lens_web/frontend/src/` → mock data in `DbSnapshot::mock()` so `--mock` and the PTY e2e exercise it.
+
+## Hard invariants (grep-audited before commits)
 
 - `pg_lens_core` never references ratatui, crossterm, or the TUI's `Action` enum.
 - No `.await` anywhere under `crates/pg_lens_tui/src/ui/` — the view is 100% synchronous.
