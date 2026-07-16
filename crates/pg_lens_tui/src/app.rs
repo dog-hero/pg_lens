@@ -790,6 +790,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 app.detail_open = false;
             } else if app.waits_open {
                 app.waits_open = false;
+            } else if app.active_tab == Tab::SchemaLens && app.schema_view != SchemaView::Tables {
+                // The `v` Vacuum sub-view is an overlay too: Esc returns to
+                // the Tables view, it does NOT arm quitting.
+                app.schema_view = SchemaView::Tables;
             } else if app
                 .esc_quit_armed_until
                 .is_some_and(|until| app.tick_count <= until)
@@ -1606,6 +1610,24 @@ mod tests {
             update(&mut app, press(KeyCode::Char('v')));
             assert_eq!(app.schema_view, SchemaView::Tables, "{tab:?}");
         }
+    }
+
+    /// Regression (qa v0.8): Esc in the Vacuum sub-view must CLOSE it (back
+    /// to Tables), not fall through and arm the double-Esc quit barrier —
+    /// same overlay-close contract as the `w` waits panel and `d` picker.
+    #[test]
+    fn esc_closes_the_vacuum_view_without_arming_quit() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Char('v')));
+        assert_eq!(app.schema_view, SchemaView::Vacuum);
+        update(&mut app, press(KeyCode::Esc));
+        assert_eq!(app.schema_view, SchemaView::Tables, "Esc returns to Tables");
+        assert!(!app.should_quit);
+        assert!(
+            app.esc_quit_armed_until.is_none(),
+            "closing the sub-view must not arm the quit barrier"
+        );
     }
 
     #[test]

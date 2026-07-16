@@ -153,20 +153,28 @@ def main():
 
     # --- resilience: DB down -> banner + responsive UI -> recovery --------
     if args.resilience_container:
-        send("\t")  # back to Macro Lens
+        # We are on the Micro Lens (one Tab from start). Stay here — the
+        # activity table is the "last data retained" proof. (Tab-count is no
+        # longer 2, so blind Tab hops can't assume which lens they land on.)
         pump(0.5)
         docker("stop", args.resilience_container)
         pump(9.0)  # poll failure + error snapshot must land within this
         snaps["t4_down"] = screen.snapshot()
         check("error banner visible after docker stop", "DB error" in snaps["t4_down"])
+        check("last data retained while down (Micro Lens keeps its rows)",
+              "Activity" in snaps["t4_down"] and "PID" in snaps["t4_down"])
         if args.expect_header:
             check("last data retained while down (header keeps version)",
                   args.expect_header in snaps["t4_down"])
-        send("\t")  # keys must still work while down
+        # Keys must still work while down: Tab moves to another lens (any of
+        # the six), and the banner follows onto it. Assert the lens CHANGED
+        # (Micro's activity table is gone) rather than a specific title.
+        send("\t")
         pump(1.0)
         snaps["t5_keys_down"] = screen.snapshot()
-        check("UI responsive while DB down (Tab reached Micro Lens)",
-              "Activity" in snaps["t5_keys_down"])
+        check("UI responsive while DB down (Tab switched lens)",
+              "Activity" not in snaps["t5_keys_down"]
+              or "PID" not in snaps["t5_keys_down"])
         check("banner persists on the other tab", "DB error" in snaps["t5_keys_down"])
 
         docker("start", args.resilience_container)
