@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 
+use pg_lens_core::waits::{WaitSummary, top_waits};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -21,7 +22,7 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::ui::{format, sql};
+use crate::ui::{format, sql, style};
 
 /// (width, spacing-follows) of every fixed column, in order. The last,
 /// flexible column (Query) takes whatever is left.
@@ -31,17 +32,75 @@ const COLUMN_SPACING: u16 = 1;
 /// Highlight symbol "▶ " rendered left of the selected row.
 const HIGHLIGHT_WIDTH: u16 = 2;
 
+/// Below this width the waits strip hides: the entries would truncate into
+/// noise, and the activity table needs every column it can get.
+const WAITS_MIN_WIDTH: u16 = 80;
+/// Minimum body height to spend a line on the strip — the table (border +
+/// header + a few rows) always wins the space fight.
+const WAITS_MIN_HEIGHT: u16 = 8;
+/// At most this many ranked waits render in the strip.
+const WAITS_TOP_N: usize = 5;
+
 pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
-    draw_table(app, frame, area);
+    // Top-waits strip: aggregated over the FULL activity set, never the
+    // filtered `row_order` — it answers "what is the *server* stuck on",
+    // and a display filter must not change that answer. One line, hidden
+    // when nothing waits or the terminal is too narrow/short to afford it.
+    let waits = top_waits(&app.snapshot.activity);
+    let table_area = if !waits.is_empty()
+        && area.width >= WAITS_MIN_WIDTH
+        && area.height >= WAITS_MIN_HEIGHT
+    {
+        let [strip_area, rest] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        frame.render_widget(Paragraph::new(waits_strip(&waits)), strip_area);
+        rest
+    } else {
+        area
+    };
+    draw_table(app, frame, table_area);
     // Empty state: the header/border still render (so the filter term and
     // count stay visible), but the body gets a centered hint distinguishing
     // "your filter matches nothing" from "the server is idle".
     if app.row_order.is_empty() {
-        draw_empty(app, frame, area);
+        draw_empty(app, frame, table_area);
     }
     if app.detail_open {
         draw_detail(app, frame, area);
     }
+}
+
+/// One-line strip: `waits 4/6 waiting │ Lock:… ×2 │ IO:… ×1 …` — Lock:*
+/// tinted red (contention), IO:* yellow (disk pressure), the rest default.
+/// Only called with a non-empty summary; overflow clips right, which drops
+/// the least frequent entries first (the list is ranked).
+fn waits_strip(waits: &WaitSummary) -> Line<'static> {
+    let sep = Span::styled(" \u{2502} ", style::label_style());
+    let mut spans = vec![
+        Span::styled(" waits ", style::label_style()),
+        Span::styled(
+            format!("{}/{}", waits.waiting, waits.total),
+            Style::new().bold(),
+        ),
+        Span::styled(" waiting", style::label_style()),
+    ];
+    for (wait, count) in waits.ranked.iter().take(WAITS_TOP_N) {
+        let color = if wait.starts_with("Lock:") {
+            Some(Color::Red)
+        } else if wait.starts_with("IO:") {
+            Some(Color::Yellow)
+        } else {
+            None
+        };
+        let wait_style = color.map_or_else(Style::new, |c| Style::new().fg(c));
+        spans.push(sep.clone());
+        spans.push(Span::styled(wait.clone(), wait_style));
+        spans.push(Span::styled(
+            format!(" \u{d7}{count}"),
+            style::label_style(),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Centered placeholder drawn inside the table body when no rows show.
@@ -233,7 +292,9 @@ fn draw_detail(app: &App, frame: &mut Frame, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::query_column_width;
+    use super::{WAITS_TOP_N, query_column_width, waits_strip};
+    use pg_lens_core::waits::WaitSummary;
+    use ratatui::style::Color;
 
     #[test]
     fn query_width_shrinks_with_the_terminal_and_never_underflows() {
@@ -242,5 +303,50 @@ mod tests {
         assert!(query_column_width(80) < query_column_width(120));
         // Absurdly narrow terminals must not panic or wrap around.
         assert_eq!(query_column_width(10), 0);
+    }
+
+    #[test]
+    fn waits_strip_shows_ratio_counts_and_severity_colors() {
+        let summary = WaitSummary {
+            waiting: 3,
+            total: 7,
+            ranked: vec![
+                ("Lock:transactionid".to_string(), 2),
+                ("IO:DataFileRead".to_string(), 1),
+                ("Client:ClientRead".to_string(), 1),
+            ],
+        };
+        let line = waits_strip(&summary);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("3/7 waiting"), "{text}");
+        assert!(text.contains("Lock:transactionid \u{d7}2"), "{text}");
+        assert!(text.contains("IO:DataFileRead \u{d7}1"), "{text}");
+        // Severity tints: Lock:* red, IO:* yellow, others default.
+        let color_of = |needle: &str| {
+            line.spans
+                .iter()
+                .find(|s| s.content == needle)
+                .expect("span present")
+                .style
+                .fg
+        };
+        assert_eq!(color_of("Lock:transactionid"), Some(Color::Red));
+        assert_eq!(color_of("IO:DataFileRead"), Some(Color::Yellow));
+        assert_eq!(color_of("Client:ClientRead"), None);
+    }
+
+    #[test]
+    fn waits_strip_caps_at_top_n() {
+        let ranked: Vec<(String, usize)> = (0..WAITS_TOP_N + 3)
+            .map(|i| (format!("LWLock:Fake{i}"), 1))
+            .collect();
+        let summary = WaitSummary {
+            waiting: ranked.len(),
+            total: ranked.len(),
+            ranked,
+        };
+        let line = waits_strip(&summary);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.matches("LWLock:Fake").count(), WAITS_TOP_N);
     }
 }

@@ -12,6 +12,7 @@ pub mod poller;
 pub mod queries;
 pub mod services;
 pub mod settings;
+pub mod waits;
 
 // Re-exported so frontends can name `tokio_postgres::Config` (the type
 // `settings::resolve` returns) without pinning their own copy of the crate.
@@ -24,4 +25,5 @@ pub use models::{
     StatementRow, StatementsSnapshot, StatementsStatus, TableStatRow, WalReceiverRow, WalSenderRow,
 };
 pub use services::PasswordSource;
+pub use waits::{WaitSummary, top_waits};
 pub use settings::{ConnLabel, ConnSpec, Resolved, SettingsError};

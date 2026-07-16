@@ -215,6 +215,10 @@ def main():
               for ln in snaps["t1_nokeys"].splitlines()))
     check("Tab during refresh switched to Micro Lens (Activity table)",
           "Activity" in snaps["t3_after_tab"] and "PID" in snaps["t3_after_tab"])
+    check("Micro Lens shows the top-waits strip (ratio + ranked waits)",
+          "4/6 waiting" in snaps["t3_after_tab"]
+          and "Lock:transactionid ×1" in snaps["t3_after_tab"]
+          and "IO:DataFileRead ×1" in snaps["t3_after_tab"])
     if not BASIC:
         check("j moved selection (statusbar row 2/6)", "row 2/6" in snaps["t4_after_j"])
         check("s cycled sort (statusbar sort=state)", "sort=state" in snaps["t5_after_s"])

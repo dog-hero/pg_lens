@@ -10,6 +10,7 @@ import { ActivityTable } from "./table";
 import { SchemaLens } from "./schema";
 import { StatementsLens } from "./statements";
 import { renderReplication } from "./replication";
+import { renderWaits } from "./waits";
 import {
   clearToken,
   openStream,
@@ -52,6 +53,7 @@ const table = new ActivityTable(
   },
 );
 const vitalsContainer = el<HTMLElement>("vitals");
+const waitsStrip = el<HTMLDivElement>("waits-strip");
 const replicationPanel = el<HTMLElement>("replication-panel");
 const replicationBody = el<HTMLElement>("replication");
 const schemaLens = new SchemaLens(
@@ -137,6 +139,10 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   renderVitals(vitalsContainer, snapshot.vitals);
   renderReplication(replicationPanel, replicationBody, snapshot.replication);
   chart.update(snapshot.history);
+  // Top waits: aggregated over the FULL activity set (never the filtered
+  // subset — it answers "what is the server stuck on"), mirroring the
+  // TUI's strip above the activity table.
+  renderWaits(waitsStrip, snapshot.activity);
   table.update(snapshot.activity, snapshot.locks);
   schemaLens.update(snapshot.schema, snapshot.vitals.database);
   statementsLens.update(snapshot.statements, snapshot.vitals.database);

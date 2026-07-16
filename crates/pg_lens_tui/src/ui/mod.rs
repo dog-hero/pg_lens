@@ -325,6 +325,56 @@ mod tests {
         assert!(screen.contains("pgbench"));
     }
 
+    /// The top-waits strip renders above the activity table: waiting/total
+    /// ratio plus ranked `wait ×count` entries (mock: 4 of 6 waiting, all
+    /// counts 1, ties alphabetical).
+    #[test]
+    fn micro_lens_renders_the_top_waits_strip() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        let screen = render(&mut app);
+        assert!(screen.contains("4/6 waiting"), "ratio: {screen}");
+        assert!(screen.contains("Lock:transactionid \u{d7}1"), "{screen}");
+        assert!(screen.contains("IO:DataFileRead \u{d7}1"), "{screen}");
+    }
+
+    /// No waits → the strip disappears entirely (the table gets the line
+    /// back); same when the terminal is too narrow to render it usefully.
+    #[test]
+    fn top_waits_strip_hides_without_waits_and_on_narrow_terminals() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        let mut snap = app.snapshot.as_ref().clone();
+        for row in &mut snap.activity {
+            row.wait_event = None;
+        }
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
+        let screen = render(&mut app);
+        // `×count` is strip-only vocabulary ("waiting" also appears in the
+        // pre-first-snapshot statusbar, so it can't be the absence probe).
+        assert!(!screen.contains('\u{d7}'), "no strip when idle: {screen}");
+        assert!(!screen.contains("/6 waiting"), "{screen}");
+        assert!(screen.contains("PID"), "table still renders");
+
+        // Narrow terminal (< 80 cols body): strip hidden, table intact.
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        let backend = TestBackend::new(70, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(!screen.contains('\u{d7}'), "no strip at 70 cols: {screen}");
+        assert!(screen.contains("PID"), "table still renders");
+    }
+
     #[test]
     fn schema_lens_renders_table_footer_and_markers() {
         let mut app = App::new();

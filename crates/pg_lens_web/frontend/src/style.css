@@ -622,6 +622,37 @@ table#statements {
   color: var(--fg-dim);
 }
 
+/* Top-waits strip above the activity table (mirrors the TUI's one-liner):
+   ranked `wait ×count` chips, Lock:* red, IO:* yellow. Hidden when idle. */
+.waits-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: baseline;
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+
+.waits-strip .waits-ratio {
+  color: var(--fg-dim);
+}
+
+.waits-strip .waits-ratio::before {
+  content: "waits ";
+}
+
+.waits-strip .wait-item {
+  white-space: nowrap;
+}
+
+.waits-strip .wait-lock {
+  color: var(--bad);
+}
+
+.waits-strip .wait-io {
+  color: var(--warn);
+}
+
 .empty-row td {
   text-align: center;
   color: var(--fg-dim);

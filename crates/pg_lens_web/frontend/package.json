@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",
-    "test": "node --test src/sql.test.ts",
+    "test": "node --test src/sql.test.ts src/waits.test.ts",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview"
   },
