@@ -57,7 +57,9 @@ pub fn top_waits(activity: &[ActivityRow]) -> WaitSummary {
         .into_iter()
         .map(|(wait, count)| (wait.to_string(), count))
         .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    // Stable sort: the BTreeMap already yields alphabetical order, so ties
+    // stay alphabetical after ranking by count (deterministic between polls).
+    ranked.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
     WaitSummary {
         waiting,
         total: activity.len(),
