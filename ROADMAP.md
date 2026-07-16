@@ -8,28 +8,31 @@ section on release.
 
 ---
 
-## v0.7 — "What should I go fix" (in progress)
+## v0.7 — "What should I go fix" (implemented — release pending)
 
-Ranked; implement top-down so a partial release still ships the most value.
+All five items are committed on main and verified against live PostgreSQL;
+awaiting the qa-tester batch gate and the v0.7.0 release.
 
-- [ ] **F1 — Top waits panel** *(S)* — aggregate `wait_event_type:wait_event`
-  across the activity rows already in every snapshot into a ranked "what is
-  everyone stuck on right now" list. No new SQL — computed in core from
-  `DbSnapshot.activity`. Surface: Micro Lens side panel (TUI + web).
-- [ ] **F2 — Vacuum health & XID wraparound** *(S/M)* — cluster-wide
-  `age(datfrozenxid)` (distance to wraparound), per-table `age(relfrozenxid)`
-  + dead-tuple ratio, and in-flight `pg_stat_progress_vacuum` progress.
-  Surface: Schema Lens section + Macro Lens warning banner past thresholds
-  (yellow >200M, red >500M xid age). PG 13+, slow cadence.
-- [ ] **F3 — Index advisor (unused / redundant)** *(M, flagship)* —
-  `pg_stat_user_indexes` (idx_scan, size) + duplicate detection over
-  `pg_index` column lists. Presented as **signal, not verdict**: show
-  stats-reset age alongside. Surface: Schema Lens sub-view (tables ⇄ indexes
-  toggle), TUI + web. PG 13+, slow cadence.
-- [ ] **F4 — Checkpointer / bgwriter panel** *(S)* — checkpoint frequency,
-  buffers written by source, sync/write time; per-tick deltas like TPS.
-  `pg_stat_bgwriter` (13–16) / `pg_stat_checkpointer` + `pg_stat_bgwriter`
-  (17+, version-gated pair). Surface: Macro Lens panel.
+- [x] **F1 — Top waits panel** *(S, `4e94fe0`)* — ranked
+  `wait_event_type:wait_event` aggregation over the snapshot's activity
+  (pure in-core, no new SQL); one-line strip above the Micro Lens table,
+  Lock:* red / IO:* yellow; web chips mirror it.
+- [x] **F2 — Vacuum health & XID wraparound** *(S/M, `9ed90dd`)* — cluster
+  `age(datfrozenxid)` headline (yellow >200M, red >500M), worst-table ages +
+  dead%, in-flight `pg_stat_progress_vacuum` (fast tick, best-effort).
+  Schema Lens section + Macro Lens threshold banner + web panel/chip.
+- [x] **F2.5 — Replication slots view** *(S/M, owner priority, `7addcd5`)* —
+  `pg_replication_slots` in the replication panel (both roles): type,
+  active, retained WAL (recovery-guarded lsn diff), wal_status,
+  safe_wal_size. Inactive-retaining = yellow; unreserved/lost = red.
+- [x] **F3 — Index advisor (unused / redundant)** *(M, flagship, `ad3c2d8`)*
+  — unused (constraint indexes never flagged), exact-duplicate and
+  prefix-redundant detection in pure core code; Schema Lens `i` toggle
+  (tables ⇄ indexes) with stats-reset age for freshness; web sub-tab.
+- [x] **F4 — Checkpointer / bgwriter panel** *(S, `3eef2f6`)* — per-tick
+  delta rates (checkpoints/min timed vs requested, buffers/s by source,
+  write/sync ms), session-window pressure ratio (yellow when requested >
+  timed); version-gated at PG17's catalog split.
 
 ## v0.8 candidates (from the same research — re-rank before starting)
 
