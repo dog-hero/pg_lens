@@ -8,32 +8,6 @@ section on release.
 
 ---
 
-## v0.7 — "What should I go fix" (implemented — release pending)
-
-All five items are committed on main and verified against live PostgreSQL;
-awaiting the qa-tester batch gate and the v0.7.0 release.
-
-- [x] **F1 — Top waits panel** *(S, `4e94fe0`)* — ranked
-  `wait_event_type:wait_event` aggregation over the snapshot's activity
-  (pure in-core, no new SQL); one-line strip above the Micro Lens table,
-  Lock:* red / IO:* yellow; web chips mirror it.
-- [x] **F2 — Vacuum health & XID wraparound** *(S/M, `9ed90dd`)* — cluster
-  `age(datfrozenxid)` headline (yellow >200M, red >500M), worst-table ages +
-  dead%, in-flight `pg_stat_progress_vacuum` (fast tick, best-effort).
-  Schema Lens section + Macro Lens threshold banner + web panel/chip.
-- [x] **F2.5 — Replication slots view** *(S/M, owner priority, `7addcd5`)* —
-  `pg_replication_slots` in the replication panel (both roles): type,
-  active, retained WAL (recovery-guarded lsn diff), wal_status,
-  safe_wal_size. Inactive-retaining = yellow; unreserved/lost = red.
-- [x] **F3 — Index advisor (unused / redundant)** *(M, flagship, `ad3c2d8`)*
-  — unused (constraint indexes never flagged), exact-duplicate and
-  prefix-redundant detection in pure core code; Schema Lens `i` toggle
-  (tables ⇄ indexes) with stats-reset age for freshness; web sub-tab.
-- [x] **F4 — Checkpointer / bgwriter panel** *(S, `3eef2f6`)* — per-tick
-  delta rates (checkpoints/min timed vs requested, buffers/s by source,
-  write/sync ms), session-window pressure ratio (yellow when requested >
-  timed); version-gated at PG17's catalog split.
-
 ## v0.8 candidates (from the same research — re-rank before starting)
 
 - [ ] **I/O profile** — `pg_stat_io` (PG 16+ only), backend_type × context
@@ -63,6 +37,11 @@ awaiting the qa-tester batch gate and the v0.7.0 release.
 
 ## Shipped
 
+- **v0.7.0** — "What should I go fix": top waits panel (`4e94fe0`), vacuum
+  health & XID wraparound (`9ed90dd`), replication slots view (`7addcd5`),
+  index advisor for unused/duplicate/prefix-redundant indexes (`ad3c2d8`),
+  checkpointer/bgwriter panel version-gated at PG17 (`3eef2f6`) — all five
+  in both TUI and Web Lens.
 - **v0.6.1** — cancel in-flight queries on shutdown (CancelRequest on quit).
 - **v0.6.0** — config.toml defaults; persistent history (JSONL per target,
   1h ring); Micro Lens activity filter (`/` + web search box); Web Lens
