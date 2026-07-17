@@ -178,6 +178,18 @@ def main():
         check("banner persists on the other tab", "DB error" in snaps["t5_keys_down"])
 
         docker("start", args.resilience_container)
+        # Jump back to the Micro Lens via the direct-jump digit key ("2" —
+        # see Tab::TITLES / the `1`-`6` handler in app.rs) so the recovery
+        # check has "PID" to look for. Tab-count-agnostic like the rest of
+        # this block (no blind Tab-hop assumption about cycle length): a
+        # regression here once made this check look at the Replication Lens
+        # (reached by the "keys still work while down" Tab press above,
+        # which lands one lens further than it used to under the six-tab
+        # layout) — the poller HAD reconnected (fresh uptime, no banner) but
+        # the check never found "PID" because it was reading the wrong
+        # panel. Re-sending "2" restores the original intent without
+        # reintroducing that fragility.
+        send("2")
         recovered = False
         deadline = time.time() + 45  # container boot + poller backoff (max 10s)
         while time.time() < deadline:
