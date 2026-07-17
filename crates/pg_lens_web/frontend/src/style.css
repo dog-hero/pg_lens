@@ -72,6 +72,17 @@ html[data-theme="light"] {
   box-sizing: border-box;
 }
 
+html,
+body {
+  /* Belt-and-suspenders against ANY residual horizontal overflow (the
+     `.cards` grid / wide tables are the known offenders, fixed at the
+     source below) — this never hides legitimate content since every wide
+     region that needs to scroll (`.table-wrap`, the `db-switcher`, etc.)
+     manages its own `overflow-x: auto` internally. */
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -84,6 +95,7 @@ body {
   max-width: 1600px;
   margin: 0 auto;
   padding: 0 20px 32px;
+  min-width: 0;
 }
 
 /* Data, numbers, code and query text stay monospace in both themes — a
@@ -248,6 +260,12 @@ code,
   gap: 20px;
   align-items: flex-start;
   margin-top: 16px;
+  /* Flex containers can themselves overflow their own containing block if a
+     descendant's intrinsic size pushes them wide before the flex algorithm
+     ever gets to shrink `main` — belt-and-suspenders alongside `main`'s
+     `min-width: 0` below. */
+  min-width: 0;
+  max-width: 100%;
 }
 
 #sidenav {
@@ -384,7 +402,16 @@ kbd {
 
 main {
   flex: 1;
+  /* The classic flexbox+grid overflow gotcha: a flex item's automatic
+     minimum width defaults to its content's min-content size, which for the
+     vitals `.cards` grid and the wide activity/schema/statements tables can
+     be well over 1000px — that alone can force `main` (and the whole page)
+     wider than the viewport, independent of `flex-shrink`. Overriding the
+     automatic minimum to 0 lets `main` actually shrink to the space `#shell`
+     gives it, so the grid/tables below get a definite, viewport-bounded
+     width to wrap/scroll within instead of dictating one upward. */
   min-width: 0;
+  max-width: 100%;
 }
 
 @media (max-width: 1024px) {
@@ -425,9 +452,16 @@ main {
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  /* `minmax(min(210px, 100%), 1fr)` (not a bare `minmax(210px, 1fr)`): the
+     track's minimum is itself clamped to the container's available width,
+     so a narrow viewport collapses to one column instead of the grid's
+     intrinsic-sizing pass requesting N * 210px and pushing its ancestors
+     wide before the outer flex/box layout ever gets a chance to constrain
+     it — the actual bug the redesign shipped with. */
+  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
   gap: 12px;
   margin: 0 0 16px;
+  min-width: 0;
 }
 
 .card {
@@ -436,6 +470,11 @@ main {
   border-radius: 10px;
   padding: 14px 16px;
   box-shadow: var(--shadow);
+  /* Same automatic-minimum-size gotcha as the flex `main` above, but for
+     grid items: without this, a long nowrap `.card-value` (e.g. the lock
+     table's "5887 / 6400 (92.0%)") can force its own grid cell — and the
+     whole track — wider than the `minmax()` track sizing intended. */
+  min-width: 0;
 }
 
 .card.lead {
@@ -457,14 +496,21 @@ main {
 }
 
 .card-value {
-  font-size: 1.6rem;
+  /* `clamp()` lets a compound value (e.g. "5887 / 6400 (92.0%)") shrink a
+     little on its own before falling back to wrapping — `overflow-wrap` is
+     the actual guarantee against clipping, the shrink is just so it rarely
+     needs to. */
+  font-size: clamp(1.05rem, 1.5vw + 0.7rem, 1.6rem);
   font-weight: 700;
   margin-top: 4px;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.25;
 }
 
 .card.lead .card-value {
-  font-size: 1.9rem;
+  font-size: clamp(1.15rem, 1.8vw + 0.8rem, 1.9rem);
 }
 
 .card.warn .card-value {
@@ -480,6 +526,8 @@ main {
   font-size: 0.75rem;
   margin-top: 6px;
   font-family: var(--font-ui);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .meter {
@@ -534,6 +582,16 @@ main {
 /* ── activity table ─────────────────────────────────────────────────── */
 
 .table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* uPlot builds its own inline-styled `<canvas>`/legend width from the
+   container's `clientWidth` (see chart.ts) — bounding the container itself
+   keeps that measurement (and therefore the chart) inside the panel instead
+   of the panel's `<h2>` text/table wrap contributing to page overflow. */
+#chart {
+  max-width: 100%;
   overflow-x: auto;
 }
 

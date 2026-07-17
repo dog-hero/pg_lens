@@ -54,10 +54,19 @@ function checkpointCard(cp: CheckpointerStats | null): Card {
     };
   }
   const card = checkpointerCard(cp);
+  // v0.13 layout fix: `card.perMin` ("0.31 timed / 0.02 req /min") is a full
+  // sentence, not a headline number — cramming it into the big `.card-value`
+  // slot is what clipped/overflowed the card. A short total rate is the
+  // actual headline; the sentence-shaped breakdown belongs in the detail
+  // line alongside pressure/buffer/write-sync, same as every other card.
+  const total =
+    cp.checkpoints_per_min_timed !== null && cp.checkpoints_per_min_req !== null
+      ? `${(cp.checkpoints_per_min_timed + cp.checkpoints_per_min_req).toFixed(2)}/min`
+      : "--/min";
   return {
     label: "Checkpoints",
-    value: card.perMin,
-    detail: `${card.pressure} · ${card.buffersPerSec} · avg ${card.avgWriteSync}`,
+    value: total,
+    detail: `${card.perMin} · ${card.pressure} · ${card.buffersPerSec} · avg ${card.avgWriteSync}`,
     meter: null,
     tone: card.severity,
   };
