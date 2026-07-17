@@ -36,24 +36,7 @@ that also clears the stale-README debt.
   full rows, `pg_stat_statements`, replication views, `pg_stat_progress_*`),
   what degrades to an absent panel without them, and the read-only posture.
 
-## v0.10 candidates (mapped 2026-07-16 — owner priorities)
-
-- [ ] **Remote connection config** — load connection definitions
-  (`services.toml`-shaped) from a remote source, including a **private GitHub
-  repo**, so a team shares one curated target list instead of copying files.
-  Design notes / open questions: auth (GitHub token via env/keychain, reuse
-  the `password_cmd` secret pattern — never a token in the file); fetch on
-  startup with a local cache + offline fallback; a `remote_config` URL/ref in
-  `config.toml` and/or a `--config-url` flag; refuse to persist secrets;
-  precedence vs. local `services.toml`. Read-only fetch — pg_lens never writes
-  back to the repo.
-- [ ] **Read-only mode (no actions)** — a mode that hard-disables every
-  admin/mutating action (`c` cancel, `K` terminate, schema/bloat refresh
-  writes if any) and the write transaction path, for shared/audited
-  deployments and least-privilege roles. Surfaced in the header; enforced in
-  `update()` and the web admin endpoints (not just hidden in the UI); settable
-  via `config.toml`, a `--read-only` flag, and ideally auto-detected when the
-  role lacks the privilege. Pairs with the v0.9 least-privilege docs.
+## v0.10 — shipped (see Shipped section)
 
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
@@ -84,6 +67,16 @@ that also clears the stale-README debt.
 
 ## Shipped
 
+- **v0.10.0** — read-only mode (`--read-only` / `PG_LENS_READ_ONLY` /
+  `read_only = true` in config.toml) hard-disables `c`/`K` with a real
+  server-side gate in both the TUI (refused before the confirm modal opens,
+  permanent yellow `RO` header marker) and the Web Lens (`403` on
+  `/api/admin/*` even with a valid `PG_LENS_AUTH_TOKEN`); remote connection
+  config (`--config-url` / `PG_LENS_CONFIG_URL` / `remote_config` in
+  config.toml) loads a shared `services.toml` from a
+  `github:owner/repo/path@ref` shorthand or any https(s) URL, with a
+  token-never-in-a-file resolution chain, a local cache + offline fallback,
+  and remote-wins precedence — all in both TUI and Web Lens where applicable.
 - **v0.9.0** — "Problem transactions": idle-in-transaction / transaction-age
   hunter (Micro Lens column + oldest-open-xact headline, yellow/red tiers),
   blocking-chain / lock-wait graph in the Micro Lens detail panel (root
