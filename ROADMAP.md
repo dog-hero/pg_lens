@@ -38,6 +38,57 @@ that also clears the stale-README debt.
 
 ## v0.10 — shipped (see Shipped section)
 
+## v0.11 — "Incident precursors & connection visibility" (in progress — owner-selected 2026-07-17)
+
+Cheap, cohesive batch from the 2026-07-17 discovery: close an outright
+visibility hole (idle connections), add two leading-indicator gauges that warn
+*before* an outage, and let the operator jump straight to a `psql` shell from
+the session they're staring at. Every data item reuses a view already polled or
+a one-column catalog read.
+
+- [x] **Idle connection / connection-age census** — the Micro Lens activity
+  query filters out idle sessions (`WHERE state <> 'idle'`), so the classic
+  pool-exhaustion incident (`connections_total` near `max_connections` but few
+  active) is undiagnosable today. Surface idle sessions ranked by age
+  (`now() - state_change`), with `application_name` / `client_addr` / `usename`
+  / `datname` — all columns already selected for active rows, same
+  `pg_stat_activity`, PG 13+. A toggle/second panel in the Micro Lens (reuse
+  the activity table component). TUI + Web. **S/M.**
+- [x] **Lock-table pressure gauge** — headroom before "out of shared memory,
+  you might need to increase max_locks_per_transaction". `count(*) FROM
+  pg_locks` vs. `max_locks_per_transaction × (max_connections +
+  max_prepared_transactions)` (documented capacity formula) — cheap aggregate
+  + scalar settings, PG 13+. A yellow/red gauge in the Macro Lens vitals strip
+  (reuse existing severity-tier styling). TUI + Web. **S.**
+- [x] **Invalid / not-ready index flag** — indexes left behind by a failed
+  `CREATE INDEX CONCURRENTLY` waste write I/O and disk while serving no query;
+  `\d` never warns. `pg_index.indisvalid` / `indisready` — the join already
+  exists in `indexes.sql`, one more column + one advisor category in the Index
+  Lens (`index_advisor::classify`). Best-effort. TUI + Web. **S.**
+- [x] **Open `psql` from pg_lens** — jump from the session you're inspecting
+  straight into a `psql` shell on the same connection. TUI keybinding (suggest
+  a mnemonic like `!` or `p`): suspend the alternate screen / raw mode, spawn
+  `psql` reconstructing the resolved connection params (host/port/user/dbname;
+  pass the password via a transient `PGPASSWORD` in the child env or a libpq
+  `passfile`, never on the argv/command line), restore the TUI cleanly on exit.
+  Design/open questions to settle at build time: (a) locate `psql` on `PATH`,
+  degrade to a clear message if absent — pg_lens must not require psql to run;
+  (b) **read-only mode interaction** — `--read-only` gates pg_lens's OWN admin
+  actions, but a psql shell is full access; decide whether read-only disables
+  the launch, warns, or passes `-v` / a read-only-transaction default — at
+  minimum surface that psql is unrestricted; (c) `serve`/web has no local
+  terminal, so this is **TUI-only** (no web surface); (d) restore terminal
+  state even if psql crashes (RAII/guard around the suspend). Secret handling
+  is the sharp edge — treat it like `password_cmd`: resolve late, keep it out
+  of argv, logs, and history. TUI only. **M.**
+
+Deferred candidate from the same pass (map, don't build this batch):
+- **Query I/O & temp-spill profile** — `pg_stat_statements` `temp_blks_*`,
+  `shared_blks_dirtied/written`, `blk_read_time`/`blk_write_time` (gated on
+  `track_io_timing`), `wal_bytes` (ext ≥1.9); pure column addition to the
+  existing Query Lens table/detail, mirroring the existing optional-timing
+  version gate. The #1 query-tuning signal the Query Lens still lacks. **S/M.**
+
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
 - [ ] **I/O profile** — `pg_stat_io` (PG 16+ only), backend_type × context

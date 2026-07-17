@@ -368,6 +368,23 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             spans.push(wd);
         }
     }
+    // v0.11: `I` toggles the Micro Lens's idle connection census — same
+    // "where width allows" budget discipline as `w` above.
+    if app.active_tab == Tab::MicroLens {
+        let [ik, id] = style::hint("I", ": idle");
+        let fits = Line::from(spans.clone()).width()
+            + sep.width()
+            + ik.width()
+            + id.width()
+            + sep.width()
+            + data_span.width()
+            <= area.width as usize;
+        if fits {
+            spans.push(sep.clone());
+            spans.push(ik);
+            spans.push(id);
+        }
+    }
     // U2's `d: database` hint works from any lens, but the tight lenses
     // (Micro/Schema/Query, already carrying filter/admin/sort/R hints) can
     // run out of the 120-col budget — rather than let ratatui silently clip
@@ -384,6 +401,22 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(sep.clone());
         spans.push(dk);
         spans.push(dd);
+    }
+    // v0.11: `!` suspends the TUI for a psql shell on the same connection —
+    // works from any lens, same "where width allows" budget discipline as
+    // `d` just above (and lowest priority: it hides first on a tight bar).
+    let [pk, pd] = style::hint("!", ": psql");
+    let fits = Line::from(spans.clone()).width()
+        + sep.width()
+        + pk.width()
+        + pd.width()
+        + sep.width()
+        + data_span.width()
+        <= area.width as usize;
+    if fits {
+        spans.push(sep.clone());
+        spans.push(pk);
+        spans.push(pd);
     }
     spans.push(sep);
     spans.push(data_span);
@@ -792,22 +825,32 @@ mod tests {
     fn index_detail_shows_indexdef_and_duplicate_partner() {
         let mut app = App::new();
         app.active_tab = Tab::IndexLens;
-        // Severity-then-size order puts an UNUSED row first (rank 0).
+        // Severity-then-size order puts the INVALID row first (rank 0).
         app.detail_open = true;
         let screen = render(&mut app);
         assert!(screen.contains("Index \u{2014} public."), "{screen}");
         assert!(screen.contains("CREATE"), "verbatim indexdef: {screen}");
+        assert!(screen.contains("INVALID"), "{screen}");
+        assert!(screen.contains("CREATE INDEX CONCURRENTLY"), "{screen}");
+
+        let press_j = |app: &mut App| {
+            crate::app::update(
+                app,
+                crate::app::Action::Key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char('j'),
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+            );
+        };
+
+        // Move down to the UNUSED row (rank 1) and re-check its evidence.
+        press_j(&mut app);
+        let screen = render(&mut app);
         assert!(screen.contains("UNUSED"), "{screen}");
         assert!(screen.contains("zero scans"), "{screen}");
 
-        // Move down to the exact-duplicate row and re-check its evidence.
-        crate::app::update(
-            &mut app,
-            crate::app::Action::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('j'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-        );
+        // Move down to the exact-duplicate row (rank 2) and re-check.
+        press_j(&mut app);
         let screen = render(&mut app);
         assert!(screen.contains("DUP"), "{screen}");
         assert!(screen.contains("exact duplicate of"), "{screen}");
@@ -1237,16 +1280,71 @@ mod tests {
         assert!(screen.contains("?: help"), "{screen}");
     }
 
+    /// v0.11: the psql hint is the LOWEST-priority statusbar item (after
+    /// `d: database`, which is already tight at the standard 120-col test
+    /// width — see `top_waits_strip_hides_without_waits_and_on_narrow_terminals`
+    /// for that same budget discipline), so a wider terminal is needed to
+    /// prove it actually renders "where width allows".
+    #[test]
+    fn statusbar_advertises_the_psql_hint_where_width_allows() {
+        let mut app = App::new();
+        let backend = TestBackend::new(160, 36);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("!: psql"), "{screen}");
+    }
+
+    /// On the standard 120-col width the statusbar is already at capacity
+    /// (see the test above) — the hint must not render truncated text or
+    /// panic; it simply and silently stays hidden.
+    #[test]
+    fn statusbar_hides_the_psql_hint_on_a_tight_120_col_terminal() {
+        let mut app = App::new();
+        let screen = render(&mut app);
+        assert!(!screen.contains("!: psql"), "{screen}");
+    }
+
+    /// The help overlay lists `!` alongside every other binding.
+    #[test]
+    fn help_overlay_lists_the_psql_binding() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Char('?'));
+        let screen = render(&mut app);
+        assert!(screen.contains("psql shell"), "{screen}");
+    }
+
     #[test]
     fn question_mark_opens_the_help_overlay_with_known_bindings() {
         let mut app = App::new();
         press(&mut app, crossterm::event::KeyCode::Char('?'));
         assert!(app.help_open);
-        let screen = render(&mut app);
+        // v0.11's extra `!` row pushed the reference list past the standard
+        // 36-row `render()` height (the trailing "Esc / ?: close" line
+        // would clip) — a taller terminal, same width, keeps every
+        // assertion below meaningful instead of silently checking clipped
+        // content.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
         assert!(screen.contains("keyboard help"), "{screen}");
         assert!(screen.contains("Navigation"), "{screen}");
         assert!(screen.contains("cycle lenses"), "{screen}");
         assert!(screen.contains("terminate the backend"), "{screen}");
+        assert!(screen.contains("psql shell"), "{screen}");
         assert!(screen.contains("Esc / ?: close"), "{screen}");
         // The dashboard underneath is still there (overlay, not full-screen).
         assert!(screen.contains("Macro Lens"), "{screen}");

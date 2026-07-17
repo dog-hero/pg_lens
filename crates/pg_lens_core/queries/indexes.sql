@@ -26,6 +26,11 @@
 --     row whose conindid points back at it — is_constraint flags that,
 --     read alongside pg_index's own indisunique/indisprimary/indisexclusion
 --     (the flags `index_advisor` actually gates "never flag" on).
+--   * indisvalid/indisready: false on either means a `CREATE INDEX
+--     CONCURRENTLY` was interrupted (crash, cancel) and left a dead,
+--     never-queryable index behind — pure write/disk overhead that `\d`
+--     does not warn about. Available on all supported versions (PG 13+),
+--     no version gate needed.
 --
 -- LIMIT 50: the worst-by-size offenders are what an operator acts on first;
 -- same row-cap philosophy as table_stats/vacuum_table_ages.
@@ -40,6 +45,8 @@ SELECT
       idx.indisunique AS is_unique,
       idx.indisprimary AS is_primary,
       idx.indisexclusion AS is_exclusion,
+      idx.indisvalid AS is_valid,
+      idx.indisready AS is_ready,
       (con.oid IS NOT NULL) AS is_constraint,
       idx.indkey::text AS indkey,
       idx.indclass::text AS indclass,

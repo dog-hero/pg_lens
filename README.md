@@ -83,6 +83,22 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
   deadlock-cycle warning) in the Micro Lens detail panel, and an orphaned
   two-phase-commit (`pg_prepared_xacts`) watch inside the Vacuum sub-view —
   all three are common causes of XID-wraparound and lock pile-ups. TUI + Web.
+- **Idle connection / connection-age census** — press `I` in the Micro Lens
+  to see the idle sessions the activity table normally filters out, ranked
+  oldest-first with a headline — the diagnostic for the classic
+  pool-exhaustion incident (connections near `max_connections`, few of them
+  active). TUI + Web.
+- **Lock-table pressure gauge** — a third Macro Lens vitals gauge showing
+  held locks against the cluster's effective capacity, yellow/red before
+  you hit "out of shared memory, you might need to increase
+  max_locks_per_transaction". TUI + Web.
+- **Invalid index detection** — the Index Lens flags indexes left behind by
+  a failed `CREATE INDEX CONCURRENTLY` (`INVALID`, ranked first) — wasted
+  write I/O and disk serving no query, something `\d` never warns about.
+  TUI + Web.
+- **`psql` shell launch** (`!`, TUI-only) — jump straight from the session
+  you're inspecting into an interactive `psql` shell on the same
+  connection; see [The `psql` shell](#the-psql-shell).
 - **Keyboard help overlay** — press `?` for a full reference of every
   binding, grouped by navigation / sub-views / data / admin / quit.
 - **Read-only mode** — `--read-only` / `PG_LENS_READ_ONLY` / config.toml
@@ -489,8 +505,10 @@ they ever drift, trust the overlay.
 | `Enter` | Open/close the selected row's detail panel |
 | `/` | Filter the activity table (Micro Lens only) — type to narrow by pid, database, user, application, client, state, wait or query text; `Enter` applies, `Esc` reverts |
 | `w` | Full waits panel (Micro Lens only) |
+| `I` | Idle-connection census (Micro Lens only) — swaps the body to a list of idle sessions ranked oldest-first; `Esc` closes it |
 | `v` | Vacuum sub-view (Schema Lens only) |
 | `d` | Database picker (any lens) — reconnects the poller to the chosen database |
+| `!` | Open a `psql` shell on the same connection (any lens) — see [The `psql` shell](#the-psql-shell) |
 | `?` | Keyboard help overlay — lists every binding |
 | `R` | Force schema/query-stats refresh (any lens) |
 | `s` | Cycle sort column (Micro Lens / Schema Lens tables / Query Lens; inert on Index, Replication, and the Vacuum sub-view) |
@@ -511,6 +529,29 @@ they ever drift, trust the overlay.
 > "gone or insufficient privilege" / the server's permission error in the
 > feedback line. These actions are TUI-only — the web dashboard stays
 > read-only by design.
+
+### The `psql` shell
+
+Press `!` (any lens, TUI only) to suspend pg_lens and drop into an
+interactive `psql` shell on the exact same connection the poller is
+using (host/port/user/dbname) — no need to retype connection details to
+run a one-off query or `\d` a table. pg_lens restores the terminal cleanly
+when `psql` exits, on a spawn failure, or if `psql` isn't found on `PATH`
+(a clear inline message, not a crash — pg_lens does not require `psql` to
+run otherwise). The password is never passed on the command line; it's
+resolved as late as possible and handed to the child only via a
+`PGPASSWORD` environment variable, matching the discipline pg_lens's own
+connection resolution already uses (see
+[Creating the monitoring user](docs/connection-user.md)).
+
+Under `--read-only`, the shell launches with
+`PGOPTIONS=-c default_transaction_read_only=on` (a default transaction
+read-only mode) and pg_lens prints a notice alongside it — a full `psql`
+session is definitionally unrestricted and can override that default
+explicitly, so this is a nudge toward the read-only spirit, not a hard
+sandbox. In `--mock` there's no real connection to hand `psql`, so `!`
+shows a "not simulated" message instead of launching anything. Not
+available from the Web Lens — there's no local terminal to suspend into.
 
 ### Read-only mode
 
@@ -668,7 +709,9 @@ vacuum health / XID-wraparound, index advisor, checkpointer panel), v0.8
 "room to breathe" (Index/Replication Lens tabs, database selector, full
 waits panel, Vacuum sub-view), v0.9 "problem transactions" (idle-in-tx
 hunter, blocking-chain graph, prepared-transaction watch, keyboard help
-overlay), and v0.10 (read-only mode, remote connection config). See
+overlay), v0.10 (read-only mode, remote connection config), and v0.11
+"incident precursors & connection visibility" (idle-connection census,
+lock-table pressure gauge, invalid-index flag, `psql` shell launch). See
 [ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Changelog

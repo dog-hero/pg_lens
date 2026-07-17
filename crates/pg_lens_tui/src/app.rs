@@ -170,18 +170,46 @@ impl SchemaView {
     }
 }
 
+/// Which body the Micro Lens shows (v0.11, `I` toggles). Same shape as
+/// [`SchemaView`]'s Tables/Vacuum swap: a full body replacement, not an
+/// overlay panel like `waits_open`/`detail_open` — the idle census reuses
+/// the SAME table component (see `ui/micro_lens.rs::draw_idle_table`)
+/// rather than crowding the active-session table with more columns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MicroView {
+    /// The active-session table (the lens's default) — everything this
+    /// module already rendered before v0.11.
+    #[default]
+    Activity,
+    /// The idle connection / connection-age census: every `state = 'idle'`
+    /// session, oldest first, with its own cursor (`idle_table_state`).
+    Idle,
+}
+
+impl MicroView {
+    pub fn next(self) -> Self {
+        match self {
+            MicroView::Activity => MicroView::Idle,
+            MicroView::Idle => MicroView::Activity,
+        }
+    }
+}
+
 /// Fixed severity order of one [`pg_lens_core::IndexFinding`] — lower sorts
-/// first. `Unused` (red) is the strongest, cheapest-to-verify claim;
+/// first. `Invalid` (red) is the strongest claim — a failed `CREATE INDEX
+/// CONCURRENTLY` is both dead weight and a build that needs cleanup/retry;
+/// `Unused` (red) is the strongest read-based, cheapest-to-verify claim;
 /// `DuplicatePrefix` (dim-yellow) the weakest. Shared by [`resort_indexes`]
 /// (row order) and `ui/index_lens.rs` (marker/color), so the two never
 /// disagree about which finding is "worse". The Index Lens (U1) has no
 /// user-chosen sort mode of its own — this fixed order is it.
 pub fn index_finding_rank(finding: &pg_lens_core::IndexFinding) -> u8 {
     match finding {
-        pg_lens_core::IndexFinding::Unused => 0,
-        pg_lens_core::IndexFinding::DuplicateExact { .. } => 1,
-        pg_lens_core::IndexFinding::DuplicatePrefix { .. } => 2,
-        pg_lens_core::IndexFinding::None => 3,
+        pg_lens_core::IndexFinding::Invalid => 0,
+        pg_lens_core::IndexFinding::Unused => 1,
+        pg_lens_core::IndexFinding::DuplicateExact { .. } => 2,
+        pg_lens_core::IndexFinding::DuplicatePrefix { .. } => 3,
+        pg_lens_core::IndexFinding::None => 4,
     }
 }
 
@@ -371,6 +399,14 @@ pub enum Action {
     /// spawns the poller lazily and feeds the display-safe `user@host`
     /// label back through update() — the sole mutation point).
     HostLabel(String),
+    /// `main.rs` finished (or refused) an `!`-requested `psql` session and
+    /// reports the outcome as statusbar feedback — the same
+    /// `AdminFeedback` mechanism `c`/`K` already use, so nothing new needs
+    /// to be rendered. `update()` stays the sole place `App` mutates even
+    /// though the actual suspend/spawn/restore happened in `main.rs` (see
+    /// its module doc for why that dance cannot live in `update()` or
+    /// `ui/`).
+    PsqlResult { text: String, error: bool },
     Tick,
     Quit,
 }
@@ -432,6 +468,13 @@ pub struct App {
     /// opening one closes the other): `Esc` closes it WITHOUT arming the
     /// top-level quit barrier, `Tab` closes it and switches lens.
     pub waits_open: bool,
+    /// Which body the Micro Lens shows (v0.11, `I` toggles) — see
+    /// [`MicroView`]. Persists across Tab switches like `schema_view`.
+    pub micro_view: MicroView,
+    /// Idle census cursor (v0.11), independent from `table_state` — toggling
+    /// `I` never loses either cursor, same contract as
+    /// `vacuum_table_state`/`schema_table_state`.
+    pub idle_table_state: TableState,
     /// Times `R` was pressed (schema force-recollect). The main loop mirrors
     /// this counter into the poller's `watch::Sender<u64>` after every
     /// update — the same message-passing pattern as `refresh_interval`.
@@ -530,6 +573,13 @@ pub struct App {
     /// takes priority over every other overlay's Esc handling — see the
     /// dedicated check at the top of [`handle_key`].
     pub help_open: bool,
+    /// `true` for exactly one pass through `main.rs`'s loop after `!` is
+    /// pressed — the loop is the only place that owns the terminal and can
+    /// suspend it to spawn `psql`, so `update()` can only request the
+    /// action, never perform it. `main.rs` clears this flag (via
+    /// `std::mem::take`) the instant it observes it, then reports the
+    /// outcome back through [`Action::PsqlResult`].
+    pub launch_psql_requested: bool,
     pub should_quit: bool,
 }
 
@@ -555,6 +605,8 @@ impl App {
             statements_table_state: TableState::default().with_selected(0),
             detail_open: false,
             waits_open: false,
+            micro_view: MicroView::default(),
+            idle_table_state: TableState::default().with_selected(0),
             schema_refresh_requests: 0,
             host: "localhost".to_string(),
             refresh_interval: DEFAULT_REFRESH,
@@ -578,6 +630,7 @@ impl App {
             filter_saved: String::new(),
             esc_quit_armed_until: None,
             help_open: false,
+            launch_psql_requested: false,
             should_quit: false,
         };
         resort(&mut app);
@@ -656,6 +709,13 @@ pub fn update(app: &mut App, action: Action) {
         // The next draw reads the new terminal size from the frame itself.
         Action::Resize => {}
         Action::HostLabel(label) => app.host = label,
+        Action::PsqlResult { text, error } => {
+            app.admin_feedback = Some(AdminFeedback {
+                text,
+                error,
+                expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+            });
+        }
         // Advance the splash spinner / feedback clock (and force a redraw).
         Action::Tick => {
             app.tick_count = app.tick_count.wrapping_add(1);
@@ -822,6 +882,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 // The `v` Vacuum sub-view is an overlay too: Esc returns to
                 // the Tables view, it does NOT arm quitting.
                 app.schema_view = SchemaView::Tables;
+            } else if app.active_tab == Tab::MicroLens && app.micro_view != MicroView::Activity {
+                // The `I` idle census is the same "overlay-like sub-view"
+                // story as the Vacuum sub-view above: Esc returns to the
+                // Activity table, it does NOT arm quitting.
+                app.micro_view = MicroView::Activity;
             } else if app
                 .esc_quit_armed_until
                 .is_some_and(|until| app.tick_count <= until)
@@ -858,7 +923,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 app.detail_open = false;
             } else if app.waits_open {
                 app.waits_open = false;
-            } else if (app.active_tab == Tab::MicroLens && app.table_state.selected().is_some())
+            } else if (app.active_tab == Tab::MicroLens
+                && app.micro_view == MicroView::Activity
+                && app.table_state.selected().is_some())
                 || (app.active_tab == Tab::SchemaLens
                     && app.schema_view == SchemaView::Tables
                     && app.selected_table().is_some())
@@ -874,8 +941,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.active_tab = app.active_tab.next();
         }
         // `/` starts (or resumes) editing the Micro Lens activity filter.
-        // Micro Lens only — the other lenses have their own row sets.
-        KeyCode::Char('/') if app.active_tab == Tab::MicroLens => {
+        // Micro Lens's Activity view only — the idle census (v0.11) has no
+        // filter of its own.
+        KeyCode::Char('/')
+            if app.active_tab == Tab::MicroLens && app.micro_view == MicroView::Activity =>
+        {
             app.filter_saved = app.filter.clone();
             app.filter_editing = true;
         }
@@ -883,7 +953,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // strip only ever shows the top few; this is the complete list.
         // Toggle, Micro Lens only; opening it closes any open detail panel
         // (overlays never stack — see the Enter/Esc handling above/below).
-        KeyCode::Char('w') if app.active_tab == Tab::MicroLens => {
+        KeyCode::Char('w')
+            if app.active_tab == Tab::MicroLens && app.micro_view == MicroView::Activity =>
+        {
             app.waits_open = !app.waits_open;
             if app.waits_open {
                 app.detail_open = false;
@@ -897,9 +969,38 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.schema_view = app.schema_view.next();
             app.detail_open = false;
         }
+        // `I` (v0.11, mnemonic "idle"): toggles the Micro Lens between the
+        // Activity table and the idle connection / connection-age census
+        // (see [`MicroView`]) — the SAME body-swap shape as `v`'s Vacuum
+        // sub-view, not a stacking overlay, so it closes any open detail
+        // panel (the idle census has none of its own).
+        KeyCode::Char('I') if app.active_tab == Tab::MicroLens => {
+            app.micro_view = app.micro_view.next();
+            app.detail_open = false;
+            app.waits_open = false;
+        }
         // `d` opens the database picker (U2) from ANY lens — reconnecting is
         // a cluster-wide, not a per-lens, action.
         KeyCode::Char('d') => open_db_picker(app),
+        // `!` (v0.11, mnemonic "shell out"): asks `main.rs` (the only place
+        // that owns the terminal) to suspend the TUI and open an
+        // interactive `psql` shell on the SAME connection. `--mock` has no
+        // real connection to hand psql, so it short-circuits here with the
+        // same calm "not simulated" feedback the database picker (`d`) uses
+        // in mock mode — main.rs never sees the request. Works from any
+        // lens, like `d`; every overlay above already returned before this
+        // match, so no overlay is ever left dangling underneath psql.
+        KeyCode::Char('!') => {
+            if app.is_mock {
+                app.admin_feedback = Some(AdminFeedback {
+                    text: "mock mode: no real connection for psql".to_string(),
+                    error: false,
+                    expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+                });
+            } else {
+                app.launch_psql_requested = true;
+            }
+        }
         // `?` opens the keyboard help overlay (v0.9) from ANY lens — a
         // static, no-data modal (see `ui/help.rs`). Closing it is handled
         // entirely by `handle_help_key` (Esc or `?` again), reached via the
@@ -912,8 +1013,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // Index Lens and Replication Lens have no sort mode of their own
         // (fixed severity order — see `index_finding_rank`/
         // `slot_severity_rank`), so `s` is inert there. The Schema Lens's
-        // Vacuum sub-view (U3) is the same story: `vacuum_tables` is a fixed
-        // worst-first order, not a user-chosen sort.
+        // Vacuum sub-view (U3) and the Micro Lens's idle census (v0.11) are
+        // the same story: both are fixed worst/oldest-first orders, not a
+        // user-chosen sort.
         KeyCode::Char('s') => match app.active_tab {
             Tab::SchemaLens if app.schema_view == SchemaView::Tables => {
                 app.schema_sort_mode = app.schema_sort_mode.next();
@@ -925,6 +1027,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 resort_statements(app);
             }
             Tab::IndexLens | Tab::ReplicationLens => {}
+            Tab::MicroLens if app.micro_view == MicroView::Idle => {}
             _ => {
                 app.sort_mode = app.sort_mode.next();
                 resort(app);
@@ -975,7 +1078,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 /// keys in a view module would not be enforcement (the model is the only
 /// place state mutates); this early return is it.
 fn open_confirm(app: &mut App, terminate: bool) {
-    if app.active_tab != Tab::MicroLens {
+    // The idle census (v0.11) has its own cursor (`idle_table_state`), not
+    // `table_state` — `c`/`K` reading `selected_row()` here would silently
+    // act on whatever the Activity table's cursor last pointed at, not the
+    // idle row the operator is actually looking at. Out of scope for this
+    // census (a future "kill this idle connection" action would need its
+    // own selected-row lookup), so both keys stay inert there.
+    if app.active_tab != Tab::MicroLens || app.micro_view != MicroView::Activity {
         return;
     }
     let Some(row) = app.selected_row() else {
@@ -1214,6 +1323,11 @@ fn move_selection(app: &mut App, delta: i64) {
                 .as_deref()
                 .map_or(0, |s| s.statements.len()),
         ),
+        // v0.11: the idle census keeps its own cursor over its own row set.
+        Tab::MicroLens if app.micro_view == MicroView::Idle => (
+            &mut app.idle_table_state,
+            app.snapshot.idle_sessions.as_deref().map_or(0, |v| v.len()),
+        ),
         // Micro Lens navigates the FILTERED display order, not the raw
         // snapshot — `table_state` indexes `row_order`.
         _ => (&mut app.table_state, app.row_order.len()),
@@ -1330,6 +1444,20 @@ fn clamp_selection(app: &mut App) {
             .unwrap_or(0)
             .min(statements_len - 1);
         app.statements_table_state.select(Some(clamped));
+    }
+
+    // v0.11: the idle census has no detail panel to clear, just a cursor to
+    // keep valid — same shape as the Vacuum sub-view's clamp above.
+    let idle_len = app.snapshot.idle_sessions.as_deref().map_or(0, |v| v.len());
+    if idle_len == 0 {
+        app.idle_table_state.select(None);
+    } else {
+        let clamped = app
+            .idle_table_state
+            .selected()
+            .unwrap_or(0)
+            .min(idle_len - 1);
+        app.idle_table_state.select(Some(clamped));
     }
 }
 
@@ -1825,6 +1953,115 @@ mod tests {
         assert_eq!(app.vacuum_table_state.selected(), Some(1));
         // Tables cursor untouched by Vacuum-view navigation.
         assert_eq!(app.schema_table_state.selected(), Some(1));
+    }
+
+    // --- v0.11: idle connection / connection-age census (`I`) -------------
+
+    #[test]
+    fn i_toggles_the_micro_lens_idle_view_only() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        assert_eq!(app.micro_view, MicroView::Activity);
+        update(&mut app, press(KeyCode::Char('I')));
+        assert_eq!(app.micro_view, MicroView::Idle);
+        update(&mut app, press(KeyCode::Char('I')));
+        assert_eq!(app.micro_view, MicroView::Activity);
+
+        // Inert on every other lens.
+        for tab in [
+            Tab::MacroLens,
+            Tab::SchemaLens,
+            Tab::ReplicationLens,
+            Tab::IndexLens,
+            Tab::QueryLens,
+        ] {
+            let mut app = App::new();
+            app.active_tab = tab;
+            update(&mut app, press(KeyCode::Char('I')));
+            assert_eq!(app.micro_view, MicroView::Activity, "{tab:?}");
+        }
+    }
+
+    /// Esc in the idle census must CLOSE it (back to Activity), not fall
+    /// through and arm the double-Esc quit barrier — same overlay-close
+    /// contract as the Vacuum sub-view / waits panel / db picker.
+    #[test]
+    fn esc_closes_the_idle_view_without_arming_quit() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('I')));
+        assert_eq!(app.micro_view, MicroView::Idle);
+        update(&mut app, press(KeyCode::Esc));
+        assert_eq!(app.micro_view, MicroView::Activity, "Esc returns to Activity");
+        assert!(!app.should_quit);
+        assert!(
+            app.esc_quit_armed_until.is_none(),
+            "closing the idle view must not arm the quit barrier"
+        );
+    }
+
+    #[test]
+    fn i_closes_the_activity_view_detail_panel() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        update(&mut app, press(KeyCode::Char('I')));
+        assert_eq!(app.micro_view, MicroView::Idle);
+        assert!(!app.detail_open);
+    }
+
+    /// The idle census has no detail panel of its own — Enter is inert
+    /// there, mirroring the Vacuum sub-view's contract.
+    #[test]
+    fn enter_is_inert_in_the_idle_view() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('I')));
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.detail_open);
+    }
+
+    /// `s` (sort) is inert in the idle census (fixed oldest-first order),
+    /// but still cycles the Activity view's own sort mode once toggled back.
+    #[test]
+    fn s_is_inert_in_the_idle_view() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('I')));
+        let before = app.sort_mode;
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.sort_mode, before, "sort mode must not change");
+    }
+
+    /// The idle census's cursor is independent from the Activity cursor —
+    /// `j`/`k` there move `idle_table_state`, never `table_state`.
+    #[test]
+    fn idle_view_scrolls_its_own_independent_cursor() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_eq!(app.table_state.selected(), Some(1));
+
+        update(&mut app, press(KeyCode::Char('I')));
+        assert_eq!(app.idle_table_state.selected(), Some(0));
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_eq!(app.idle_table_state.selected(), Some(1));
+        // Activity cursor untouched by idle-view navigation.
+        assert_eq!(app.table_state.selected(), Some(1));
+    }
+
+    /// `c`/`K` (admin actions) read the Activity cursor, not the idle one —
+    /// both stay inert while the idle census is showing (see `open_confirm`).
+    #[test]
+    fn admin_actions_are_inert_in_the_idle_view() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('I')));
+        update(&mut app, press(KeyCode::Char('c')));
+        assert!(app.confirm.is_none());
+        update(&mut app, press(KeyCode::Char('K')));
+        assert!(app.confirm.is_none());
     }
 
     #[test]
@@ -2604,6 +2841,63 @@ mod tests {
             Action::HostLabel("svc@db.prod.internal".to_string()),
         );
         assert_eq!(app.host, "svc@db.prod.internal");
+    }
+
+    // --- `!`: psql shell request -----------------------------------------------
+
+    /// The real path: `!` sets the flag `main.rs` watches, and does NOT
+    /// touch `admin_feedback` itself — that only happens once `main.rs`
+    /// reports back via `Action::PsqlResult`.
+    #[test]
+    fn bang_key_sets_the_launch_request_flag() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char('!')));
+        assert!(app.launch_psql_requested);
+        assert!(app.admin_feedback.is_none());
+    }
+
+    /// `--mock` has no real connection: `!` short-circuits with the same
+    /// calm toast style as the database picker's mock-mode toast, and
+    /// `main.rs` never sees a launch request.
+    #[test]
+    fn bang_key_in_mock_mode_toasts_instead_of_requesting_a_launch() {
+        let mut app = App::new();
+        app.is_mock = true;
+        update(&mut app, press(KeyCode::Char('!')));
+        assert!(!app.launch_psql_requested);
+        let feedback = app.admin_feedback.as_ref().expect("toast shown");
+        assert!(feedback.text.contains("mock mode"), "{}", feedback.text);
+        assert!(!feedback.error);
+    }
+
+    /// `Action::PsqlResult` is the only place the outcome reaches `App` —
+    /// it reuses the existing `AdminFeedback` statusline (`c`/`K`'s
+    /// mechanism), so both success and failure render exactly like an
+    /// admin-action result.
+    #[test]
+    fn psql_result_action_surfaces_as_admin_feedback() {
+        let mut app = App::new();
+        update(
+            &mut app,
+            Action::PsqlResult {
+                text: "psql not found on PATH".to_string(),
+                error: true,
+            },
+        );
+        let feedback = app.admin_feedback.as_ref().expect("feedback set");
+        assert_eq!(feedback.text, "psql not found on PATH");
+        assert!(feedback.error);
+
+        update(
+            &mut app,
+            Action::PsqlResult {
+                text: "psql session ended".to_string(),
+                error: false,
+            },
+        );
+        let feedback = app.admin_feedback.as_ref().expect("feedback set");
+        assert_eq!(feedback.text, "psql session ended");
+        assert!(!feedback.error);
     }
 
     // --- admin actions (cancel/terminate) -------------------------------------

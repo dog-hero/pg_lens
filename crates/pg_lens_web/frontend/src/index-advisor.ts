@@ -2,7 +2,8 @@
 // TUI's schema_lens.rs conventions:
 // - fixed severity-then-size row order (no per-column sort in v1, matching
 //   the TUI's SchemaView::Indexes — see crates/pg_lens_tui/src/app.rs);
-// - flag column: "UNUSED" red / "DUP" yellow / "prefix" dim-yellow / "" ok;
+// - flag column: "INVALID" red / "UNUSED" red / "DUP" yellow / "prefix"
+//   dim-yellow / "" ok;
 // - staleness line names the stats-reset age, not just collection age — an
 //   `idx_scan = 0` claim means nothing right after a reset (PRD pillar 6);
 // - clicking a row toggles a detail row: the verbatim indexdef, the finding
@@ -11,10 +12,11 @@
 import type { IndexFinding, IndexRow, SchemaSnapshot } from "./types";
 import { humanAgo, humanBytes, humanCount, humanDuration } from "./format.ts";
 
-export type Severity = "unused" | "dup" | "prefix" | "none";
+export type Severity = "invalid" | "unused" | "dup" | "prefix" | "none";
 
 /** Ranked the same way as the TUI's `index_finding_rank`: lower = worse. */
 export function severity(finding: IndexFinding): Severity {
+  if (finding === "Invalid") return "invalid";
   if (finding === "Unused") return "unused";
   if (typeof finding === "object" && "DuplicateExact" in finding) return "dup";
   if (typeof finding === "object" && "DuplicatePrefix" in finding) return "prefix";
@@ -23,19 +25,23 @@ export function severity(finding: IndexFinding): Severity {
 
 export function severityRank(finding: IndexFinding): number {
   switch (severity(finding)) {
-    case "unused":
+    case "invalid":
       return 0;
-    case "dup":
+    case "unused":
       return 1;
-    case "prefix":
+    case "dup":
       return 2;
-    case "none":
+    case "prefix":
       return 3;
+    case "none":
+      return 4;
   }
 }
 
 export function marker(finding: IndexFinding): string {
   switch (severity(finding)) {
+    case "invalid":
+      return "INVALID";
     case "unused":
       return "UNUSED";
     case "dup":
@@ -173,7 +179,8 @@ export class IndexAdvisor {
     const tier = severity(idx.finding);
     const tr = document.createElement("tr");
     tr.classList.add("index-row");
-    if (tier === "unused") tr.classList.add("idx-unused");
+    if (tier === "invalid") tr.classList.add("idx-invalid");
+    else if (tier === "unused") tr.classList.add("idx-unused");
     else if (tier === "dup") tr.classList.add("idx-dup");
     else if (tier === "prefix") tr.classList.add("idx-prefix");
 
@@ -236,6 +243,8 @@ export class IndexAdvisor {
 export function findingDescription(finding: IndexFinding): string {
   const partner = partnerOf(finding);
   switch (severity(finding)) {
+    case "invalid":
+      return "INVALID — indisvalid/indisready is false: a CREATE INDEX CONCURRENTLY likely failed or was cancelled; dead weight (never served to the planner, still costs every write), can safely be dropped and rebuilt";
     case "unused":
       return "UNUSED — zero scans since the last stats reset; serves no constraint";
     case "dup":

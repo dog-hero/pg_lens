@@ -24,6 +24,7 @@
 use std::collections::HashSet;
 
 use pg_lens_core::blocking::{BlockingChain, blocking_chain};
+use pg_lens_core::idle_sessions::{Severity as IdleSeverity, oldest_idle_session, severity as idle_session_severity};
 use pg_lens_core::waits::{WaitSummary, top_waits};
 use pg_lens_core::xact_age::{OldestXact, Severity as XactSeverity, oldest_open_xact, xact_age_severity};
 use ratatui::{
@@ -34,7 +35,7 @@ use ratatui::{
     widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap},
 };
 
-use crate::app::App;
+use crate::app::{App, MicroView};
 use crate::ui::{format, sql, style};
 
 /// (width, spacing-follows) of every fixed column, in order. The last,
@@ -55,6 +56,14 @@ const WAITS_MIN_HEIGHT: u16 = 8;
 const WAITS_TOP_N: usize = 5;
 
 pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
+    // v0.11: the idle census (`I`) fully replaces the body — same shape as
+    // the Schema Lens's Vacuum sub-view — so the waits strip / oldest-xact
+    // headline (both about ACTIVE sessions) stay hidden there; the census
+    // gets its own count headline instead.
+    if app.micro_view == MicroView::Idle {
+        draw_idle_view(app, frame, area);
+        return;
+    }
     // Top-waits strip: aggregated over the FULL activity set, never the
     // filtered `row_order` — it answers "what is the *server* stuck on",
     // and a display filter must not change that answer. One line, hidden
@@ -170,6 +179,128 @@ fn oldest_xact_headline(oldest: &OldestXact<'_>) -> Line<'static> {
         Span::styled(" \u{2502} ", style::label_style()),
         Span::styled(oldest.row.state.clone(), Style::new().fg(color)),
     ])
+}
+
+/// Yellow warn / red bad, matching [`xact_severity_color`]'s convention.
+fn idle_severity_color(severity: IdleSeverity) -> Color {
+    match severity {
+        IdleSeverity::Ok => Color::Reset,
+        IdleSeverity::Warn => Color::Yellow,
+        IdleSeverity::Bad => Color::Red,
+    }
+}
+
+/// v0.11: idle connection / connection-age census — the Micro Lens's `I`
+/// body swap (see [`crate::app::MicroView`]). A count headline ("N idle
+/// connections, oldest 4h12m") above the same table component the Activity
+/// view uses, tinted by the oldest row's severity; the empty state reads
+/// calmly ("no idle connections") rather than showing an empty border.
+fn draw_idle_view(app: &mut App, frame: &mut Frame, area: Rect) {
+    let rows = app.snapshot.idle_sessions.clone().unwrap_or_default();
+    let [headline_area, table_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    frame.render_widget(Paragraph::new(idle_headline(&rows)), headline_area);
+    draw_idle_table(app, frame, table_area, &rows);
+    if rows.is_empty() {
+        draw_idle_empty(frame, table_area);
+    }
+}
+
+/// One-line count headline: `12 idle connections │ oldest 4h12m │ pid 6104`
+/// — colored by the oldest row's severity tier, calm gray when there are
+/// none (rather than hidden — unlike the waits strip, "no idle connections"
+/// is itself useful information the operator asked for by pressing `I`).
+fn idle_headline(rows: &[pg_lens_core::IdleSessionRow]) -> Line<'static> {
+    if rows.is_empty() {
+        return Line::from(Span::styled(
+            " no idle connections",
+            style::label_style(),
+        ));
+    }
+    let oldest = oldest_idle_session(rows).expect("rows is non-empty");
+    let color = idle_severity_color(oldest.severity);
+    let noun = if rows.len() == 1 {
+        "idle connection"
+    } else {
+        "idle connections"
+    };
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(rows.len().to_string(), Style::new().bold()),
+        Span::styled(format!(" {noun}"), style::label_style()),
+        Span::styled(" \u{2502} oldest ", style::label_style()),
+        Span::styled(
+            format::human_duration(oldest.row.idle_age_secs),
+            Style::new().fg(color).bold(),
+        ),
+        Span::styled(" \u{2502} pid ", style::label_style()),
+        Span::styled(oldest.row.pid.to_string(), Style::new().bold()),
+    ])
+}
+
+/// Same column widths philosophy as the Activity table, just fewer columns
+/// (no state/wait/query — a plain idle session has neither).
+const IDLE_FIXED_WIDTHS: [u16; 4] = [8, 12, 12, 22];
+
+fn draw_idle_table(
+    app: &mut App,
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[pg_lens_core::IdleSessionRow],
+) {
+    let header = Row::new(["PID", "Age", "User", "DB", "App", "Client"]).style(Style::new().bold());
+
+    let table_rows = rows.iter().map(|row| {
+        let color = idle_severity_color(idle_session_severity(row.idle_age_secs));
+        Row::new(vec![
+            Cell::from(row.pid.to_string()),
+            Cell::from(Span::styled(
+                format::human_duration(row.idle_age_secs),
+                Style::new().fg(color),
+            )),
+            Cell::from(row.username.clone()),
+            Cell::from(row.database.clone()),
+            Cell::from(row.application_name.clone()),
+            Cell::from(row.client.clone()),
+        ])
+    });
+
+    let widths = [
+        Constraint::Length(IDLE_FIXED_WIDTHS[0]),
+        Constraint::Length(IDLE_FIXED_WIDTHS[1]),
+        Constraint::Length(IDLE_FIXED_WIDTHS[2]),
+        Constraint::Length(IDLE_FIXED_WIDTHS[3]),
+        Constraint::Min(10),
+        Constraint::Min(10),
+    ];
+
+    let table = Table::new(table_rows, widths)
+        .header(header)
+        .block(Block::bordered().title(format!("Idle connections ({}) — I/Esc: back", rows.len())))
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("\u{25b6} ");
+
+    frame.render_stateful_widget(table, area, &mut app.idle_table_state);
+}
+
+/// Centered placeholder, same shape as [`draw_empty`] but for the calm
+/// "server has no idle connections right now" case.
+fn draw_idle_empty(frame: &mut Frame, area: Rect) {
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 2,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(3),
+    };
+    if inner.height == 0 {
+        return;
+    }
+    let para = Paragraph::new(Line::from(Span::styled(
+        "No idle connections",
+        Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+    )))
+    .alignment(ratatui::layout::Alignment::Center);
+    frame.render_widget(para, inner);
 }
 
 /// v0.9: wait-for chain rendered inside the detail panel — one arrow-joined
@@ -492,8 +623,8 @@ fn wait_bar(count: usize, max: usize, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        WAITS_TOP_N, blocking_chain_lines, oldest_xact_headline, query_column_width, wait_bar,
-        wait_percent, waits_strip,
+        WAITS_TOP_N, blocking_chain_lines, idle_headline, oldest_xact_headline,
+        query_column_width, wait_bar, wait_percent, waits_strip,
     };
     use pg_lens_core::waits::WaitSummary;
     use pg_lens_core::xact_age::{OldestXact, Severity as XactSeverity};
@@ -736,5 +867,108 @@ mod tests {
         );
         assert!(!app.waits_open);
         assert!(!app.should_quit);
+    }
+
+    // --- v0.11: idle connection / connection-age census (`I`) -------------
+
+    #[test]
+    fn idle_view_renders_the_census_and_headline_from_mock() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::MicroLens;
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('I'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert_eq!(app.micro_view, crate::app::MicroView::Idle);
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        // Count headline (mock carries 4 idle sessions, oldest ~4h12m).
+        assert!(screen.contains("idle connections"), "{screen}");
+        assert!(screen.contains("oldest"), "{screen}");
+        // The census table's own columns + the mock's oldest suspect pid.
+        assert!(screen.contains("Idle connections"), "{screen}");
+        assert!(screen.contains("6104"), "{screen}");
+        assert!(screen.contains("reporting-pool"), "{screen}");
+
+        // `I` again closes it WITHOUT arming the quit barrier, back to the
+        // Activity table.
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('I'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert_eq!(app.micro_view, crate::app::MicroView::Activity);
+        assert!(!app.should_quit);
+
+        // Esc also closes it, same contract.
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('I'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert_eq!(app.micro_view, crate::app::MicroView::Idle);
+        crate::app::update(&mut app, crate::app::Action::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        )));
+        assert_eq!(app.micro_view, crate::app::MicroView::Activity);
+    }
+
+    #[test]
+    fn idle_headline_reports_zero_calmly_when_empty() {
+        let line = idle_headline(&[]);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("no idle connections"), "{text}");
+    }
+
+    #[test]
+    fn idle_headline_colors_by_the_oldest_rows_severity() {
+        let rows = vec![
+            pg_lens_core::IdleSessionRow {
+                pid: 1,
+                application_name: "a".to_string(),
+                database: "d".to_string(),
+                client: "10.0.0.1".to_string(),
+                username: "u".to_string(),
+                idle_age_secs: 100.0,
+            },
+            pg_lens_core::IdleSessionRow {
+                pid: 2,
+                application_name: "a".to_string(),
+                database: "d".to_string(),
+                client: "10.0.0.1".to_string(),
+                username: "u".to_string(),
+                idle_age_secs: 20_000.0,
+            },
+        ];
+        let line = idle_headline(&rows);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("2 idle connections"), "{text}");
+        assert!(text.contains("pid 2"), "{text}: must headline the oldest, not the first");
+        // The age span is tinted red (past BAD_AGE_SECS).
+        let age_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains('h') || s.content.contains('m'))
+            .expect("age span present");
+        assert_eq!(age_span.style.fg, Some(Color::Red));
     }
 }

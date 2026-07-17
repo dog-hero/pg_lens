@@ -8,9 +8,9 @@ use tokio::task::JoinHandle;
 use tokio_postgres::{Client, Config, NoTls, Row, Transaction};
 
 use crate::models::{
-    ActivityRow, BloatRow, DatabaseRow, LockRow, PreparedXactRow, ReplicationSlotRow, StatementRow,
-    TableStatRow, VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalReceiverRow,
-    WalSenderRow,
+    ActivityRow, BloatRow, DatabaseRow, IdleSessionRow, LockRow, PreparedXactRow,
+    ReplicationSlotRow, StatementRow, TableStatRow, VacuumClusterAge, VacuumProgressRow,
+    VacuumTableRow, WalReceiverRow, WalSenderRow,
 };
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
@@ -415,6 +415,8 @@ pub fn index_catalog_from_row(
         is_unique: row.try_get("is_unique")?,
         is_primary: row.try_get("is_primary")?,
         is_exclusion: row.try_get("is_exclusion")?,
+        is_valid: row.try_get("is_valid")?,
+        is_ready: row.try_get("is_ready")?,
         is_constraint: row.try_get("is_constraint")?,
         indexdef: row.try_get("indexdef")?,
         indkey: row.try_get("indkey")?,
@@ -459,6 +461,45 @@ pub fn prepared_xact_from_row(row: &Row) -> Result<PreparedXactRow, tokio_postgr
         owner: row.try_get("owner")?,
         database: row.try_get("database")?,
         age_seconds: row.try_get("age_seconds")?,
+    })
+}
+
+/// Raw row of `queries/lock_capacity.sql` (v0.11's lock-table pressure
+/// gauge), before the poller turns it into a [`crate::models::LockCapacity`]
+/// (which also carries the derived `capacity_slots`/`used_fraction` —
+/// computed once in `poller::collect_lock_capacity` rather than duplicated
+/// per-caller).
+pub struct LockCapacityRow {
+    pub locks_held: i64,
+    pub max_locks_per_xact: i64,
+    pub max_connections: i64,
+    pub max_prepared_xacts: i64,
+}
+
+/// Maps the single row of `queries/lock_capacity.sql` onto [`LockCapacityRow`]
+/// (v0.11's lock-table pressure gauge).
+pub fn lock_capacity_from_row(row: &Row) -> Result<LockCapacityRow, tokio_postgres::Error> {
+    Ok(LockCapacityRow {
+        locks_held: row.try_get("locks_held")?,
+        max_locks_per_xact: row.try_get("max_locks_per_xact")?,
+        max_connections: row.try_get("max_connections")?,
+        max_prepared_xacts: row.try_get("max_prepared_xacts")?,
+    })
+}
+
+/// Maps one row of `queries/idle_sessions.sql` onto [`IdleSessionRow`]
+/// (v0.11's idle connection / connection-age census). `client` collapses a
+/// NULL address to `"local"`, same convention as `activity_from_row`.
+pub fn idle_session_from_row(row: &Row) -> Result<IdleSessionRow, tokio_postgres::Error> {
+    Ok(IdleSessionRow {
+        pid: row.try_get("pid")?,
+        application_name: opt_text(row, "application_name")?,
+        database: opt_text(row, "database")?,
+        client: row
+            .try_get::<_, Option<String>>("client")?
+            .unwrap_or_else(|| "local".to_string()),
+        username: opt_text(row, "usename")?,
+        idle_age_secs: row.try_get("idle_age_seconds")?,
     })
 }
 

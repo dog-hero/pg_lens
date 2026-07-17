@@ -40,6 +40,7 @@ use crate::app::{Action, App, PickerEntry, PickerState, update};
 
 mod app;
 mod event;
+mod psql;
 mod ui;
 
 /// A blazing-fast, modern TUI (and web server) for PostgreSQL observability.
@@ -570,6 +571,83 @@ fn spawn_poller(
     }
 }
 
+/// The connection `!` (v0.11) hands to `psql` — captured right before the
+/// resolved `Config`/`PasswordSource` are moved into `spawn_poller`, so a
+/// later `psql` launch dials the EXACT same target the poller connects to.
+/// `None` while no real connection exists yet (`--mock`, or still on the
+/// startup picker) — see the `!`-handling block in [`run`].
+struct PsqlTarget {
+    config: pg_lens_core::tokio_postgres::Config,
+    password_source: Option<pg_lens_core::PasswordSource>,
+}
+
+impl PsqlTarget {
+    fn from_resolved(resolved: &Resolved) -> Self {
+        Self {
+            config: resolved.config.clone(),
+            password_source: resolved.password_source.clone(),
+        }
+    }
+}
+
+/// Suspends the TUI, runs an interactive `psql` shell on `target` (the SAME
+/// connection the poller uses), and restores the TUI on every exit path —
+/// a clean `\q`, a non-zero exit, or a failed spawn (e.g. `psql` missing
+/// from `PATH`). There is no early return between the suspend and the
+/// restore below, so the restore always runs; this is the "restore
+/// terminal state even if psql crashes" guarantee the feature requires.
+///
+/// The input task is aborted for the duration and respawned afterwards:
+/// left running, crossterm's `EventStream` would keep reading raw stdin
+/// concurrently with the child psql, and the two would race for the
+/// operator's keystrokes.
+///
+/// The password (if any) is resolved here, as late as possible — right
+/// before spawn — and travels only in the child's environment
+/// (`PGPASSWORD`), never on argv, never logged. Returns statusbar feedback
+/// text; the caller reports it through `Action::PsqlResult` (`update()` is
+/// still the only place `App` itself mutates).
+async fn launch_psql(
+    terminal: &mut DefaultTerminal,
+    input_task: &mut JoinHandle<()>,
+    tx: &mpsc::Sender<Action>,
+    target: &PsqlTarget,
+    read_only: bool,
+) -> (String, bool) {
+    let password = psql::resolve_password(&target.config, target.password_source.as_ref()).await;
+    let conn_info = psql::conn_info_from_config(&target.config, password);
+    let invocation = psql::build_psql_invocation(&conn_info, read_only);
+
+    // Mirrors `run_tui`'s own init/restore teardown exactly (same two
+    // free functions), just mid-run instead of at process exit.
+    input_task.abort();
+    ratatui::restore();
+    if read_only {
+        println!(
+            "pg_lens: read-only mode \u{2014} psql opens with a read-only default transaction \
+             (PGOPTIONS=\"{}\"); this cannot stop psql itself from writing if you override it.",
+            psql::READ_ONLY_PGOPTIONS
+        );
+    }
+    let outcome = std::process::Command::new("psql")
+        .args(&invocation.args)
+        .envs(invocation.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .status();
+
+    *terminal = ratatui::init();
+    let _ = terminal.clear();
+    *input_task = event::spawn_input(tx.clone());
+
+    match outcome {
+        Ok(status) if status.success() => ("psql session ended".to_string(), false),
+        Ok(status) => (format!("psql exited with {status}"), false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            ("psql not found on PATH".to_string(), true)
+        }
+        Err(e) => (format!("failed to launch psql: {e}"), true),
+    }
+}
+
 /// Grace period for the poller to cancel its in-flight query and stop on
 /// shutdown. Cancelling opens a brief new connection to the server; if that
 /// stalls we still exit rather than hang the whole program.
@@ -804,7 +882,17 @@ async fn run(
     app.read_only = conn_args.read_only(config);
 
     let (tx, mut actions) = mpsc::channel::<Action>(64);
-    let _input_task = event::spawn_input(tx.clone());
+    // `mut`/kept (not detached like the bridge tasks below): `!` (v0.11)
+    // aborts and respawns this task around a `psql` session — see
+    // `launch_psql` — so crossterm's `EventStream` never races the child
+    // for stdin.
+    let mut input_task = event::spawn_input(tx.clone());
+    // The SAME connection target `!` hands to `psql` — populated the moment
+    // a real connection is resolved (classic startup, or the picker's lazy
+    // resolve below); stays `None` for `--mock` and while still on the
+    // startup picker, in which case `!` reports "not connected yet"
+    // (see the handling block near the end of the loop below).
+    let mut psql_target: Option<PsqlTarget> = None;
     // The poller reads its cadence live from this watch channel; the loop
     // below mirrors `app.refresh_interval` into it whenever `+`/`-` change
     // it. Message-passing only — no shared Mutex.
@@ -844,6 +932,11 @@ async fn run(
     )> = None;
     match startup {
         Startup::Connect(conn) => {
+            // Captured before `*conn` moves into `spawn_poller` below — `!`
+            // (v0.11) needs the same target the poller connects to.
+            if let Some(resolved) = conn.as_ref() {
+                psql_target = Some(PsqlTarget::from_resolved(resolved));
+            }
             let (snapshots, label, handle) = spawn_poller(
                 *conn,
                 interval_rx,
@@ -938,6 +1031,9 @@ async fn run(
             spec.dsn = None;
             spec.service = entry.service.clone();
             let resolved = settings::resolve(&spec)?;
+            // Same capture as `Startup::Connect`, just on the delayed path —
+            // computed before `resolved` moves into `spawn_poller` below.
+            psql_target = Some(PsqlTarget::from_resolved(&resolved));
             let (snapshots, label, handle) = spawn_poller(
                 Some(resolved),
                 interval_rx,
@@ -952,6 +1048,22 @@ async fn run(
             update(&mut app, Action::Snapshot(snapshots.borrow().clone()));
             // Detaches on drop; the bridge lives as long as its channels.
             let _bridge_task = event::spawn_snapshot_bridge(snapshots, tx.clone());
+        }
+
+        // `!` (v0.11): suspend the TUI, run psql, restore, report back. Mock
+        // mode is already filtered out in `handle_key` (its own toast, no
+        // flag ever set) — reaching here with no `psql_target` means a real
+        // connection has not resolved yet (still on the startup picker),
+        // which gets its own short, clear feedback instead of silently
+        // doing nothing.
+        if std::mem::take(&mut app.launch_psql_requested) {
+            let (text, error) = match psql_target.as_ref() {
+                Some(target) => {
+                    launch_psql(&mut terminal, &mut input_task, &tx, target, app.read_only).await
+                }
+                None => ("not connected yet".to_string(), true),
+            };
+            update(&mut app, Action::PsqlResult { text, error });
         }
     }
 

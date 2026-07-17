@@ -1,9 +1,10 @@
 // Macro Lens: vitals cards rendered from ServerVitals.
 
-import type { CheckpointerStats, ServerVitals, VacuumClusterAge } from "./types";
+import type { CheckpointerStats, LockCapacity, ServerVitals, VacuumClusterAge } from "./types";
 import { humanBytes, humanCount, humanDuration, humanPercent } from "./format";
 import { ageSeverity } from "./vacuum";
 import { checkpointerCard } from "./checkpointer";
+import { lockCapacitySeverity } from "./lock_capacity";
 
 interface Card {
   label: string;
@@ -58,10 +59,36 @@ function checkpointCard(cp: CheckpointerStats | null): Card {
   };
 }
 
+/**
+ * v0.11's lock-table pressure card. `null` (collection failed this tick, or
+ * no poll yet) renders a calm collecting-state card instead of being
+ * omitted — same "always present" rule as `checkpointCard`.
+ */
+function lockCapacityCard(lc: LockCapacity | null): Card {
+  if (lc === null) {
+    return {
+      label: "Lock table",
+      value: "…",
+      detail: "collecting lock-table stats…",
+      meter: null,
+      tone: "",
+    };
+  }
+  const sev = lockCapacitySeverity(lc.used_fraction);
+  return {
+    label: "Lock table",
+    value: `${lc.locks_held} / ${lc.capacity_slots} (${humanPercent(lc.used_fraction)})`,
+    detail: `max_locks_per_transaction=${lc.max_locks_per_xact} · max_connections=${lc.max_connections} · max_prepared_transactions=${lc.max_prepared_xacts}`,
+    meter: lc.used_fraction,
+    tone: sev,
+  };
+}
+
 function cards(
   v: ServerVitals,
   vacuumAge: VacuumClusterAge | null,
   checkpointer: CheckpointerStats | null,
+  lockCapacity: LockCapacity | null,
 ): Card[] {
   const saturation =
     v.max_connections > 0 ? v.connections_total / v.max_connections : 0;
@@ -75,6 +102,7 @@ function cards(
       meter: saturation,
       tone: saturation >= 0.9 ? "bad" : saturation >= 0.7 ? "warn" : "",
     },
+    lockCapacityCard(lockCapacity),
     {
       label: "TPS",
       value: humanCount(v.tps),
@@ -112,9 +140,10 @@ export function renderVitals(
   v: ServerVitals,
   vacuumAge: VacuumClusterAge | null = null,
   checkpointer: CheckpointerStats | null = null,
+  lockCapacity: LockCapacity | null = null,
 ): void {
   container.replaceChildren(
-    ...cards(v, vacuumAge, checkpointer).map((card) => {
+    ...cards(v, vacuumAge, checkpointer, lockCapacity).map((card) => {
       const el = document.createElement("div");
       el.className = card.tone === "" ? "card" : `card ${card.tone}`;
       const meter =

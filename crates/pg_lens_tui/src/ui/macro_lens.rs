@@ -6,7 +6,10 @@
 //!
 //! [`DbSnapshot::history`]: pg_lens_core::DbSnapshot
 
-use pg_lens_core::{CheckpointerStats, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot};
+use pg_lens_core::{
+    CheckpointerStats, LockCapacity, LockCapacitySeverity, ReplicationInfo, ReplicationSlotRow,
+    SchemaSnapshot,
+};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -126,6 +129,29 @@ fn checkpoint_pressure_severity(ratio: Option<f64>) -> Lag {
     }
 }
 
+/// v0.11's lock-table pressure severity color — mirrors
+/// `ui::replication::Severity::color` (green/yellow/red) so the gauge reads
+/// consistently with every other severity marker in the TUI.
+fn lock_capacity_color(sev: LockCapacitySeverity) -> Color {
+    match sev {
+        LockCapacitySeverity::Ok => Color::Green,
+        LockCapacitySeverity::Warn => Color::Yellow,
+        LockCapacitySeverity::Bad => Color::Red,
+    }
+}
+
+/// The lock-capacity gauge's label: held/capacity plus the percentage, e.g.
+/// `5850/6400 (91%)` — both the raw counts and the fraction, so the operator
+/// never has to do the division in their head at 2 a.m.
+fn lock_capacity_label(lc: &LockCapacity) -> String {
+    format!(
+        "{}/{} ({:.0}%)",
+        lc.locks_held,
+        lc.capacity_slots,
+        lc.used_fraction * 100.0
+    )
+}
+
 /// `12.3/s`, or `--` while no delta window exists yet (first poll of a
 /// session — same rule as TPS).
 fn rate_per_sec(v: Option<f64>) -> String {
@@ -240,9 +266,14 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     let [vitals_area, checkpoint_area] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
             .areas(vitals_area);
-    let [conn_gauge_area, cache_gauge_area] =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .areas(gauge_area);
+    // v0.11: the lock-table pressure gauge joins connections/cache-hit in
+    // the vitals strip's top row — three equal columns instead of two.
+    let [conn_gauge_area, cache_gauge_area, lock_gauge_area] = Layout::horizontal([
+        Constraint::Percentage(34),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+    ])
+    .areas(gauge_area);
 
     let ratio = if vitals.max_connections > 0 {
         f64::from(vitals.connections_total) / f64::from(vitals.max_connections)
@@ -265,6 +296,30 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
         .ratio(vitals.cache_hit_ratio.clamp(0.0, 1.0))
         .label(format!("{:.1}%", vitals.cache_hit_ratio * 100.0));
     frame.render_widget(cache_gauge, cache_gauge_area);
+
+    // v0.11: lock-table pressure gauge — absent (collecting… state) until
+    // the first successful collection, calm empty state rather than a
+    // dead/zeroed gauge.
+    match app.snapshot.lock_capacity.as_ref() {
+        Some(lc) => {
+            let sev = pg_lens_core::lock_capacity_severity(lc.used_fraction);
+            let color = lock_capacity_color(sev);
+            let lock_gauge = Gauge::default()
+                .block(titled_block("Lock table"))
+                .gauge_style(Style::new().fg(color))
+                .ratio(lc.used_fraction.clamp(0.0, 1.0))
+                .label(lock_capacity_label(lc));
+            frame.render_widget(lock_gauge, lock_gauge_area);
+        }
+        None => {
+            let placeholder = Paragraph::new(Line::from(Span::styled(
+                "collecting…",
+                style::label_style(),
+            )))
+            .block(titled_block("Lock table"));
+            frame.render_widget(placeholder, lock_gauge_area);
+        }
+    }
 
     // Display buffers copied from the poller-owned ring (oldest → newest).
     let tps_series: Vec<u64> = history.iter().map(|p| p.tps.round() as u64).collect();
@@ -332,6 +387,52 @@ mod tests {
     // Lag/slot severity math itself is tested in `ui/replication.rs`, the
     // module that now owns it — these tests cover the compact panel's own
     // behavior (caps, ranking, the "+N more" / "Tab → Replication" hints).
+
+    // --- v0.11: lock-table pressure gauge --------------------------------
+
+    #[test]
+    fn lock_capacity_label_shows_held_capacity_and_percentage() {
+        let lc = pg_lens_core::lock_capacity::compute(pg_lens_core::db::LockCapacityRow {
+            locks_held: 5_850,
+            max_locks_per_xact: 64,
+            max_connections: 100,
+            max_prepared_xacts: 0,
+        });
+        assert_eq!(lock_capacity_label(&lc), "5850/6400 (91%)");
+    }
+
+    #[test]
+    fn lock_capacity_color_matches_the_severity_tiers() {
+        assert_eq!(lock_capacity_color(LockCapacitySeverity::Ok), Color::Green);
+        assert_eq!(lock_capacity_color(LockCapacitySeverity::Warn), Color::Yellow);
+        assert_eq!(lock_capacity_color(LockCapacitySeverity::Bad), Color::Red);
+    }
+
+    /// The Macro Lens renders the mock's lock-table gauge — the mock is
+    /// alarming by design (past `lock_capacity::BAD_FRACTION`) so `--mock`
+    /// always opens on a visible red gauge (see `DbSnapshot::mock`).
+    #[test]
+    fn macro_lens_renders_the_lock_capacity_gauge_from_mock() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::MacroLens;
+        let snapshot = app.snapshot.clone();
+        crate::app::update(&mut app, crate::app::Action::Snapshot(snapshot));
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Lock table"), "{screen}");
+        assert!(screen.contains('%'), "{screen}");
+    }
 
     #[test]
     fn primary_without_replicas_hides_the_panel() {

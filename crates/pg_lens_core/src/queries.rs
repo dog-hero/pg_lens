@@ -63,6 +63,19 @@ pub struct QuerySet {
     /// the fast tick, best-effort like `databases` — a tiny system-view
     /// read, but never allowed to fail the poll.
     pub prepared_xacts: &'static str,
+    /// Lock-table pressure gauge (v0.11): `pg_locks` count vs. the
+    /// `max_locks_per_transaction * (max_connections +
+    /// max_prepared_transactions)` capacity formula. Runs on the fast tick,
+    /// best-effort like `databases`/`prepared_xacts` — a cheap single-row
+    /// aggregate + scalar settings read, never allowed to fail the poll.
+    pub lock_capacity: &'static str,
+    /// Idle connection / connection-age census (v0.11): `pg_stat_activity`
+    /// rows with `state = 'idle'`, oldest `state_change` first, capped at
+    /// `IDLE_SESSIONS_LIMIT` rows — a separate query from `activity` (Option
+    /// B, see `queries/idle_sessions.sql`'s header) so the hot activity
+    /// payload/consumers stay untouched. Runs on the fast tick, best-effort
+    /// like `databases`/`prepared_xacts`.
+    pub idle_sessions: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -77,6 +90,9 @@ pub const VACUUM_TABLES_LIMIT: usize = 20;
 
 /// Row cap of the index-advisor query (worst N indexes by size).
 pub const INDEXES_LIMIT: usize = 50;
+
+/// Row cap of the idle-sessions census query (oldest N idle connections).
+pub const IDLE_SESSIONS_LIMIT: usize = 100;
 
 const ACTIVITY_POST_140000: &str = include_str!("../queries/activity_post_140000.sql");
 const ACTIVITY_POST_130000: &str = include_str!("../queries/activity_post_130000.sql");
@@ -131,6 +147,12 @@ const DATABASES: &str = include_str!("../queries/databases.sql");
 // Orphaned 2PC watch (v0.9). pg_prepared_xacts is stable across the whole
 // supported range — no post_NNNNNN variant needed.
 const PREPARED_XACTS: &str = include_str!("../queries/prepared_xacts.sql");
+// Lock-table pressure gauge (v0.11). pg_locks + current_setting() are
+// stable across the whole supported range — no post_NNNNNN variant needed.
+const LOCK_CAPACITY: &str = include_str!("../queries/lock_capacity.sql");
+// Idle connection / connection-age census (v0.11). state_change is stable
+// across the whole supported range — no post_NNNNNN variant needed.
+const IDLE_SESSIONS: &str = include_str!("../queries/idle_sessions.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -162,6 +184,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             bgwriter,
             databases: DATABASES,
             prepared_xacts: PREPARED_XACTS,
+            lock_capacity: LOCK_CAPACITY,
+            idle_sessions: IDLE_SESSIONS,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -185,6 +209,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             bgwriter,
             databases: DATABASES,
             prepared_xacts: PREPARED_XACTS,
+            lock_capacity: LOCK_CAPACITY,
+            idle_sessions: IDLE_SESSIONS,
         })
     } else {
         Err(format!(
@@ -364,6 +390,36 @@ mod tests {
             assert!(q.databases.contains("pg_database"));
             assert!(q.databases.contains("datallowconn"));
             assert!(q.databases.contains("has_database_privilege"));
+        }
+    }
+
+    #[test]
+    fn lock_capacity_query_serves_pg13_and_up_with_conventions() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.lock_capacity.contains("pg_catalog.pg_locks"));
+            assert!(q.lock_capacity.contains("max_locks_per_transaction"));
+            assert!(q.lock_capacity.contains("max_connections"));
+            assert!(q.lock_capacity.contains("max_prepared_transactions"));
+        }
+    }
+
+    #[test]
+    fn idle_sessions_query_serves_pg13_and_up_with_conventions() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.idle_sessions.contains("pg_stat_activity"));
+            assert!(q.idle_sessions.contains("state = 'idle'"));
+            assert!(q.idle_sessions.contains("state_change"));
+            assert!(q.idle_sessions.contains("client_addr::text"));
+            assert!(
+                q.idle_sessions
+                    .contains(&format!("LIMIT {IDLE_SESSIONS_LIMIT}")),
+                "SQL row cap must match IDLE_SESSIONS_LIMIT"
+            );
+            // Never crosses idle-in-transaction sessions — those are the
+            // v0.9 xact-age hunter's territory, not this census's.
+            assert!(!q.idle_sessions.to_lowercase().contains("idle in transaction"));
         }
     }
 

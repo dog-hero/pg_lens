@@ -149,12 +149,47 @@ export interface PreparedXactRow {
 }
 
 /**
+ * Lock-table pressure gauge (v0.11): `pg_locks` count vs. the documented
+ * shared-memory capacity formula (`max_locks_per_transaction * (max_connections
+ * + max_prepared_transactions)`) — headroom before "out of shared memory,
+ * you might need to increase max_locks_per_transaction". `capacity_slots` /
+ * `used_fraction` are derived in Rust core (`lock_capacity::compute`), never
+ * re-derived here.
+ */
+export interface LockCapacity {
+  locks_held: number;
+  max_locks_per_xact: number;
+  max_connections: number;
+  max_prepared_xacts: number;
+  capacity_slots: number;
+  /** 0.0..=1.0 */
+  used_fraction: number;
+}
+
+/**
+ * One idle connection (v0.11, `pg_stat_activity` `state = 'idle'`): a
+ * backend holding a slot in the connection budget without doing anything —
+ * the classic pool-exhaustion suspect (`connections_total` near
+ * `max_connections` but few active). Ranked oldest-first by `idle_age_secs`.
+ */
+export interface IdleSessionRow {
+  pid: number;
+  application_name: string;
+  database: string;
+  client: string;
+  username: string;
+  /** `EXTRACT(epoch FROM (now() - state_change))`. */
+  idle_age_secs: number;
+}
+
+/**
  * The Index Advisor's (F3) verdict for one index — serde external tagging:
  * unit variant `"Unused"`/`"None"`, struct variants `{ DuplicateExact: {
  * partner } }` / `{ DuplicatePrefix: { partner } }`. Computed in Rust core
  * (`index_advisor::classify`), never re-derived in the web frontend.
  */
 export type IndexFinding =
+  | "Invalid"
   | "Unused"
   | { DuplicateExact: { partner: string } }
   | { DuplicatePrefix: { partner: string } }
@@ -172,6 +207,12 @@ export interface IndexRow {
   is_unique: boolean;
   is_primary: boolean;
   is_exclusion: boolean;
+  /** `pg_index.indisvalid` — false means a `CREATE INDEX CONCURRENTLY`
+   * never finished building this index. */
+  is_valid: boolean;
+  /** `pg_index.indisready` — false means the index is not even being
+   * maintained on writes yet. */
+  is_ready: boolean;
   is_constraint: boolean;
   /** `pg_get_indexdef()` — the full `CREATE INDEX` statement, verbatim. */
   indexdef: string;
@@ -358,6 +399,21 @@ export interface DbSnapshot {
    * dangling prepared transaction (the overwhelmingly common, calm case).
    */
   prepared_xacts: PreparedXactRow[] | null;
+  /**
+   * Lock-table pressure gauge (v0.11), refreshed every fast tick,
+   * best-effort like `prepared_xacts`: null when the collection failed this
+   * tick (restricted role, a renamed GUC, ...) — otherwise always present,
+   * since every cluster has a lock table (no "found nothing" empty case).
+   */
+  lock_capacity: LockCapacity | null;
+  /**
+   * Idle connection / connection-age census (v0.11), refreshed every fast
+   * tick, best-effort like `prepared_xacts`: null when the collection failed
+   * this tick, an empty array when it succeeded and simply found no idle
+   * sessions (a fully busy or freshly-started server — calm, never an
+   * error). Oldest (most suspect) first, capped at 100 rows.
+   */
+  idle_sessions: IdleSessionRow[] | null;
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
 }

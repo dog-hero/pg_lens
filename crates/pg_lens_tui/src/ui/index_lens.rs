@@ -1,12 +1,14 @@
-//! Index Lens (U1): the index advisor (unused / duplicate / prefix-redundant
-//! indexes), promoted out of the Schema Lens's old `i` toggle into its own
-//! full-height tab — same table, same fixed severity-then-size order, same
-//! detail panel, just with the room the owner asked for.
+//! Index Lens (U1): the index advisor (invalid / unused / duplicate /
+//! prefix-redundant indexes), promoted out of the Schema Lens's old `i`
+//! toggle into its own full-height tab — same table, same fixed
+//! severity-then-size order, same detail panel, just with the room the
+//! owner asked for.
 //!
 //! Row semantics (unchanged from the Schema Lens precedent):
-//! - `!!` red (Unused), `DUP` yellow (exact duplicate), `pre` dim-yellow
-//!   (prefix-redundant), or blank — the Flag column's textual marker,
-//!   provable in VT captures without color;
+//! - `INVALID` red (failed `CREATE INDEX CONCURRENTLY`), `!!` red (Unused),
+//!   `DUP` yellow (exact duplicate), `pre` dim-yellow (prefix-redundant), or
+//!   blank — the Flag column's textual marker, provable in VT captures
+//!   without color;
 //! - `Enter` opens a detail panel: the full `CREATE INDEX` statement, usage
 //!   counters, constraint flags, and the finding spelled out with its
 //!   duplicate partner (if any) — evidence, not a bare label;
@@ -77,12 +79,13 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// `!!` red (Unused), `DUP` yellow (exact duplicate), `pre` dim-yellow
-/// (prefix-redundant), or blank — mirrors the Schema Lens's bloat-severity
-/// convention (provable in VT captures without color). Ranked by
-/// [`crate::app::index_finding_rank`].
+/// `INVALID` red (failed concurrent build), `!!` red (Unused), `DUP` yellow
+/// (exact duplicate), `pre` dim-yellow (prefix-redundant), or blank —
+/// mirrors the Schema Lens's bloat-severity convention (provable in VT
+/// captures without color). Ranked by [`crate::app::index_finding_rank`].
 fn index_marker_and_style(finding: &IndexFinding) -> (&'static str, Style) {
     match finding {
+        IndexFinding::Invalid => ("INVALID", Style::new().fg(Color::Red).bold()),
         IndexFinding::Unused => ("UNUSED", Style::new().fg(Color::Red).bold()),
         IndexFinding::DuplicateExact { .. } => ("DUP", Style::new().fg(Color::Yellow)),
         IndexFinding::DuplicatePrefix { .. } => ("prefix", Style::new().fg(Color::Yellow).dim()),
@@ -250,6 +253,16 @@ fn index_flags_summary(idx: &IndexRow) -> String {
 /// bare label.
 fn index_finding_line(finding: &IndexFinding) -> Line<'static> {
     match finding {
+        IndexFinding::Invalid => Line::from(vec![
+            Span::styled("  INVALID", Style::new().fg(Color::Red).bold()),
+            Span::styled(
+                " \u{2014} indisvalid/indisready is false: a CREATE INDEX CONCURRENTLY \
+                 likely failed or was cancelled; this index is dead weight (never served \
+                 to the planner, still costs every write) and can safely be dropped and \
+                 rebuilt",
+                style::label_style(),
+            ),
+        ]),
         IndexFinding::Unused => Line::from(vec![
             Span::styled("  UNUSED", Style::new().fg(Color::Red).bold()),
             Span::styled(
@@ -278,5 +291,67 @@ fn index_finding_line(finding: &IndexFinding) -> Line<'static> {
             ),
         ]),
         IndexFinding::None => Line::from("  no finding \u{2014} in use, or uniquely useful").dim(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn index_lens_renders_the_invalid_marker_from_mock() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::IndexLens;
+        let snapshot = app.snapshot.clone();
+        crate::app::update(&mut app, crate::app::Action::Snapshot(snapshot));
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        // The mock's order_items_shipped_at_idx is indisvalid = false.
+        assert!(screen.contains("INVALID"), "{screen}");
+        assert!(screen.contains("order_items_shipped_at_idx"), "{screen}");
+    }
+
+    #[test]
+    fn index_lens_detail_panel_explains_the_invalid_finding() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::IndexLens;
+        let snapshot = app.snapshot.clone();
+        crate::app::update(&mut app, crate::app::Action::Snapshot(snapshot));
+
+        let pos = app
+            .index_row_order
+            .iter()
+            .filter_map(|&i| app.snapshot.schema.as_ref().map(|s| &s.indexes[i]))
+            .position(|idx| idx.name == "order_items_shipped_at_idx")
+            .expect("mock's invalid index is present");
+        app.index_table_state.select(Some(pos));
+        app.detail_open = true;
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("INVALID"), "{screen}");
+        assert!(
+            screen.contains("CREATE INDEX CONCURRENTLY"),
+            "detail panel names the likely cause: {screen}"
+        );
     }
 }

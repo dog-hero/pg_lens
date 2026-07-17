@@ -591,7 +591,17 @@ table#schema {
 }
 
 /* Finding severity tiers: same ranking as the TUI's `index_finding_rank`
-   (Unused red > DuplicateExact yellow > DuplicatePrefix dim-yellow). */
+   (Invalid red > Unused red > DuplicateExact yellow > DuplicatePrefix
+   dim-yellow). */
+#indexes tr.idx-invalid {
+  background: rgba(244, 112, 103, 0.16);
+}
+
+#indexes tr.idx-invalid td:last-child {
+  color: var(--bad);
+  font-weight: 700;
+}
+
 #indexes tr.idx-unused {
   background: rgba(244, 112, 103, 0.1);
 }

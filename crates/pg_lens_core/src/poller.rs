@@ -32,9 +32,9 @@ use crate::history_store::HistoryStore;
 use crate::index_advisor::{self, IndexCatalogRow};
 use crate::models::{
     AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats, DatabaseRow,
-    DbSnapshot, IndexRow, PollerStatus, PreparedXactRow, ReplicationInfo, ReplicationSlotRow,
-    SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
-    StatementsStatus, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
+    DbSnapshot, IdleSessionRow, IndexRow, LockCapacity, PollerStatus, PreparedXactRow,
+    ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow,
+    StatementsSnapshot, StatementsStatus, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
 };
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
@@ -983,6 +983,16 @@ async fn poll_once(
     // never a poll fault, even though pg_prepared_xacts is world-readable.
     let prepared_xacts = collect_prepared_xacts(client, q).await;
 
+    // Lock-table pressure gauge (v0.11) is likewise best-effort — cheap
+    // (a count + three scalar settings), but a restricted role or a future
+    // GUC rename must degrade to "no gauge this tick", never a poll fault.
+    let lock_capacity = collect_lock_capacity(client, q).await;
+
+    // Idle connection / connection-age census (v0.11) is likewise
+    // best-effort — a separate, capped query from `activity`, so it must
+    // never fail the poll even on a restricted role.
+    let idle_sessions = collect_idle_sessions(client, q).await;
+
     let now = Instant::now();
     let xact_total = info.xact_commit + info.xact_rollback;
     let cumulative_ratio = hit_ratio(info.blks_hit, info.blks_read);
@@ -1070,6 +1080,8 @@ async fn poll_once(
         checkpointer: Some(checkpointer_stats),
         databases,
         prepared_xacts,
+        lock_capacity,
+        idle_sessions,
         status: PollerStatus::Ok,
     })
 }
@@ -1342,6 +1354,43 @@ async fn collect_prepared_xacts(
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(db::prepared_xact_from_row(row).ok()?);
+    }
+    tx.commit().await.ok()?;
+    Some(out)
+}
+
+/// Best-effort lock-table pressure gauge (v0.11, `queries/lock_capacity.sql`),
+/// refreshed every fast tick. It is a cheap single-row aggregate + scalar
+/// settings read (same class as `databases`/`prepared_xacts`), so the fast
+/// tick is the right cadence — a slow-cadence gauge would leave the operator
+/// staring at a stale reading for up to 60s during exactly the burst this
+/// gauge exists to catch early. Returns `None` on ANY query or parse
+/// failure — same contract as [`collect_prepared_xacts`]; it must never fail
+/// the poll.
+async fn collect_lock_capacity(client: &mut Client, q: &queries::QuerySet) -> Option<LockCapacity> {
+    let tx = begin_read(client).await.ok()?;
+    let row = tx.query_one(q.lock_capacity, &[]).await.ok()?;
+    let raw = db::lock_capacity_from_row(&row).ok()?;
+    tx.commit().await.ok()?;
+    Some(crate::lock_capacity::compute(raw))
+}
+
+/// Best-effort idle connection / connection-age census (v0.11,
+/// `queries/idle_sessions.sql`), refreshed every fast tick. Returns `None`
+/// on ANY query or parse failure — same contract as
+/// [`collect_prepared_xacts`]/[`collect_lock_capacity`]; it must never fail
+/// the poll. `Some(vec![])` (a fully busy or freshly-started server) means
+/// the collection succeeded and simply found no idle sessions, never an
+/// error.
+async fn collect_idle_sessions(
+    client: &mut Client,
+    q: &queries::QuerySet,
+) -> Option<Vec<IdleSessionRow>> {
+    let tx = begin_read(client).await.ok()?;
+    let rows = tx.query(q.idle_sessions, &[]).await.ok()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        out.push(db::idle_session_from_row(row).ok()?);
     }
     tx.commit().await.ok()?;
     Some(out)

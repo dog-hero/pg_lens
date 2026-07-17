@@ -14,6 +14,7 @@ import { StatementsLens } from "./statements";
 import { renderReplication } from "./replication";
 import { renderWaits, renderWaitsList } from "./waits";
 import { renderOldestXact } from "./xact_age";
+import { renderIdleSessions } from "./idle_sessions";
 import {
   clearToken,
   openStream,
@@ -65,6 +66,9 @@ const waitsStrip = el<HTMLDivElement>("waits-strip");
 const waitsDetail = el<HTMLDetailsElement>("waits-detail");
 const waitsDetailSummary = el<HTMLElement>("waits-detail-summary");
 const waitsList = el<HTMLUListElement>("waits-list");
+const idleDetail = el<HTMLDetailsElement>("idle-detail");
+const idleDetailSummary = el<HTMLElement>("idle-detail-summary");
+const idleList = el<HTMLUListElement>("idle-list");
 const xactHeadline = el<HTMLDivElement>("xact-headline");
 const xactHeadlineAge = el<HTMLSpanElement>("xact-headline-age");
 const xactHeadlineMeta = el<HTMLSpanElement>("xact-headline-meta");
@@ -171,6 +175,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.vitals,
     snapshot.schema?.vacuum_cluster_age ?? null,
     snapshot.checkpointer,
+    snapshot.lock_capacity,
   );
   renderReplication(
     replicationBody,
@@ -186,6 +191,9 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   // U3: the complete ranked list, collapsed under the activity table (the
   // strip above only ever shows the top few).
   renderWaitsList(waitsDetail, waitsDetailSummary, waitsList, snapshot.activity);
+  // v0.11: idle connection / connection-age census, collapsed under the
+  // activity table like the waits list — the pool-exhaustion suspects.
+  renderIdleSessions(idleDetail, idleDetailSummary, idleList, snapshot.idle_sessions);
   // v0.9: oldest open transaction, hidden on calm snapshots — the same
   // "quiet unless something's wrong" contract as the waits strip.
   renderOldestXact(xactHeadline, xactHeadlineAge, xactHeadlineMeta, xactHeadlineState, snapshot.activity);

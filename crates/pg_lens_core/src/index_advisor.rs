@@ -26,6 +26,12 @@ pub struct IndexCatalogRow {
     pub is_unique: bool,
     pub is_primary: bool,
     pub is_exclusion: bool,
+    /// `pg_index.indisvalid` — false means a `CREATE INDEX CONCURRENTLY`
+    /// never finished; the index is invisible to the planner.
+    pub is_valid: bool,
+    /// `pg_index.indisready` — false means the index is not even being
+    /// maintained on writes yet.
+    pub is_ready: bool,
     pub is_constraint: bool,
     pub indexdef: String,
     /// `pg_index.indkey::text` — space-separated attribute numbers, in
@@ -82,10 +88,12 @@ fn is_strict_prefix<'a>(a: &[&'a str], b: &[&'a str]) -> bool {
 /// Classifies every row of one collection, positionally aligned with the
 /// input slice (`classify(rows)[i]` describes `rows[i]`).
 ///
-/// Priority when more than one signal applies to the same index: `Unused`
-/// (red, the strongest and cheapest-to-verify claim) wins over `Duplicate*`
-/// (yellow/dim-yellow) — a single flag per row keeps the severity-then-size
-/// sort in the UI unambiguous.
+/// Priority when more than one signal applies to the same index: `Invalid`
+/// (a `CREATE INDEX CONCURRENTLY` that never finished — dead weight AND a
+/// sign a build needs cleanup/retry) is the strongest claim and overrides
+/// everything else, then `Unused` (red, the strongest read-based claim)
+/// wins over `Duplicate*` (yellow/dim-yellow) — a single flag per row keeps
+/// the severity-then-size sort in the UI unambiguous.
 pub fn classify(rows: &[IndexCatalogRow]) -> Vec<IndexFinding> {
     let mut findings = vec![IndexFinding::None; rows.len()];
 
@@ -145,6 +153,16 @@ pub fn classify(rows: &[IndexCatalogRow]) -> Vec<IndexFinding> {
         }
     }
 
+    // Invalid overrides every other finding, including Unused — a failed
+    // `CREATE INDEX CONCURRENTLY` is both dead weight and a distinct signal
+    // (a build needs cleanup/retry) that would otherwise get lost under a
+    // generic "unused" label.
+    for (i, row) in rows.iter().enumerate() {
+        if !row.is_valid || !row.is_ready {
+            findings[i] = IndexFinding::Invalid;
+        }
+    }
+
     findings
 }
 
@@ -173,6 +191,8 @@ pub fn build_index_rows(rows: Vec<IndexCatalogRow>) -> Vec<IndexRow> {
             is_unique: row.is_unique,
             is_primary: row.is_primary,
             is_exclusion: row.is_exclusion,
+            is_valid: row.is_valid,
+            is_ready: row.is_ready,
             is_constraint: row.is_constraint,
             indexdef: row.indexdef,
             finding,
@@ -203,6 +223,8 @@ mod tests {
             is_unique,
             is_primary,
             is_exclusion: false,
+            is_valid: true,
+            is_ready: true,
             is_constraint: is_unique || is_primary,
             indexdef: format!("CREATE INDEX {name} ON {table} USING btree (...)"),
             indkey: indkey.to_string(),
@@ -329,6 +351,35 @@ mod tests {
                 partner: "orders_dup_a".to_string()
             }
         );
+    }
+
+    #[test]
+    fn invalid_index_classifies_as_invalid() {
+        let mut r = row("orders", "orders_pending_idx", 0, false, false, "4");
+        r.is_valid = false;
+        let rows = vec![r];
+        assert_eq!(classify(&rows), vec![IndexFinding::Invalid]);
+    }
+
+    #[test]
+    fn not_ready_index_also_classifies_as_invalid() {
+        let mut r = row("orders", "orders_pending_idx", 0, false, false, "4");
+        r.is_ready = false;
+        let rows = vec![r];
+        assert_eq!(classify(&rows), vec![IndexFinding::Invalid]);
+    }
+
+    #[test]
+    fn invalid_overrides_unused_and_duplicate_findings() {
+        // Same table, same columns as a scanned partner (would otherwise be
+        // an exact duplicate) AND zero scans (would otherwise be Unused) —
+        // Invalid must win over both.
+        let mut a = row("orders", "orders_customer_idx", 0, false, false, "2");
+        a.is_valid = false;
+        let b = row("orders", "orders_customer_idx2", 10, false, false, "2");
+        let rows = vec![a, b];
+        let findings = classify(&rows);
+        assert_eq!(findings[0], IndexFinding::Invalid);
     }
 
     #[test]

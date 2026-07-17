@@ -16,28 +16,31 @@ import {
 import type { IndexFinding } from "./types.ts";
 
 test("severity maps every finding variant to its tier", () => {
+  assert.equal(severity("Invalid"), "invalid");
   assert.equal(severity("Unused"), "unused");
   assert.equal(severity({ DuplicateExact: { partner: "p" } }), "dup");
   assert.equal(severity({ DuplicatePrefix: { partner: "p" } }), "prefix");
   assert.equal(severity("None"), "none");
 });
 
-test("severityRank orders Unused > DuplicateExact > DuplicatePrefix > None", () => {
+test("severityRank orders Invalid > Unused > DuplicateExact > DuplicatePrefix > None", () => {
   const findings: IndexFinding[] = [
+    "Invalid",
     "Unused",
     { DuplicateExact: { partner: "p" } },
     { DuplicatePrefix: { partner: "p" } },
     "None",
   ];
   const ranks = findings.map(severityRank);
-  assert.deepEqual(ranks, [0, 1, 2, 3]);
+  assert.deepEqual(ranks, [0, 1, 2, 3, 4]);
   // Strictly increasing — the sort in `IndexAdvisor.sorted` relies on this.
   for (let i = 1; i < ranks.length; i++) {
     assert.ok(ranks[i]! > ranks[i - 1]!);
   }
 });
 
-test("marker renders the plan's exact text: UNUSED / DUP / prefix / empty", () => {
+test("marker renders the plan's exact text: INVALID / UNUSED / DUP / prefix / empty", () => {
+  assert.equal(marker("Invalid"), "INVALID");
   assert.equal(marker("Unused"), "UNUSED");
   assert.equal(marker({ DuplicateExact: { partner: "p" } }), "DUP");
   assert.equal(marker({ DuplicatePrefix: { partner: "p" } }), "prefix");
@@ -47,11 +50,14 @@ test("marker renders the plan's exact text: UNUSED / DUP / prefix / empty", () =
 test("partnerOf extracts the duplicate's other index, null otherwise", () => {
   assert.equal(partnerOf({ DuplicateExact: { partner: "orders_pkey" } }), "orders_pkey");
   assert.equal(partnerOf({ DuplicatePrefix: { partner: "orders_wide_idx" } }), "orders_wide_idx");
+  assert.equal(partnerOf("Invalid"), null);
   assert.equal(partnerOf("Unused"), null);
   assert.equal(partnerOf("None"), null);
 });
 
 test("findingDescription names the partner as evidence, not a bare label", () => {
+  assert.match(findingDescription("Invalid"), /INVALID/);
+  assert.match(findingDescription("Invalid"), /CREATE INDEX CONCURRENTLY/);
   assert.match(findingDescription("Unused"), /UNUSED/);
   assert.match(findingDescription("Unused"), /zero scans/);
   const dup = findingDescription({ DuplicateExact: { partner: "orders_pkey" } });

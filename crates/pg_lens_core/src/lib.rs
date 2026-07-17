@@ -8,7 +8,9 @@ pub mod blocking;
 pub mod db;
 pub mod history;
 pub mod history_store;
+pub mod idle_sessions;
 pub mod index_advisor;
+pub mod lock_capacity;
 pub mod models;
 pub mod poller;
 pub mod prepared_xacts;
@@ -28,11 +30,17 @@ pub use history::{HistoryPoint, SnapshotHistory};
 pub use index_advisor::{IndexCatalogRow, classify as classify_indexes};
 pub use models::{
     ActivityRow, AdminActionResult, AdminCommand, AdminKind, AdminOutcome, BloatRow,
-    CheckpointerStats, DatabaseRow, DbSnapshot, IndexFinding, IndexRow, LockRow, PollerStatus,
-    PreparedXactRow, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus,
-    ServerVitals, StatementRow, StatementsSnapshot, StatementsStatus, TableStatRow,
-    VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow,
+    CheckpointerStats, DatabaseRow, DbSnapshot, IdleSessionRow, IndexFinding, IndexRow,
+    LockCapacity, LockRow, PollerStatus, PreparedXactRow, ReplicationInfo, ReplicationSlotRow,
+    SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
+    StatementsStatus, TableStatRow, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
+    WalReceiverRow, WalSenderRow,
 };
+pub use idle_sessions::{
+    OldestIdleSession, Severity as IdleSessionSeverity, oldest_idle_session,
+    severity as idle_session_severity,
+};
+pub use lock_capacity::{Severity as LockCapacitySeverity, severity as lock_capacity_severity};
 pub use prepared_xacts::{
     OldestPreparedXact, Severity as PreparedXactSeverity, oldest_prepared_xact,
     severity as prepared_xact_severity,

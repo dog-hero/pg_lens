@@ -4,6 +4,38 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.11.0] — 2026-07-17 — "Incident precursors & connection visibility"
+
+### Added
+- **Idle connection / connection-age census** — the Micro Lens `I` key toggles
+  the activity table to a dedicated idle-session view (`state = 'idle'`,
+  oldest-first, capped at 100): PID, age, user, database, application, and
+  client address, with a headline ("N idle connections, oldest …") and
+  yellow/red age tiers (30 min / 4 h). Solves the classic pool-exhaustion
+  incident — many connections used but few active — where the existing
+  activity table filters idle sessions out entirely. `Esc` closes it;
+  `/`/`w`/`c`/`K`/`s` are inert while it's open. Best-effort, fast tick.
+  TUI + Web.
+- **Lock-table pressure gauge** — a third gauge in the Macro Lens vitals
+  strip: held locks vs. capacity (`max_locks_per_transaction ×
+  (max_connections + max_prepared_transactions)`), yellow at 60%, red at
+  85%, warning before "out of shared memory, you might need to increase
+  max_locks_per_transaction". Best-effort, fast tick. TUI + Web.
+- **Invalid / not-ready index flag** — the Index Lens now flags indexes left
+  behind by a failed `CREATE INDEX CONCURRENTLY` (`pg_index.indisvalid` /
+  `indisready`) as a new `INVALID` finding, ranked ahead of `UNUSED`, with
+  actionable detail text (drop and rebuild). TUI + Web.
+- **Open a `psql` shell from pg_lens** (`!`, TUI-only) — suspends the TUI and
+  spawns `psql` on the exact connection pg_lens is polling (host/port/user/
+  dbname), restoring the terminal on exit, spawn failure, or `psql` missing
+  from `PATH`. The password is never passed on the command line — it's
+  resolved as late as possible and handed to the child only via a
+  `PGPASSWORD` environment variable. Under `--read-only`, the shell launches
+  with `PGOPTIONS=-c default_transaction_read_only=on` and prints a notice
+  that this is a default, not a hard sandbox — a full `psql` session can
+  still override it explicitly. Disabled (with a clear message) in `--mock`,
+  since there's no real connection to hand psql.
+
 ## [0.10.0] — 2026-07-16
 
 ### Added

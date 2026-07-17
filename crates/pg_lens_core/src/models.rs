@@ -281,6 +281,46 @@ pub struct PreparedXactRow {
     pub age_seconds: f64,
 }
 
+/// Lock-table pressure gauge (v0.11, `queries/lock_capacity.sql`): current
+/// `pg_locks` row count against the documented shared-memory capacity
+/// formula (`max_locks_per_transaction * (max_connections +
+/// max_prepared_transactions)`) — the headroom before the classic "out of
+/// shared memory, you might need to increase max_locks_per_transaction"
+/// outage. `capacity_slots`/`used_fraction` are derived by
+/// `crate::lock_capacity::compute`, never in SQL. Collected on the FAST
+/// tick, best-effort (see [`DbSnapshot::lock_capacity`]); severity tiers
+/// live in `crate::lock_capacity` (mirrored by the TUI/web frontends).
+#[derive(Clone, Debug, Serialize)]
+pub struct LockCapacity {
+    pub locks_held: i64,
+    pub max_locks_per_xact: i64,
+    pub max_connections: i64,
+    pub max_prepared_xacts: i64,
+    /// `max_locks_per_xact * (max_connections + max_prepared_xacts)`.
+    pub capacity_slots: i64,
+    /// `locks_held / capacity_slots`, in `0.0..=1.0` (0.0 if `capacity_slots`
+    /// is somehow 0 — never a NaN/inf).
+    pub used_fraction: f64,
+}
+
+/// One idle connection (v0.11, `queries/idle_sessions.sql`): a
+/// `pg_stat_activity` row with `state = 'idle'` — a backend holding a slot
+/// in the connection budget without doing anything, the classic
+/// pool-exhaustion suspect (`connections_total` near `max_connections` but
+/// few active). Ranked oldest-first by `idle_age_secs`; severity tiers live
+/// in `crate::idle_sessions` (mirrored by the TUI/web frontends).
+#[derive(Clone, Debug, Serialize)]
+pub struct IdleSessionRow {
+    pub pid: i32,
+    pub application_name: String,
+    pub database: String,
+    pub client: String,
+    pub username: String,
+    /// `EXTRACT(epoch FROM (now() - state_change))::float8` — how long this
+    /// backend has sat idle since its last query finished.
+    pub idle_age_secs: f64,
+}
+
 /// Health of the *slow* schema collection, separate from [`PollerStatus`]:
 /// a failing schema query must never taint the 2s activity pipeline.
 #[derive(Clone, Debug, Serialize)]
@@ -295,6 +335,13 @@ pub enum SchemaStatus {
 /// Computed purely in [`crate::index_advisor::classify`], never in SQL.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub enum IndexFinding {
+    /// `pg_index.indisvalid = false` or `indisready = false` — a `CREATE
+    /// INDEX CONCURRENTLY` was interrupted (crash, cancel) and left a dead
+    /// index behind: it never serves a query, still costs every write, and
+    /// `\d` does not warn about it. The strongest signal (overrides every
+    /// other finding): it is both dead weight AND evidence a concurrent
+    /// build needs cleanup/retry.
+    Invalid,
     /// `idx_scan = 0` and the index serves no constraint (never flagged:
     /// unique/primary/exclusion indexes exist for correctness, not reads).
     Unused,
@@ -330,6 +377,14 @@ pub struct IndexRow {
     pub is_unique: bool,
     pub is_primary: bool,
     pub is_exclusion: bool,
+    /// `pg_index.indisvalid` — false means a `CREATE INDEX CONCURRENTLY`
+    /// never finished building this index; it is silently skipped by the
+    /// planner.
+    pub is_valid: bool,
+    /// `pg_index.indisready` — false means the index is not even being
+    /// maintained on writes yet (an even earlier build stage than
+    /// `is_valid`).
+    pub is_ready: bool,
     /// True when a `pg_constraint` row backs this index (PK/UNIQUE/EXCLUDE
     /// constraint) — distinct from `is_unique` alone, which is also true
     /// for a manually created `CREATE UNIQUE INDEX` with no constraint.
@@ -629,6 +684,8 @@ impl SchemaSnapshot {
                 is_unique,
                 is_primary,
                 is_exclusion: false,
+                is_valid: true,
+                is_ready: true,
                 is_constraint: is_unique || is_primary,
                 indexdef: indexdef.to_string(),
                 indkey: indkey.to_string(),
@@ -712,6 +769,32 @@ impl SchemaSnapshot {
                 "CREATE INDEX pgbench_accounts_bid_abalance_idx ON public.pgbench_accounts \
                  USING btree (bid, abalance)",
             ),
+            // Invalid: `indisvalid = false` — a `CREATE INDEX CONCURRENTLY`
+            // that never finished (crash, cancel). Zero scans (it can never
+            // be planned into a query) AND unrelated to any other index
+            // here, so it demos the Invalid category in isolation.
+            IndexCatalogRow {
+                schema: "public".to_string(),
+                table: "order_items".to_string(),
+                name: "order_items_shipped_at_idx".to_string(),
+                index_bytes: 3_145_728,
+                idx_scan: 0,
+                idx_tup_read: 0,
+                idx_tup_fetch: 0,
+                is_unique: false,
+                is_primary: false,
+                is_exclusion: false,
+                is_valid: false,
+                is_ready: true,
+                is_constraint: false,
+                indexdef: "CREATE INDEX order_items_shipped_at_idx ON public.order_items \
+                           USING btree (shipped_at)"
+                    .to_string(),
+                indkey: "9".to_string(),
+                indclass: "1978".to_string(),
+                indcollation: "0".to_string(),
+                indpred: String::new(),
+            },
         ];
         let indexes = build_index_rows(index_catalog);
         Self {
@@ -1115,6 +1198,21 @@ pub struct DbSnapshot {
     /// simply found no dangling prepared transaction (the overwhelmingly
     /// common case — rendered calmly, never as an error).
     pub prepared_xacts: Option<Vec<PreparedXactRow>>,
+    /// Lock-table pressure gauge (v0.11, `pg_locks` vs. capacity), refreshed
+    /// every fast tick, best-effort like `databases`/`prepared_xacts`: `None`
+    /// when the collection failed this tick (restricted role, a renamed
+    /// GUC, ...), otherwise always present — every cluster has a lock table,
+    /// so there is no "found nothing" empty case like the other best-effort
+    /// sources.
+    pub lock_capacity: Option<LockCapacity>,
+    /// Idle connection / connection-age census (v0.11, `pg_stat_activity`
+    /// `state = 'idle'`), refreshed every fast tick, best-effort like
+    /// `databases`/`prepared_xacts`: `None` when the collection failed this
+    /// tick, `Some(vec![])` when it succeeded and simply found no idle
+    /// sessions (a fully busy or freshly-started server — calm, never an
+    /// error). Oldest (most suspect) first, capped at
+    /// `queries::IDLE_SESSIONS_LIMIT` rows.
+    pub idle_sessions: Option<Vec<IdleSessionRow>>,
     pub status: PollerStatus,
 }
 
@@ -1434,6 +1532,58 @@ impl DbSnapshot {
                 database: "shop".to_string(),
                 age_seconds: 5_412.0 + age,
             }]),
+            // v0.11: max_locks_per_transaction=64, max_connections=100,
+            // max_prepared_transactions=0 => 6400 slots capacity; held
+            // count jitters around ~92% so `--mock` opens on a visible red
+            // gauge (past `lock_capacity::BAD_FRACTION`) — a batch job or a
+            // burst of long transactions eating the lock table, exactly the
+            // precursor this gauge exists to surface before the "out of
+            // shared memory" outage.
+            lock_capacity: Some(crate::lock_capacity::compute(crate::db::LockCapacityRow {
+                locks_held: 5_850 + jitter(seq, 32, 200) as i64,
+                max_locks_per_xact: 64,
+                max_connections: 100,
+                max_prepared_xacts: 0,
+            })),
+            // v0.11: a handful of idle connections at varying ages — the
+            // pool-exhaustion suspects. Oldest-first, matching the SQL's own
+            // ORDER BY, including one comfortably past
+            // `idle_sessions::BAD_AGE_SECS` (4h) at ~4h12m so `--mock` opens
+            // on a visible red row without waiting for a live incident.
+            idle_sessions: Some(vec![
+                IdleSessionRow {
+                    pid: 6104,
+                    application_name: "reporting-pool".to_string(),
+                    database: "warehouse".to_string(),
+                    client: "10.0.7.9".to_string(),
+                    username: "analytics_ro".to_string(),
+                    idle_age_secs: 15_120.0 + age,
+                },
+                IdleSessionRow {
+                    pid: 6205,
+                    application_name: "checkout-api".to_string(),
+                    database: "shop".to_string(),
+                    client: "10.0.4.14".to_string(),
+                    username: "app_rw".to_string(),
+                    idle_age_secs: 5_402.0 + age,
+                },
+                IdleSessionRow {
+                    pid: 6301,
+                    application_name: "checkout-api".to_string(),
+                    database: "shop".to_string(),
+                    client: "10.0.4.15".to_string(),
+                    username: "app_rw".to_string(),
+                    idle_age_secs: 612.0 + age,
+                },
+                IdleSessionRow {
+                    pid: 6402,
+                    application_name: "psql".to_string(),
+                    database: "shop".to_string(),
+                    client: "local".to_string(),
+                    username: "leonardo".to_string(),
+                    idle_age_secs: 42.0 + jitter(seq, 33, 30) as f64,
+                },
+            ]),
             status: PollerStatus::Ok,
         }
     }
@@ -1472,6 +1622,8 @@ impl DbSnapshot {
             checkpointer: None,
             databases: None,
             prepared_xacts: None,
+            lock_capacity: None,
+            idle_sessions: None,
             status: PollerStatus::Connecting,
         }
     }
@@ -1587,6 +1739,29 @@ mod tests {
             row.age_seconds > crate::prepared_xacts::BAD_AGE_SECS,
             "mock row must land in the red tier, got {}",
             row.age_seconds
+        );
+    }
+
+    /// v0.11: the mock carries several idle sessions, oldest-first, at
+    /// least one comfortably past the red tier — the census has real data
+    /// to show under `--mock` without waiting for a live incident.
+    #[test]
+    fn mock_snapshot_carries_idle_sessions() {
+        let snapshot = DbSnapshot::mock();
+        let rows = snapshot
+            .idle_sessions
+            .as_ref()
+            .expect("mock must carry idle_sessions");
+        assert!(rows.len() >= 3);
+        for pair in rows.windows(2) {
+            assert!(
+                pair[0].idle_age_secs >= pair[1].idle_age_secs,
+                "idle_sessions must be oldest-first, like the SQL's ORDER BY"
+            );
+        }
+        assert!(
+            rows.iter().any(|r| r.idle_age_secs > crate::idle_sessions::BAD_AGE_SECS),
+            "mock must carry at least one row in the red tier"
         );
     }
 

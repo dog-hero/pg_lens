@@ -41,8 +41,10 @@ const ROWS: &[Row] = &[
     Row::Section("Sub-views & overlays"),
     Row::Bind("/", "filter activity (Micro Lens only)"),
     Row::Bind("w", "full waits panel (Micro Lens only)"),
+    Row::Bind("I", "idle connection census (Micro Lens only)"),
     Row::Bind("v", "Vacuum sub-view (Schema Lens only)"),
     Row::Bind("d", "database picker (any lens)"),
+    Row::Bind("!", "open a psql shell on the same connection (any lens)"),
     Row::Bind("?", "this help"),
     Row::Section("Data & refresh"),
     Row::Bind("R", "force schema/query-stats refresh (any lens)"),
@@ -95,7 +97,6 @@ pub fn draw(app: &App, frame: &mut Frame) {
             }
         }
     }
-    lines.push(Line::default());
     lines.push(Line::from(Span::styled("Esc / ?: close", style::label_style())).centered());
 
     let width = WIDTH.min(area.width.saturating_sub(2).max(20));
