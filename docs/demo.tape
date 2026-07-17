@@ -42,6 +42,11 @@ Type "w"
 Sleep 2.5s
 Type "w"
 Sleep 500ms
+# idle-in-transaction census (I), then close
+Type "I"
+Sleep 2.5s
+Type "I"
+Sleep 500ms
 # a query detail
 Type "j"
 Sleep 400ms
@@ -75,6 +80,12 @@ Sleep 600ms
 # Query Lens: pg_stat_statements
 Tab
 Sleep 2.5s
+
+# help overlay (?): the full key map, then close
+Type "?"
+Sleep 3s
+Escape
+Sleep 800ms
 
 Type "q"
 Sleep 500ms
