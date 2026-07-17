@@ -8,7 +8,7 @@ section on release.
 
 ---
 
-## v0.9 — "Problem transactions" (in progress — owner-selected 2026-07-16)
+## v0.9 — "Problem transactions" (shipped — see Shipped section)
 
 The cheap, cohesive batch around long/idle transactions and blocking — every
 item reuses data already polled (`pg_stat_activity`), plus the help overlay
@@ -84,6 +84,13 @@ that also clears the stale-README debt.
 
 ## Shipped
 
+- **v0.9.0** — "Problem transactions": idle-in-transaction / transaction-age
+  hunter (Micro Lens column + oldest-open-xact headline, yellow/red tiers),
+  blocking-chain / lock-wait graph in the Micro Lens detail panel (root
+  blocker highlighted, deadlock-cycle detection), orphaned prepared-transaction
+  (2PC) watch inside the Vacuum sub-view, a keyboard help overlay (`?`), and
+  the `docs/connection-user.md` least-privilege guide — all in both TUI and
+  Web Lens.
 - **v0.8.0** — "Room to breathe": Index Lens and Replication Lens as their
   own tabs (six tabs total; all replication slots scrollable), database
   selector (`d` reconnects the poller to any database on the cluster), full
