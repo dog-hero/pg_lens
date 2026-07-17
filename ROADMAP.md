@@ -89,7 +89,7 @@ Deferred candidate from the same pass (map, don't build this batch):
   existing Query Lens table/detail, mirroring the existing optional-timing
   version gate. The #1 query-tuning signal the Query Lens still lacks. **S/M.**
 
-## v0.13 — "Web catch-up & redesign" (in progress — owner-selected 2026-07-17)
+## v0.13 — "Web catch-up & redesign" (shipped — see Shipped section)
 
 The Web Lens is actually near-feature-parity already (the 2026-07-17 audit found
 almost every TUI feature mirrored), but it *feels* stale: no keyboard nav, no
@@ -122,7 +122,7 @@ fail-loud** scope.
   with the TUI. No new runtime framework; must not bloat the embedded bundle.
   Absorbs the DB switcher and keyboard nav into the new chrome. **L.**
 
-## v0.12 — "Navigation & filters" UX polish (in progress — owner-selected 2026-07-17)
+## v0.12 — "Navigation & filters" UX polish (shipped in v0.13.0 — see Shipped section)
 
 Fast-wins usability batch from the 2026-07-17 polish discovery. No new data
 sources — pure interaction/ergonomics, TUI-first with web parity where cheap.
@@ -174,6 +174,19 @@ Lens — those are intentionally fixed severity-ranked order, not a gap.
 
 ## Shipped
 
+- **v0.13.0** — consolidated release of two batches (versions skip
+  0.12.0 — one tag, one pipeline): "Navigation & filters" — direct tab
+  jump (`1`–`6`), `Shift+Tab` backward cycle, `Backspace` last-tab
+  toggle, fast scroll (`Home`/`g`, `End`/`G`, `PageUp`/`PageDown`) on
+  every selectable table, and a `/` filter extended to the Schema Lens
+  (Tables view) and Query Lens with per-lens state and a `\` clear —
+  all in both TUI and Web Lens; and "Web catch-up & redesign" — a
+  modern dashboard redesign (sidenav, topbar, light/dark theme toggle,
+  inline SVG icons), a token-gated database switcher
+  (`POST /api/db/switch`, works even under `--read-only`), web keyboard
+  navigation (`1`–`5`, `/`, `Esc`), and `pg_lens serve` fail-loud on an
+  ambiguous multi-service config instead of silently connecting to
+  localhost.
 - **v0.11.0** — "Incident precursors & connection visibility": idle
   connection / connection-age census (`I` toggle in the Micro Lens, oldest
   idle sessions ranked with age tiers — diagnoses pool-exhaustion incidents
