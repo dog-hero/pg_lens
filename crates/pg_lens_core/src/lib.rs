@@ -13,6 +13,7 @@ pub mod models;
 pub mod poller;
 pub mod prepared_xacts;
 pub mod queries;
+pub mod remote_config;
 pub mod services;
 pub mod settings;
 pub mod waits;

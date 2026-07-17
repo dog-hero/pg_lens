@@ -50,6 +50,13 @@ pub struct ConnSpec {
     /// The process environment (typically `std::env::vars().collect()`),
     /// injected so resolution stays a pure function.
     pub env: HashMap<String, String>,
+    /// A pre-resolved services file — `--config-url`'s local+remote merge,
+    /// built once by the caller (see `pg_lens_tui::main::resolve_remote_overlay`).
+    /// When `Some`, [`resolve`] and [`list_services`] use these entries
+    /// directly and never touch `services_file`/disk. `None` is the classic
+    /// path (load `services_file_path` from disk), completely unaffected by
+    /// `--config-url` when it is not configured.
+    pub services_override: Option<ServicesFile>,
 }
 
 /// Why connection resolution failed. Rendering these is safe: the DSN
@@ -91,6 +98,14 @@ pub enum SettingsError {
     /// `password_cmd` failed (non-zero exit, timeout, spawn failure). The
     /// message may include a stderr excerpt — never stdout.
     PasswordCmd { message: String },
+    /// `--config-url` / `PG_LENS_CONFIG_URL` / `remote_config` is not a
+    /// recognized scheme, or a token is configured against a plain `http://`
+    /// URL (refused — a token must only ever travel over https).
+    RemoteConfigUrl { message: String },
+    /// The remote services file (`--config-url`) could not be fetched, and
+    /// neither a cached copy nor a local `services.toml` could cover for
+    /// it. Always safe to display — never includes the token.
+    RemoteConfigFetch { message: String },
 }
 
 impl fmt::Display for SettingsError {
@@ -129,6 +144,12 @@ impl fmt::Display for SettingsError {
             }
             SettingsError::PasswordCmd { message } => {
                 write!(f, "password_cmd failed: {message}")
+            }
+            SettingsError::RemoteConfigUrl { message } => {
+                write!(f, "invalid --config-url: {message}")
+            }
+            SettingsError::RemoteConfigFetch { message } => {
+                write!(f, "remote config: {message}")
             }
         }
     }
@@ -342,8 +363,11 @@ fn xdg_config_dir(spec: &ConnSpec) -> Option<PathBuf> {
 }
 
 /// The services-file path plus whether it was named explicitly (flag/env —
-/// must exist) or is just the XDG default (may quietly not exist).
-pub(crate) fn services_file_path(spec: &ConnSpec) -> Option<(PathBuf, bool)> {
+/// must exist) or is just the XDG default (may quietly not exist). `pub`
+/// (not `pub(crate)`) so `--config-url`'s local+remote merge (in
+/// `pg_lens_tui::main`) can locate the same local file `resolve` would have
+/// used, without duplicating this precedence.
+pub fn services_file_path(spec: &ConnSpec) -> Option<(PathBuf, bool)> {
     if let Some(path) = &spec.services_file {
         return Some((path.clone(), true));
     }
@@ -369,6 +393,20 @@ pub struct AppConfig {
     pub schema_interval: Option<u64>,
     /// Web `serve` bind address (`--listen` / `PG_LENS_LISTEN`).
     pub listen: Option<String>,
+    /// Read-only mode: hard-disables every mutating/admin action (`c`/`K`
+    /// in the TUI, `/api/admin/*` in `serve`) regardless of the connected
+    /// role's actual privileges (`--read-only` / `PG_LENS_READ_ONLY`).
+    /// Default `false` (actions enabled) when unset.
+    pub read_only: Option<bool>,
+    /// Remote services-file source (`--config-url` / `PG_LENS_CONFIG_URL`) —
+    /// `github:OWNER/REPO/PATH[@REF]` or an `https://` URL. See
+    /// `pg_lens_core::remote_config`.
+    pub remote_config: Option<String>,
+    /// External command whose trimmed stdout is the bearer token for
+    /// `remote_config` (mirrors `password_cmd` — never a literal token in
+    /// this file). Only consulted when neither `PG_LENS_CONFIG_TOKEN` nor
+    /// `GITHUB_TOKEN` is set.
+    pub remote_config_token_cmd: Option<String>,
 }
 
 /// Locates `config.toml`: `PG_LENS_CONFIG_FILE`, else
@@ -480,47 +518,59 @@ pub fn resolve(spec: &ConnSpec) -> Result<Resolved, SettingsError> {
     let mut timeout_pinned = false;
 
     if let Some((name, origin)) = selected_service(spec) {
-        match services_file_path(spec) {
-            // Explicit path (flag/env), or the XDG default when it exists:
-            // load it (a missing explicit file is a hard error) and merge.
-            Some((path, explicit)) if explicit || path.exists() => {
-                let (file, mut file_warnings) = ServicesFile::load(&path)?;
-                warnings.append(&mut file_warnings);
-                let entry = file.get(&name)?;
-                (password_source, timeout_pinned) = apply_service(&mut config, entry);
-            }
-            // No usable file. An ambient PGSERVICE/PG_LENS_SERVICE pointing
-            // at nothing degrades to a warning (the user may have it set for
-            // psql); an explicit --service must fail loudly.
-            missing => match origin {
-                ServiceOrigin::Env(var) => warnings.push(match missing {
-                    Some((path, _)) => format!(
-                        "{var}={name} is set but there is no services file at {}; ignoring it",
-                        path.display()
-                    ),
-                    None => format!(
-                        "{var}={name} is set but no services file location could be \
-                         derived (HOME/XDG_CONFIG_HOME unset); ignoring it"
-                    ),
-                }),
-                ServiceOrigin::Flag => {
-                    return Err(match missing {
-                        Some((path, _)) => SettingsError::ServicesFileIo {
-                            error: std::io::Error::new(
-                                std::io::ErrorKind::NotFound,
-                                "no such file",
-                            ),
-                            path,
-                        },
-                        None => SettingsError::ServiceConfig {
-                            service: name,
-                            message: "cannot locate a services file: pass --services-file, \
-                                      set PG_LENS_SERVICES_FILE, or set HOME/XDG_CONFIG_HOME"
-                                .to_string(),
-                        },
-                    });
+        // `--config-url` already resolved (and merged with any local file)
+        // into `services_override` — use it directly and skip disk I/O.
+        // Unlike the ambient-PGSERVICE-degrades-to-a-warning rule below, an
+        // unknown name here is always a hard error: the override already
+        // represents the full merged set the operator configured, so a
+        // silent "ignoring it" would hide a typo'd/removed remote entry.
+        if let Some(file) = &spec.services_override {
+            let entry = file.get(&name)?;
+            (password_source, timeout_pinned) = apply_service(&mut config, entry);
+        } else {
+            match services_file_path(spec) {
+                // Explicit path (flag/env), or the XDG default when it exists:
+                // load it (a missing explicit file is a hard error) and merge.
+                Some((path, explicit)) if explicit || path.exists() => {
+                    let (file, mut file_warnings) = ServicesFile::load(&path)?;
+                    warnings.append(&mut file_warnings);
+                    let entry = file.get(&name)?;
+                    (password_source, timeout_pinned) = apply_service(&mut config, entry);
                 }
-            },
+                // No usable file. An ambient PGSERVICE/PG_LENS_SERVICE
+                // pointing at nothing degrades to a warning (the user may
+                // have it set for psql); an explicit --service must fail
+                // loudly.
+                missing => match origin {
+                    ServiceOrigin::Env(var) => warnings.push(match missing {
+                        Some((path, _)) => format!(
+                            "{var}={name} is set but there is no services file at {}; ignoring it",
+                            path.display()
+                        ),
+                        None => format!(
+                            "{var}={name} is set but no services file location could be \
+                             derived (HOME/XDG_CONFIG_HOME unset); ignoring it"
+                        ),
+                    }),
+                    ServiceOrigin::Flag => {
+                        return Err(match missing {
+                            Some((path, _)) => SettingsError::ServicesFileIo {
+                                error: std::io::Error::new(
+                                    std::io::ErrorKind::NotFound,
+                                    "no such file",
+                                ),
+                                path,
+                            },
+                            None => SettingsError::ServiceConfig {
+                                service: name,
+                                message: "cannot locate a services file: pass --services-file, \
+                                          set PG_LENS_SERVICES_FILE, or set HOME/XDG_CONFIG_HOME"
+                                    .to_string(),
+                            },
+                        });
+                    }
+                },
+            }
         }
     }
 
@@ -566,8 +616,22 @@ pub struct ServiceSummary {
 }
 
 /// Loads the services file selected by `spec` and returns display-safe
-/// summaries (plus permission warnings). Used by `--list-services`.
+/// summaries (plus permission warnings). Used by `--list-services`. When
+/// `spec.services_override` is set (`--config-url`), it lists exactly that
+/// merged set instead of reading disk — so `--list-services` always shows
+/// what will actually be resolved.
 pub fn list_services(spec: &ConnSpec) -> Result<(Vec<ServiceSummary>, Vec<String>), SettingsError> {
+    if let Some(file) = &spec.services_override {
+        let summaries = file
+            .iter()
+            .map(|(name, entry)| ServiceSummary {
+                name: name.to_string(),
+                host: entry.host.clone(),
+                user: entry.user.clone(),
+            })
+            .collect();
+        return Ok((summaries, Vec::new()));
+    }
     let Some((path, _)) = services_file_path(spec) else {
         return Err(SettingsError::ServiceConfig {
             service: "<list>".to_string(),
@@ -612,7 +676,7 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         writeln!(
             f,
-            "interval = 5.0\nschema_interval = 120\nlisten = \"0.0.0.0:9000\""
+            "interval = 5.0\nschema_interval = 120\nlisten = \"0.0.0.0:9000\"\nread_only = true"
         )
         .unwrap();
         let (cfg, warnings) = load_app_config(&config_spec(f.path()));
@@ -620,6 +684,29 @@ mod tests {
         assert_eq!(cfg.interval, Some(5.0));
         assert_eq!(cfg.schema_interval, Some(120));
         assert_eq!(cfg.listen.as_deref(), Some("0.0.0.0:9000"));
+        assert_eq!(cfg.read_only, Some(true));
+    }
+
+    #[test]
+    fn app_config_parses_remote_config_fields() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            "remote_config = \"github:acme/infra/services.toml@main\"\n\
+             remote_config_token_cmd = \"vault kv get -field=token secret/gh\""
+        )
+        .unwrap();
+        let (cfg, warnings) = load_app_config(&config_spec(f.path()));
+        assert!(warnings.is_empty());
+        assert_eq!(
+            cfg.remote_config.as_deref(),
+            Some("github:acme/infra/services.toml@main")
+        );
+        assert_eq!(
+            cfg.remote_config_token_cmd.as_deref(),
+            Some("vault kv get -field=token secret/gh")
+        );
     }
 
     #[test]
@@ -889,6 +976,7 @@ mod tests {
                 ("PGDATABASE", "envdb"),
                 ("PGAPPNAME", "from_env"),
             ]),
+            services_override: None,
         })
         .expect("resolution must succeed");
         let config = &resolved.config;
@@ -917,6 +1005,8 @@ mod tests {
             service: Some("prod".to_string()),
             services_file: Some(file.to_path_buf()),
             env: env(&[("PGPASSWORD", "env-pw")]),
+       
+            services_override: None,
         })
         .expect("resolution must succeed");
         assert!(
@@ -938,6 +1028,8 @@ mod tests {
             service: Some("prod".to_string()),
             services_file: Some(file.to_path_buf()),
             env: HashMap::new(),
+       
+            services_override: None,
         })
         .expect("resolution must succeed");
         assert_eq!(
@@ -964,6 +1056,8 @@ mod tests {
             service: Some("legacy".to_string()),
             services_file: Some(file.to_path_buf()),
             env: HashMap::new(),
+       
+            services_override: None,
         })
         .expect("resolution must succeed");
         assert_eq!(
@@ -988,6 +1082,8 @@ mod tests {
             service: Some("slow".to_string()),
             services_file: Some(file.to_path_buf()),
             env: env(&[("PGCONNECT_TIMEOUT", "5")]),
+       
+            services_override: None,
         })
         .expect("resolution must succeed");
         assert_eq!(
@@ -1007,6 +1103,8 @@ mod tests {
             service: None,
             services_file: None,
             env: env(&[("PGSERVICE", "prod"), ("PG_LENS_SERVICES_FILE", &path)]),
+       
+            services_override: None,
         })
         .expect("resolution must succeed");
         assert_eq!(resolved.config.get_user(), Some("svc_user"));
@@ -1022,6 +1120,7 @@ mod tests {
                 ("PGSERVICE", "prod"),
                 ("PG_LENS_SERVICES_FILE", &path),
             ]),
+            services_override: None,
         })
         .expect_err("PG_LENS_SERVICE=missing must win and fail");
         assert!(matches!(err, SettingsError::UnknownService { .. }));
@@ -1035,6 +1134,8 @@ mod tests {
             service: Some("prdo".to_string()),
             services_file: Some(file.to_path_buf()),
             env: HashMap::new(),
+       
+            services_override: None,
         })
         .expect_err("typo'd service must fail");
         let msg = err.to_string();
@@ -1049,6 +1150,8 @@ mod tests {
             service: Some("prod".to_string()),
             services_file: Some(PathBuf::from("/nonexistent/services.toml")),
             env: HashMap::new(),
+       
+            services_override: None,
         })
         .expect_err("--service with a missing file must fail");
         assert!(matches!(err, SettingsError::ServicesFileIo { .. }));
@@ -1067,6 +1170,7 @@ mod tests {
                 ("HOME", "/nonexistent-home-for-test"),
                 ("PGHOST", "db.env.internal"),
             ]),
+            services_override: None,
         })
         .expect("ambient PGSERVICE without a file must not break resolution");
         assert_eq!(
@@ -1093,6 +1197,61 @@ mod tests {
         };
         let (path, _) = services_file_path(&spec).expect("path must resolve");
         assert_eq!(path, PathBuf::from("/home/u/.config/pg_lens/services.toml"));
+    }
+
+    // --- services_override (--config-url) ------------------------------------
+
+    #[test]
+    fn services_override_is_used_instead_of_disk_and_skips_missing_file_errors() {
+        let override_file = ServicesFile::from_remote_bytes(
+            b"[services.prod]\nhost = \"remote-prod\"\nuser = \"svc\"\n",
+        )
+        .expect("override parses");
+        let resolved = resolve(&ConnSpec {
+            dsn: None,
+            service: Some("prod".to_string()),
+            // A path that does not exist: proves resolve() never touches it
+            // when services_override is set.
+            services_file: Some(PathBuf::from("/nonexistent/services.toml")),
+            env: HashMap::new(),
+            services_override: Some(override_file),
+        })
+        .expect("override must resolve without touching disk");
+        assert_eq!(resolved.config.get_user(), Some("svc"));
+        assert_eq!(resolved.label.to_string(), "svc@remote-prod");
+    }
+
+    #[test]
+    fn services_override_unknown_service_is_a_hard_error_even_via_env_origin() {
+        let override_file = ServicesFile::from_remote_bytes(b"[services.prod]\nhost = \"h\"\n")
+            .expect("override parses");
+        let err = resolve(&ConnSpec {
+            dsn: None,
+            service: None,
+            services_file: None,
+            env: env(&[("PGSERVICE", "typo")]),
+            services_override: Some(override_file),
+        })
+        .expect_err("unknown name in the override must fail loudly, not degrade to a warning");
+        assert!(matches!(err, SettingsError::UnknownService { .. }));
+    }
+
+    #[test]
+    fn list_services_reflects_the_override_not_disk() {
+        let override_file = ServicesFile::from_remote_bytes(
+            b"[services.remote_a]\nhost = \"ha\"\nuser = \"ua\"\n",
+        )
+        .expect("override parses");
+        let (summaries, warnings) = list_services(&ConnSpec {
+            services_file: Some(PathBuf::from("/nonexistent/services.toml")),
+            services_override: Some(override_file),
+            ..ConnSpec::default()
+        })
+        .expect("must list the override");
+        assert!(warnings.is_empty());
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "remote_a");
+        assert_eq!(summaries[0].host.as_deref(), Some("ha"));
     }
 
     #[test]

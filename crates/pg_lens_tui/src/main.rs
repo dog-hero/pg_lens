@@ -22,12 +22,13 @@
 //! as-is and never logged; only the safe `ConnLabel` reaches any output.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use pg_lens_core::DbSnapshot;
+use pg_lens_core::services::ServicesFile;
 use pg_lens_core::settings::{self, ConnSpec, Resolved, ServiceSummary};
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, watch};
@@ -116,6 +117,48 @@ struct ConnArgs {
     /// Use built-in mock data instead of a real database (dev/demo mode).
     #[arg(long, global = true)]
     mock: bool,
+
+    /// Refuse every mutating/admin action (`c` cancel, `K` terminate in the
+    /// TUI; `POST /api/admin/*` in `serve`) regardless of the connected
+    /// role's actual privileges — for shared/audited deployments and
+    /// least-privilege roles (pairs with `docs/connection-user.md`). Also
+    /// settable via `PG_LENS_READ_ONLY` (any value other than empty/`0`/
+    /// `false`/`no`/`off`, case-insensitive) or `read_only = true` in
+    /// config.toml. Enforced in `update()` and the web admin handlers — not
+    /// just hidden in the UI. [default: false, or config.toml]
+    #[arg(long, global = true)]
+    read_only: bool,
+
+    /// Load the services file (see `--services-file`) from a remote,
+    /// read-only source instead of (or merged with) the local file — for
+    /// teams that want to share one curated connection list. Two schemes:
+    /// `github:OWNER/REPO/PATH[@REF]` (GitHub's Contents API — works for
+    /// private repos given a token; `REF` optional, defaults to the repo's
+    /// default branch) or a plain `https://`/`http://` URL to raw file
+    /// bytes (self-hosted git, GitLab raw, ...). Auth token, in order:
+    /// `PG_LENS_CONFIG_TOKEN`, `GITHUB_TOKEN`, then a `remote_config_token_cmd`
+    /// in config.toml (mirrors `password_cmd` — an external command, trimmed
+    /// stdout; never a literal token in any file). Sent as `Authorization:
+    /// Bearer <token>` and refused over plain `http://`. Fetched once at
+    /// startup (10s timeout) and cached at
+    /// `$XDG_CACHE_HOME/pg_lens/remote-services.toml`; a failed fetch falls
+    /// back to that cache (or the local file alone) with a warning — it
+    /// never blocks startup on a flaky network. When both a local file and
+    /// this remote source define a service, the remote entry wins. Also
+    /// settable via `PG_LENS_CONFIG_URL` or `remote_config` in config.toml.
+    #[arg(long, value_name = "URL", env = "PG_LENS_CONFIG_URL", global = true)]
+    config_url: Option<String>,
+}
+
+/// Loose boolean parse for `PG_LENS_READ_ONLY` — a plain presence-style env
+/// var (unlike the value-carrying `PG*`/`PG_LENS_*` vars elsewhere in this
+/// file), so it accepts common truthy/falsy spellings rather than requiring
+/// exactly `"true"`. Consistent with `settings.rs`'s "empty = unset".
+fn is_truthy(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
 }
 
 #[cfg(feature = "web")]
@@ -137,13 +180,28 @@ impl ConnArgs {
             service: self.service.clone(),
             services_file: self.services_file.clone(),
             env: std::env::vars().collect::<HashMap<_, _>>(),
+            services_override: None,
         }
     }
 
+    /// [`Self::spec`] plus a pre-resolved `--config-url` overlay (see
+    /// [`Self::resolve_remote_overlay`]) — the merged local+remote services
+    /// set every connection-resolving call site (`--list-services`, the
+    /// picker, `resolve`) must share, so they all agree on what
+    /// `--config-url` actually resolved to.
+    fn spec_with(&self, overlay: Option<&ServicesFile>) -> ConnSpec {
+        let mut spec = self.spec();
+        spec.services_override = overlay.cloned();
+        spec
+    }
+
     /// --list-services: plain stdout, no TUI/server. Names + host/user only
-    /// — a password or password_cmd never reaches this output.
-    fn list_services(&self) -> color_eyre::Result<()> {
-        let (services, warnings) = settings::list_services(&self.spec())?;
+    /// — a password or password_cmd never reaches this output. `overlay` is
+    /// `--config-url`'s merged result, if configured (see
+    /// [`Self::resolve_remote_overlay`]) — when set, this lists exactly what
+    /// will be resolved, remote entries included.
+    fn list_services(&self, overlay: Option<&ServicesFile>) -> color_eyre::Result<()> {
+        let (services, warnings) = settings::list_services(&self.spec_with(overlay))?;
         for warning in &warnings {
             eprintln!("warning: {warning}");
         }
@@ -160,12 +218,13 @@ impl ConnArgs {
 
     /// Resolves the connection (unless `--mock`), printing warnings to
     /// stderr. Shared verbatim by `tui` and `serve` — same resolution, same
-    /// poller, per the "one core pipeline" invariant.
-    fn resolve(&self) -> color_eyre::Result<Option<Resolved>> {
+    /// poller, per the "one core pipeline" invariant. `overlay` is
+    /// `--config-url`'s merged result, if configured.
+    fn resolve(&self, overlay: Option<&ServicesFile>) -> color_eyre::Result<Option<Resolved>> {
         if self.mock {
             return Ok(None);
         }
-        let resolved = settings::resolve(&self.spec())?;
+        let resolved = settings::resolve(&self.spec_with(overlay))?;
         for warning in &resolved.warnings {
             eprintln!("warning: {warning}");
         }
@@ -195,6 +254,165 @@ impl ConnArgs {
         let secs = self.schema_interval.or(config.schema_interval).unwrap_or(60);
         Duration::from_secs(secs).max(pg_lens_core::poller::SCHEMA_INTERVAL_MIN)
     }
+
+    /// `--read-only`, then `PG_LENS_READ_ONLY`, then `config.toml`'s
+    /// `read_only`, then `false` — same flag → env → config → default
+    /// precedence as `interval`/`schema_interval` above. Delegates to the
+    /// pure [`resolve_read_only`] so the precedence itself is testable
+    /// without touching real process env (same "environment is injected"
+    /// discipline `settings.rs` uses).
+    fn read_only(&self, config: &settings::AppConfig) -> bool {
+        resolve_read_only(self.read_only, &self.spec().env, config.read_only)
+    }
+
+    /// `--config-url`, then `PG_LENS_CONFIG_URL` (both already merged into
+    /// `self.config_url` by clap's `env = ...`, same as `--dsn`), then
+    /// `config.toml`'s `remote_config`. `None`/empty means "no remote
+    /// config configured" — every other call site keeps behaving exactly as
+    /// it did before this feature existed.
+    fn config_url(&self, config: &settings::AppConfig) -> Option<String> {
+        self.config_url
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| config.remote_config.clone().filter(|s| !s.is_empty()))
+    }
+
+    /// The full `--config-url` startup flow: parse → resolve the token →
+    /// fetch (10s timeout, off the async runtime via `spawn_blocking`) →
+    /// cache on success / fall back to the cache or the local file on
+    /// failure → merge over the local `services.toml` (remote wins by
+    /// name). Warnings go to stderr as they happen (same convention as
+    /// every other `warning: ...` line this binary prints); `Ok(None)`
+    /// means `--config-url` is not configured at all — the classic,
+    /// disk-only path. Only genuinely fatal cases return `Err`: a bad URL,
+    /// a token over `http://`, a failed `token_cmd`, or a fetch failure
+    /// with neither a cache nor a local file to fall back on.
+    ///
+    /// This is deliberately thin I/O glue: the actual precedence/merge
+    /// logic is [`pg_lens_core::remote_config::resolve_effective_services`],
+    /// which is pure and unit-tested in `pg_lens_core` without any network
+    /// or filesystem access.
+    async fn resolve_remote_overlay(
+        &self,
+        config: &settings::AppConfig,
+    ) -> color_eyre::Result<Option<ServicesFile>> {
+        use color_eyre::eyre::eyre;
+
+        let Some(raw_url) = self.config_url(config) else {
+            return Ok(None);
+        };
+        let spec = self.spec();
+        let url = pg_lens_core::remote_config::parse_config_url(&raw_url)?;
+        let token =
+            resolve_config_token(&spec.env, config.remote_config_token_cmd.as_deref()).await?;
+
+        let cache_path = remote_config_cache_path();
+        let cached_bytes = cache_path.as_deref().and_then(|p| std::fs::read(p).ok());
+
+        // ureq is blocking; this is a one-shot startup call, so it runs off
+        // the async runtime rather than pulling in an async HTTP stack.
+        let fetch_timeout = pg_lens_core::remote_config::FETCH_TIMEOUT;
+        let fetch_result: Result<Vec<u8>, String> = tokio::task::spawn_blocking(move || {
+            pg_lens_core::remote_config::fetch_remote_bytes(&url, token.as_deref(), fetch_timeout)
+        })
+        .await
+        .map_err(|e| eyre!("--config-url fetch task panicked: {e}"))?
+        .map_err(|e| e.to_string());
+
+        if let (Ok(bytes), Some(path)) = (&fetch_result, &cache_path)
+            && let Err(e) = write_remote_cache(path, bytes)
+        {
+            eprintln!(
+                "warning: could not cache --config-url fetch at {}: {e}",
+                path.display()
+            );
+        }
+
+        let local_file = pg_lens_core::settings::services_file_path(&spec)
+            .filter(|(path, _)| path.exists())
+            .map(|(path, _)| pg_lens_core::services::ServicesFile::load(&path))
+            .transpose()?
+            .map(|(file, warnings)| {
+                for warning in warnings {
+                    eprintln!("warning: {warning}");
+                }
+                file
+            });
+
+        let (merged, warnings) = pg_lens_core::remote_config::resolve_effective_services(
+            fetch_result,
+            cached_bytes,
+            local_file,
+        )?;
+        for warning in warnings {
+            eprintln!("warning: {warning}");
+        }
+        Ok(Some(merged))
+    }
+}
+
+/// Bearer token for `--config-url`: `PG_LENS_CONFIG_TOKEN`, then
+/// `GITHUB_TOKEN`, then `remote_config_token_cmd` in config.toml (mirrors
+/// `password_cmd` — an external command, trimmed stdout via
+/// [`pg_lens_core::services::resolve_password_cmd`]; never a literal token in
+/// any file). `Ok(None)` means the remote source is unauthenticated (a
+/// public repo, or a plain URL that needs none).
+async fn resolve_config_token(
+    env: &HashMap<String, String>,
+    token_cmd: Option<&str>,
+) -> color_eyre::Result<Option<String>> {
+    if let Some(token) = env.get("PG_LENS_CONFIG_TOKEN").filter(|v| !v.is_empty()) {
+        return Ok(Some(token.clone()));
+    }
+    if let Some(token) = env.get("GITHUB_TOKEN").filter(|v| !v.is_empty()) {
+        return Ok(Some(token.clone()));
+    }
+    if let Some(cmd) = token_cmd.filter(|c| !c.is_empty()) {
+        let bytes = pg_lens_core::services::resolve_password_cmd(cmd)
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!("remote_config_token_cmd: {e}"))?;
+        return Ok(Some(String::from_utf8_lossy(&bytes).into_owned()));
+    }
+    Ok(None)
+}
+
+/// Where a successful `--config-url` fetch is cached:
+/// `$XDG_CACHE_HOME/pg_lens/remote-services.toml`, else
+/// `$HOME/.cache/pg_lens/remote-services.toml`. `None` when neither can be
+/// derived — caching (and the offline fallback it enables) is then simply
+/// off; a fresh fetch is still attempted every startup.
+fn remote_config_cache_path() -> Option<PathBuf> {
+    let cache_dir = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(cache_dir.join("pg_lens").join("remote-services.toml"))
+}
+
+/// Writes a successful `--config-url` fetch to the cache at `0600` (Unix) —
+/// defense in depth: even though the cache only ever holds a services file
+/// (never a token; see the module doc), a services file can carry
+/// `password_cmd`, so it deserves the same restrictive mode `services.rs`
+/// expects of the local file.
+fn write_remote_cache(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Pure precedence resolution for read-only mode: the flag and the env var
+/// are OR'd in (either alone is enough to arm the mode; neither can turn it
+/// back off once the other says yes), then `config.toml`, then `false`.
+fn resolve_read_only(flag: bool, env: &HashMap<String, String>, config_value: Option<bool>) -> bool {
+    flag
+        || env.get("PG_LENS_READ_ONLY").is_some_and(|v| is_truthy(v))
+        || config_value.unwrap_or(false)
 }
 
 /// The web `serve` bind address: `--listen`, then `PG_LENS_LISTEN` (both via
@@ -457,27 +675,32 @@ async fn main() -> color_eyre::Result<()> {
 }
 
 async fn run_tui(conn_args: ConnArgs) -> color_eyre::Result<()> {
+    // `config.toml` (for `remote_config`) and the `--config-url` fetch both
+    // have to happen before `--list-services`/the picker so they see the
+    // fully merged (local + remote) service set.
+    let config = conn_args.app_config();
+    let overlay = conn_args.resolve_remote_overlay(&config).await?;
+
     if conn_args.list_services {
-        return conn_args.list_services();
+        return conn_args.list_services(overlay.as_ref());
     }
     // Startup mode decision. Picker mode (see `picker_services` for the
     // full trigger rule) enters the TUI with no poller; otherwise resolve
     // the connection *before* entering the alternate screen so a bad DSN /
     // env var / services file prints as a normal error (and permission
     // warnings land on stderr), not inside a raw terminal.
-    let startup = match picker_services(&conn_args.spec()) {
+    let startup = match picker_services(&conn_args.spec_with(overlay.as_ref())) {
         Some((services, warnings)) if !conn_args.mock => {
             for warning in &warnings {
                 eprintln!("warning: {warning}");
             }
             Startup::Picker(picker_entries(services))
         }
-        _ => Startup::Connect(Box::new(conn_args.resolve()?)),
+        _ => Startup::Connect(Box::new(conn_args.resolve(overlay.as_ref())?)),
     };
 
-    let config = conn_args.app_config();
     let terminal = ratatui::init();
-    let result = run(terminal, &conn_args, &config, startup).await;
+    let result = run(terminal, &conn_args, &config, startup, overlay).await;
     ratatui::restore();
     result
 }
@@ -488,11 +711,13 @@ async fn run_tui(conn_args: ConnArgs) -> color_eyre::Result<()> {
 async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
     use color_eyre::eyre::eyre;
 
+    let config = conn.app_config();
+    let overlay = conn.resolve_remote_overlay(&config).await?;
+
     if conn.list_services {
-        return conn.list_services();
+        return conn.list_services(overlay.as_ref());
     }
 
-    let config = conn.app_config();
     let listen = resolve_listen(args.listen, &config);
 
     // Empty tokens count as unset: `PG_LENS_AUTH_TOKEN= pg_lens serve`
@@ -504,7 +729,7 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
     pg_lens_web::ensure_listen_allowed(&listen, token.is_some()).map_err(|e| eyre!(e))?;
     let auth_enabled = token.is_some();
 
-    let resolved = conn.resolve()?;
+    let resolved = conn.resolve(overlay.as_ref())?;
     // `serve` has no `+`/`-` keys; the sender only needs to outlive the
     // server so the poller keeps its cadence.
     let (_interval_tx, interval_rx) = watch::channel(conn.interval(&config));
@@ -529,7 +754,8 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
         db_switch_rx,
     );
 
-    let router = pg_lens_web::router(snapshots, schema_refresh_tx, admin_tx, token);
+    let read_only = conn.read_only(&config);
+    let router = pg_lens_web::router(snapshots, schema_refresh_tx, admin_tx, token, read_only);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
     // Operator info on stderr: bound address + auth mode + safe label
@@ -543,6 +769,11 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
             "disabled (loopback bind without PG_LENS_AUTH_TOKEN)"
         }
     );
+    if read_only {
+        eprintln!(
+            "pg_lens: read-only mode — /api/admin/* refuses every request, even with a valid token"
+        );
+    }
     // The poller must be stopped INSIDE the graceful-shutdown window (see
     // pg_lens_web::serve): open SSE streams only end when the poller drops
     // the snapshot channel, and axum's graceful shutdown waits for exactly
@@ -561,11 +792,16 @@ async fn run(
     conn_args: &ConnArgs,
     config: &settings::AppConfig,
     startup: Startup,
+    // `--config-url`'s merged local+remote services (if configured) — the
+    // picker's lazy re-resolve below must reuse this exact set, not
+    // silently fall back to a disk-only read.
+    remote_services: Option<ServicesFile>,
 ) -> color_eyre::Result<()> {
     let interval = conn_args.interval(config);
     let schema_interval = conn_args.schema_interval(config);
     let mut app = App::new();
     app.refresh_interval = interval;
+    app.read_only = conn_args.read_only(config);
 
     let (tx, mut actions) = mpsc::channel::<Action>(64);
     let _input_task = event::spawn_input(tx.clone());
@@ -698,7 +934,7 @@ async fn run(
             // it changed underneath us, exit the TUI with the plain error —
             // the same text the pre-TUI path would have printed. Non-fatal
             // warnings were already printed before the TUI took over.
-            let mut spec = conn_args.spec();
+            let mut spec = conn_args.spec_with(remote_services.as_ref());
             spec.dsn = None;
             spec.service = entry.service.clone();
             let resolved = settings::resolve(&spec)?;
@@ -814,7 +1050,144 @@ mod tests {
             service: None,
             services_file: Some(file.to_path_buf()),
             env: env(env_pairs),
+            services_override: None,
         }
+    }
+
+    // --- read-only mode: flag → env → config → default -----------------------
+    //
+    // `resolve_read_only` is pure (no real process env), matching this
+    // codebase's "environment is injected" testability discipline — the
+    // same reason `settings::resolve` takes a `ConnSpec` instead of reading
+    // `std::env` itself.
+
+    #[test]
+    fn read_only_defaults_to_false() {
+        assert!(!resolve_read_only(false, &HashMap::new(), None));
+    }
+
+    #[test]
+    fn read_only_flag_wins_regardless_of_env_or_config() {
+        assert!(resolve_read_only(true, &HashMap::new(), Some(false)));
+    }
+
+    #[test]
+    fn read_only_env_var_is_loosely_truthy() {
+        for value in ["1", "true", "TRUE", "yes", "on", "anything"] {
+            let e = env(&[("PG_LENS_READ_ONLY", value)]);
+            assert!(resolve_read_only(false, &e, None), "{value:?} must be truthy");
+        }
+        for value in ["0", "false", "FALSE", "no", "off", ""] {
+            let e = env(&[("PG_LENS_READ_ONLY", value)]);
+            assert!(!resolve_read_only(false, &e, None), "{value:?} must be falsy");
+        }
+    }
+
+    #[test]
+    fn read_only_config_toml_applies_when_flag_and_env_are_absent() {
+        assert!(resolve_read_only(false, &HashMap::new(), Some(true)));
+    }
+
+    #[test]
+    fn read_only_env_beats_a_false_config() {
+        let e = env(&[("PG_LENS_READ_ONLY", "1")]);
+        assert!(
+            resolve_read_only(false, &e, Some(false)),
+            "env must still arm read-only"
+        );
+    }
+
+    #[test]
+    fn read_only_flag_parses_from_the_cli() {
+        let cli = Cli::try_parse_from(["pg_lens", "--read-only"]).expect("parse --read-only");
+        assert!(cli.conn.read_only);
+        let cli = Cli::try_parse_from(["pg_lens"]).expect("parse bare");
+        assert!(!cli.conn.read_only);
+    }
+
+    // --- --config-url: flag → env → config precedence -------------------------
+
+    #[test]
+    fn config_url_flag_parses_from_the_cli() {
+        let cli = Cli::try_parse_from([
+            "pg_lens",
+            "--config-url",
+            "github:acme/infra/services.toml",
+        ])
+        .expect("parse --config-url");
+        assert_eq!(
+            cli.conn.config_url.as_deref(),
+            Some("github:acme/infra/services.toml")
+        );
+        let cli = Cli::try_parse_from(["pg_lens"]).expect("parse bare");
+        assert_eq!(cli.conn.config_url, None);
+    }
+
+    #[test]
+    fn config_url_flag_beats_config_toml() {
+        let conn = ConnArgs {
+            dsn: None,
+            service: None,
+            services_file: None,
+            list_services: false,
+            interval: None,
+            schema_interval: None,
+            mock: false,
+            read_only: false,
+            config_url: Some("https://example.com/from-flag.toml".to_string()),
+        };
+        let config = settings::AppConfig {
+            remote_config: Some("https://example.com/from-config-toml".to_string()),
+            ..settings::AppConfig::default()
+        };
+        assert_eq!(
+            conn.config_url(&config).as_deref(),
+            Some("https://example.com/from-flag.toml")
+        );
+    }
+
+    #[test]
+    fn config_url_falls_back_to_config_toml_when_the_flag_is_unset() {
+        let conn = ConnArgs {
+            dsn: None,
+            service: None,
+            services_file: None,
+            list_services: false,
+            interval: None,
+            schema_interval: None,
+            mock: false,
+            read_only: false,
+            config_url: None,
+        };
+        let config = settings::AppConfig {
+            remote_config: Some("https://example.com/from-config-toml".to_string()),
+            ..settings::AppConfig::default()
+        };
+        assert_eq!(
+            conn.config_url(&config).as_deref(),
+            Some("https://example.com/from-config-toml")
+        );
+        assert_eq!(conn.config_url(&settings::AppConfig::default()), None);
+    }
+
+    #[tokio::test]
+    async fn resolve_remote_overlay_is_a_noop_when_config_url_is_unset() {
+        let conn = ConnArgs {
+            dsn: None,
+            service: None,
+            services_file: None,
+            list_services: false,
+            interval: None,
+            schema_interval: None,
+            mock: false,
+            read_only: false,
+            config_url: None,
+        };
+        let overlay = conn
+            .resolve_remote_overlay(&settings::AppConfig::default())
+            .await
+            .expect("no --config-url must never fail");
+        assert!(overlay.is_none(), "classic disk-only path must be untouched");
     }
 
     // --- CLI parsing: global connection flags ---------------------------------

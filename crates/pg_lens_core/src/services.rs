@@ -23,7 +23,7 @@
 //! resolved paths in, and errors never echo passwords or command stdout.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -86,7 +86,12 @@ impl ServiceEntry {
 
 /// The parsed, validated services file. `BTreeMap` keeps service names
 /// sorted, so listings and "unknown service" errors are deterministic.
-#[derive(Debug, Deserialize)]
+///
+/// `Clone` exists so a [`crate::settings::ConnSpec`] can carry an
+/// already-resolved file (`services_override`, populated by
+/// `--config-url`'s local+remote merge) without re-reading disk on every
+/// `resolve`/`list_services` call.
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServicesFile {
     #[serde(default)]
@@ -189,6 +194,50 @@ impl ServicesFile {
     /// Sorted `(name, entry)` pairs — the basis for `--list-services`.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &ServiceEntry)> {
         self.services.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// An empty services file (no entries) — the base case when
+    /// `--config-url`'s local+remote merge finds neither.
+    pub fn empty() -> Self {
+        ServicesFile {
+            services: BTreeMap::new(),
+        }
+    }
+
+    /// Parses and validates bytes fetched from `--config-url` — the exact
+    /// same `[services.<name>]` TOML shape as [`ServicesFile::load`], minus
+    /// the on-disk permission checks (there is no local file to check; the
+    /// fetch's own transport — https, plus a token scoped to a private
+    /// repo — is the trust boundary here, not a Unix file mode). The bytes
+    /// this parses are themselves cached to a file `pg_lens` creates at
+    /// `0600` (see the TUI's `remote_config_cache_path`), so a later reload
+    /// from that cache still goes through the normal `load` permission path.
+    pub fn from_remote_bytes(bytes: &[u8]) -> Result<Self, SettingsError> {
+        let remote_path = PathBuf::from("<--config-url>");
+        let contents = String::from_utf8(bytes.to_vec()).map_err(|_| {
+            SettingsError::ServicesFileParse {
+                path: remote_path.clone(),
+                message: "remote services file is not valid UTF-8".to_string(),
+            }
+        })?;
+        let mut file: ServicesFile =
+            toml::from_str(&contents).map_err(|e| SettingsError::ServicesFileParse {
+                path: remote_path,
+                message: e.to_string(),
+            })?;
+        file.validate()?;
+        Ok(file)
+    }
+
+    /// Merges `remote` over `self` (the local file): entries in `remote`
+    /// replace any same-named local entry; local-only entries survive
+    /// untouched. This is `--config-url`'s precedence rule in full —
+    /// "remote wins per service name, local fills in the rest".
+    pub fn merge_remote_over(mut self, remote: ServicesFile) -> Self {
+        for (name, entry) in remote.services {
+            self.services.insert(name, entry);
+        }
+        self
     }
 }
 
@@ -538,6 +587,74 @@ mod tests {
             .expect_err("false must fail");
         assert!(matches!(err, SettingsError::PasswordCmd { .. }));
     }
+
+    // --- remote (--config-url) helpers -------------------------------------
+
+    #[test]
+    fn from_remote_bytes_parses_like_a_local_file() {
+        let file = ServicesFile::from_remote_bytes(PROD_SERVICE.as_bytes())
+            .expect("valid remote bytes must parse");
+        let entry = file.get("prod").expect("prod must exist");
+        assert_eq!(entry.host.as_deref(), Some("db.service.internal"));
+    }
+
+    #[test]
+    fn from_remote_bytes_rejects_invalid_utf8() {
+        let err = ServicesFile::from_remote_bytes(&[0xff, 0xfe, 0x00])
+            .expect_err("invalid utf-8 must fail");
+        assert!(matches!(err, SettingsError::ServicesFileParse { .. }));
+    }
+
+    #[test]
+    fn merge_remote_over_prefers_remote_by_name_and_keeps_local_only_entries() {
+        let local = parse(
+            r#"
+            [services.prod]
+            host = "local-prod"
+            [services.staging]
+            host = "local-staging"
+            "#,
+        )
+        .expect("local file");
+        let remote = parse(
+            r#"
+            [services.prod]
+            host = "remote-prod"
+            [services.ci]
+            host = "remote-ci"
+            "#,
+        )
+        .expect("remote file");
+        let merged = local.merge_remote_over(remote);
+        assert_eq!(
+            merged.get("prod").unwrap().host.as_deref(),
+            Some("remote-prod"),
+            "remote wins on a name collision"
+        );
+        assert_eq!(
+            merged.get("staging").unwrap().host.as_deref(),
+            Some("local-staging"),
+            "local-only entries survive"
+        );
+        assert_eq!(
+            merged.get("ci").unwrap().host.as_deref(),
+            Some("remote-ci"),
+            "remote-only entries are added"
+        );
+    }
+
+    #[test]
+    fn empty_has_no_services() {
+        let file = ServicesFile::empty();
+        assert!(file.iter().next().is_none());
+    }
+
+    const PROD_SERVICE: &str = r#"
+        [services.prod]
+        host = "db.service.internal"
+        port = 6432
+        user = "svc_user"
+    "#;
 
     #[tokio::test]
     async fn slow_commands_time_out() {
