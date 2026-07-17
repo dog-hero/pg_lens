@@ -486,6 +486,20 @@ fn picker_services(spec: &ConnSpec) -> Option<(Vec<ServiceSummary>, Vec<String>)
     }
 }
 
+/// `serve`'s fail-loud predicate (v0.13): is the connection ambiguous for a
+/// non-interactive process? A thin, `serve`-scoped wrapper around
+/// [`picker_services`] — the EXACT same "was a connection explicitly chosen?"
+/// rule the TUI uses to decide whether to show its picker (no `--dsn`/
+/// `--service`, no PGHOST/PGSERVICE/PG_LENS_SERVICE/PG_LENS_DSN, and a
+/// services file that exists and defines >=1 service). `serve` has no TTY
+/// to show a picker in, so where the TUI would pop one up, `serve` instead
+/// treats it as an error. Takes a [`ConnSpec`] (not `ConnArgs`) for the same
+/// reason `picker_services` does — testable without touching real process
+/// env, consistent with this module's "environment is injected" discipline.
+fn serve_ambiguous_services(spec: &ConnSpec) -> Option<(Vec<ServiceSummary>, Vec<String>)> {
+    picker_services(spec)
+}
+
 /// Builds the picker rows: one per service, rendered exactly as the file
 /// says (`?` for fields the entry leaves out — env/default fallbacks are
 /// NOT applied here), plus the trailing `localhost — (default)` entry that
@@ -796,6 +810,37 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
         return conn.list_services(overlay.as_ref());
     }
 
+    // Fail-loud on ambiguous resolution (v0.13): `serve` has no TTY for the
+    // TUI's interactive picker, so where the TUI would show that picker,
+    // `serve` must instead refuse to guess and exit — connecting to the
+    // wrong database silently (typically localhost) is a much worse outcome
+    // for an unattended process than a startup error.
+    if !conn.mock
+        && let Some((services, warnings)) =
+            serve_ambiguous_services(&conn.spec_with(overlay.as_ref()))
+    {
+        for warning in &warnings {
+            eprintln!("warning: {warning}");
+        }
+        let names = services
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        for service in &services {
+            eprintln!(
+                "  {name}\thost={host}\tuser={user}",
+                name = service.name,
+                host = service.host.as_deref().unwrap_or("-"),
+                user = service.user.as_deref().unwrap_or("-"),
+            );
+        }
+        return Err(eyre!(
+            "multiple services defined and none selected — pass --service <name> \
+             (available: {names})"
+        ));
+    }
+
     let listen = resolve_listen(args.listen, &config);
 
     // Empty tokens count as unset: `PG_LENS_AUTH_TOKEN= pg_lens serve`
@@ -817,11 +862,11 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
     // poller channels the TUI uses.
     let (admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    // U2's database picker is TUI-only for now (see ROADMAP): `serve` has no
-    // sender for this channel, so it is dropped right here — the poller's
-    // `wait_db_switch` branch of its select then never resolves again,
-    // exactly like an admin/interval sender no frontend wired up.
-    let (_db_switch_tx, db_switch_rx) = mpsc::channel::<String>(1);
+    // v0.13 web parity: `POST /api/db/switch` (the web twin of the TUI's `d`
+    // picker) sends here; the poller reconnects with the new dbname and
+    // resets its per-database state exactly as it does for the TUI. Kept
+    // alive (not dropped) so the router's `wait_db_switch` branch can resolve.
+    let (db_switch_tx, db_switch_rx) = mpsc::channel::<String>(4);
     let (snapshots, label, poller_handle) = spawn_poller(
         resolved,
         interval_rx,
@@ -833,7 +878,14 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
     );
 
     let read_only = conn.read_only(&config);
-    let router = pg_lens_web::router(snapshots, schema_refresh_tx, admin_tx, token, read_only);
+    let router = pg_lens_web::router(
+        snapshots,
+        schema_refresh_tx,
+        admin_tx,
+        db_switch_tx,
+        token,
+        read_only,
+    );
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
     // Operator info on stderr: bound address + auth mode + safe label
@@ -1490,6 +1542,66 @@ mod tests {
         assert!(
             picker_services(&spec_with_file(&file, &[])).is_none(),
             "group/other-writable file must fail the permission check"
+        );
+    }
+
+    // --- serve fail-loud predicate --------------------------------------------
+
+    /// A services file with no explicit selection is ambiguous — `serve`
+    /// must refuse rather than silently fall through to localhost.
+    #[test]
+    fn serve_ambiguous_with_services_file_and_no_selection() {
+        let file = services_file(TWO_SERVICES);
+        let spec = spec_with_file(&file, &[]);
+        assert!(
+            serve_ambiguous_services(&spec).is_some(),
+            "services file + no selection must be ambiguous"
+        );
+    }
+
+    /// `--service` makes the choice explicit: not ambiguous.
+    #[test]
+    fn serve_not_ambiguous_with_explicit_service_flag() {
+        let file = services_file(TWO_SERVICES);
+        let mut spec = spec_with_file(&file, &[]);
+        spec.service = Some("prod".to_string());
+        assert!(
+            serve_ambiguous_services(&spec).is_none(),
+            "--service resolves it"
+        );
+    }
+
+    /// `--dsn` is just as explicit as `--service`.
+    #[test]
+    fn serve_not_ambiguous_with_explicit_dsn() {
+        let file = services_file(TWO_SERVICES);
+        let mut spec = spec_with_file(&file, &[]);
+        spec.dsn = Some("host=x".to_string());
+        assert!(
+            serve_ambiguous_services(&spec).is_none(),
+            "--dsn resolves it"
+        );
+    }
+
+    /// No services file at all: nothing to be ambiguous about, the classic
+    /// localhost-default (or explicit env/DSN) path applies unchanged.
+    #[test]
+    fn serve_not_ambiguous_without_a_services_file() {
+        let spec = ConnSpec {
+            env: env(&[("HOME", "/nonexistent-home-for-test")]),
+            ..ConnSpec::default()
+        };
+        assert!(serve_ambiguous_services(&spec).is_none());
+    }
+
+    /// A connection-intent env var (e.g. `PGHOST`) is as explicit as a flag.
+    #[test]
+    fn serve_not_ambiguous_with_connection_env_var() {
+        let file = services_file(TWO_SERVICES);
+        let spec = spec_with_file(&file, &[("PGHOST", "explicit-host")]);
+        assert!(
+            serve_ambiguous_services(&spec).is_none(),
+            "PGHOST resolves it"
         );
     }
 

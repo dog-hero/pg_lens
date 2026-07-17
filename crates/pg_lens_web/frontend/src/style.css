@@ -53,6 +53,33 @@ body {
   font-size: 0.85rem;
 }
 
+/* ── database switcher (v0.13) ──────────────────────────────────────── */
+/* Minimal styling on purpose: a header redesign is a separate follow-up
+   task (see ROADMAP) that will restyle this whole area — this just needs
+   to work and not look broken in the meantime. */
+
+.current-db {
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.db-switcher {
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.db-switch-status {
+  color: var(--fg-dim);
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
 .conn-state {
   margin-left: auto;
   font-size: 0.8rem;

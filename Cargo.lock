@@ -1526,6 +1526,7 @@ dependencies = [
  "http-body-util",
  "pg_lens_core",
  "rust-embed",
+ "serde",
  "serde_json",
  "subtle",
  "tokio",

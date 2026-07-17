@@ -23,6 +23,18 @@ export interface ServerVitals {
   deadlocks: number;
 }
 
+/**
+ * One row of `pg_database` (U2 `databases` field, v0.13 web parity): the
+ * databases available on this cluster, feeding the header's database
+ * switcher (the web twin of the TUI's `d` picker).
+ */
+export interface DatabaseRow {
+  name: string;
+  /** `pg_database_size(datname)`; null when the connected role lacks
+   * CONNECT privilege on that OTHER database (best-effort per row). */
+  size_bytes: number | null;
+}
+
 export interface ActivityRow {
   pid: number;
   application_name: string;
@@ -414,6 +426,13 @@ export interface DbSnapshot {
    * error). Oldest (most suspect) first, capped at 100 rows.
    */
   idle_sessions: IdleSessionRow[] | null;
+  /**
+   * The databases available on this cluster (U2/v0.13), best-effort: null
+   * when the connected role can't list `pg_database` (restricted role) or
+   * on a single-database deployment — the header switcher hides itself in
+   * that case and just shows `vitals.database`.
+   */
+  databases: DatabaseRow[] | null;
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
 }

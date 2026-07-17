@@ -39,6 +39,26 @@ export async function requestSchemaRefresh(token: string | null): Promise<boolea
   }
 }
 
+/**
+ * POST /api/db/switch — web parity for the TUI's `d` database picker
+ * (v0.13). Unlike admin cancel/terminate, this works even when the server
+ * is running read-only (a database switch is a read-only reconnect, not a
+ * mutating action) — it is gated by the token alone, same as
+ * `requestSchemaRefresh`.
+ */
+export async function requestDbSwitch(token: string | null, database: string): Promise<boolean> {
+  try {
+    const res = await fetch("/api/db/switch", {
+      method: "POST",
+      headers: { ...authHeaders(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ database }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export type AdminKind = "cancel" | "terminate";
 
 export interface AdminResult {

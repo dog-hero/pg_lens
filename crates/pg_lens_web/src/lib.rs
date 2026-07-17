@@ -29,7 +29,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Json, Path, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -37,6 +37,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::stream::Stream;
 use pg_lens_core::{AdminCommand, DbSnapshot};
+use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch};
 
@@ -55,6 +56,13 @@ struct WebState {
     /// Admin commands (cancel/terminate) go here; the poller (sole DB owner)
     /// executes them. Only reachable when a token is configured.
     admin: mpsc::Sender<AdminCommand>,
+    /// v0.13 web parity for the TUI's `d` database picker: sending a name
+    /// here asks the poller to reconnect with that `dbname` and reset its
+    /// per-database state, exactly like the TUI. Unlike [`admin`], this is a
+    /// read-only reconnect (not a mutating action), so it is NOT gated by
+    /// [`read_only`] — only by the token, like `schema_refresh` (see
+    /// [`db_switch_handler`]).
+    db_switch: mpsc::Sender<String>,
     /// Read-only mode (`--read-only` / `PG_LENS_READ_ONLY` / config.toml,
     /// resolved by the CLI and handed in here). The REAL gate: [`admin`]
     /// refuses every admin request when this is true, BEFORE it even checks
@@ -128,6 +136,7 @@ pub fn router(
     snapshots: watch::Receiver<Arc<DbSnapshot>>,
     schema_refresh: watch::Sender<u64>,
     admin: mpsc::Sender<AdminCommand>,
+    db_switch: mpsc::Sender<String>,
     auth_token: Option<String>,
     read_only: bool,
 ) -> Router {
@@ -136,6 +145,7 @@ pub fn router(
         token: auth_token.map(Arc::from),
         schema_refresh,
         admin,
+        db_switch,
         read_only,
     };
     let api = Router::new()
@@ -149,6 +159,8 @@ pub fn router(
         .route("/schema/refresh", post(schema_refresh_handler))
         .route("/admin/cancel/{pid}", post(admin_cancel))
         .route("/admin/terminate/{pid}", post(admin_terminate))
+        // v0.13: web parity for the TUI's `d` database picker.
+        .route("/db/switch", post(db_switch_handler))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
         .nest("/api", api)
@@ -270,6 +282,53 @@ async fn schema_refresh_handler(State(state): State<WebState>) -> Response {
     (StatusCode::ACCEPTED, "schema refresh requested").into_response()
 }
 
+/// Body of `POST /api/db/switch`.
+#[derive(Deserialize)]
+struct DbSwitchRequest {
+    database: String,
+}
+
+/// `POST /api/db/switch` — web parity for the TUI's `d` database picker
+/// (v0.13): switches the poller's connection to a different database on the
+/// same server. Gated by [`require_auth`] like every other `/api` route
+/// (the token, when configured), but **deliberately NOT gated by
+/// `read_only`**: unlike cancel/terminate, this is not a mutating action
+/// against the connected database — it is a reconnect with a different
+/// `dbname`, still entirely read-only against whatever it lands on. The
+/// precedent this follows is `schema_refresh_handler` (token-gated only),
+/// not `admin` (token AND read-only gated).
+///
+/// The target must be a database name that's actually present in the
+/// current snapshot (`vitals` + `databases`) — this refuses arbitrary
+/// strings before they ever reach the poller's reconnect logic.
+async fn db_switch_handler(
+    State(state): State<WebState>,
+    Json(body): Json<DbSwitchRequest>,
+) -> Response {
+    let snapshot = state.snapshots.borrow().clone();
+    let known = snapshot.vitals.database == body.database
+        || snapshot
+            .databases
+            .as_ref()
+            .is_some_and(|dbs| dbs.iter().any(|d| d.name == body.database));
+    if !known {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("unknown database {:?}", body.database),
+        )
+            .into_response();
+    }
+    match state.db_switch.try_send(body.database) {
+        Ok(()) => (StatusCode::ACCEPTED, "database switch requested").into_response(),
+        // Full or closed: the poller is busy or gone — never block the request.
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "poller unavailable; try again",
+        )
+            .into_response(),
+    }
+}
+
 /// `GET /api/config` — small, non-secret feature flags the frontend needs to
 /// decide what to render (currently just `read_only`). Defense in depth
 /// only: the frontend uses this to grey out its own buttons, but the actual
@@ -378,6 +437,7 @@ mod tests {
         _snap_tx: watch::Sender<Arc<DbSnapshot>>,
         schema_refresh: watch::Receiver<u64>,
         admin_rx: mpsc::Receiver<AdminCommand>,
+        db_switch_rx: mpsc::Receiver<String>,
         router: Router,
     }
 
@@ -389,10 +449,12 @@ mod tests {
         let (snap_tx, snap_rx) = watch::channel(Arc::new(DbSnapshot::mock()));
         let (schema_tx, schema_rx) = watch::channel(0u64);
         let (admin_tx, admin_rx) = mpsc::channel(8);
+        let (db_switch_tx, db_switch_rx) = mpsc::channel(4);
         let router = router(
             snap_rx,
             schema_tx,
             admin_tx,
+            db_switch_tx,
             token.map(str::to_string),
             read_only,
         );
@@ -400,6 +462,7 @@ mod tests {
             _snap_tx: snap_tx,
             schema_refresh: schema_rx,
             admin_rx,
+            db_switch_rx,
             router,
         }
     }
@@ -417,6 +480,30 @@ mod tests {
         }
         router
             .oneshot(request.body(Body::empty()).expect("request builds"))
+            .await
+            .expect("infallible service")
+    }
+
+    async fn send_json(
+        router: Router,
+        method: &str,
+        uri: &str,
+        bearer: Option<&str>,
+        json_body: &str,
+    ) -> Response {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = bearer {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        router
+            .oneshot(
+                request
+                    .body(Body::from(json_body.to_string()))
+                    .expect("request builds"),
+            )
             .await
             .expect("infallible service")
     }
@@ -672,6 +759,106 @@ mod tests {
         let body = response.into_body().collect().await.expect("body").to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(value["read_only"], true);
+    }
+
+    // --- v0.13: POST /api/db/switch -------------------------------------------
+
+    /// A known database name (present in the mock's `databases` list) is
+    /// accepted and forwarded to the poller's switch channel.
+    #[tokio::test]
+    async fn db_switch_accepts_a_known_database() {
+        let mut h = mock_harness(None);
+        let response = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/db/switch",
+            None,
+            r#"{"database":"warehouse"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            h.db_switch_rx.try_recv().expect("forwarded"),
+            "warehouse".to_string()
+        );
+    }
+
+    /// The currently-connected database is also accepted (a no-op switch is
+    /// harmless, not an error case worth special-casing).
+    #[tokio::test]
+    async fn db_switch_accepts_the_current_database() {
+        let mut h = mock_harness(None);
+        let response = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/db/switch",
+            None,
+            r#"{"database":"shop"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(h.db_switch_rx.try_recv().expect("forwarded"), "shop".to_string());
+    }
+
+    /// An unknown database name is refused before ever reaching the poller.
+    #[tokio::test]
+    async fn db_switch_rejects_an_unknown_database() {
+        let mut h = mock_harness(None);
+        let response = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/db/switch",
+            None,
+            r#"{"database":"nope-does-not-exist"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(h.db_switch_rx.try_recv().is_err(), "nothing forwarded");
+    }
+
+    /// Token-gated like `schema_refresh` (not `admin`): a configured token
+    /// must be presented.
+    #[tokio::test]
+    async fn db_switch_is_token_gated_when_a_token_is_set() {
+        let mut h = mock_harness(Some("sekret"));
+        let denied = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/db/switch",
+            None,
+            r#"{"database":"warehouse"}"#,
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert!(h.db_switch_rx.try_recv().is_err());
+
+        let allowed = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/db/switch",
+            Some("sekret"),
+            r#"{"database":"warehouse"}"#,
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::ACCEPTED);
+        assert_eq!(h.db_switch_rx.try_recv().expect("forwarded"), "warehouse".to_string());
+    }
+
+    /// Unlike `admin`, a database switch is a read-only reconnect: it must
+    /// NOT be blocked by read-only mode.
+    #[tokio::test]
+    async fn db_switch_is_not_blocked_by_read_only_mode() {
+        let mut h = mock_harness_with(None, true);
+        let response = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/db/switch",
+            None,
+            r#"{"database":"warehouse"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(h.db_switch_rx.try_recv().expect("forwarded"), "warehouse".to_string());
     }
 
     #[test]

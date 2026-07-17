@@ -3,7 +3,14 @@
 
 import "./style.css";
 import type { AdminActionResult, ActivityRow, DbSnapshot, PollerStatus } from "./types";
-import { fetchConfig, requestAdmin, requestSchemaRefresh, type AdminKind } from "./actions";
+import {
+  fetchConfig,
+  requestAdmin,
+  requestDbSwitch,
+  requestSchemaRefresh,
+  type AdminKind,
+} from "./actions";
+import { populateDbSwitcher } from "./db_switcher";
 import { renderVitals } from "./vitals";
 import { HistoryChart } from "./chart";
 import { ActivityTable } from "./table";
@@ -31,6 +38,9 @@ function el<T extends HTMLElement>(id: string): T {
 }
 
 const serverInfo = el<HTMLSpanElement>("server-info");
+const currentDb = el<HTMLSpanElement>("current-db");
+const dbSwitcher = el<HTMLSelectElement>("db-switcher");
+const dbSwitchStatus = el<HTMLSpanElement>("db-switch-status");
 const readOnlyBadge = el<HTMLSpanElement>("read-only-badge");
 const connState = el<HTMLSpanElement>("conn-state");
 const statusBanner = el<HTMLDivElement>("status-banner");
@@ -80,6 +90,7 @@ const schemaLens = new SchemaLens(
   el<HTMLParagraphElement>("schema-staleness"),
   el<HTMLParagraphElement>("schema-warning"),
   el<HTMLParagraphElement>("schema-placeholder"),
+  document.getElementById("schema-filter") as HTMLInputElement | null,
 );
 const indexAdvisor = new IndexAdvisor(
   el<HTMLTableElement>("indexes"),
@@ -99,6 +110,7 @@ const statementsLens = new StatementsLens(
   el<HTMLParagraphElement>("statements-warning"),
   el<HTMLParagraphElement>("statements-placeholder"),
   el<HTMLDivElement>("statements-unavailable"),
+  document.getElementById("statements-filter") as HTMLInputElement | null,
 );
 
 // Tab switcher (U1: five top-level tabs, mirroring the TUI's six lenses —
@@ -205,6 +217,34 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   announceAdmin(snapshot.last_admin_action);
   const v = snapshot.vitals;
   serverInfo.textContent = `PG ${v.server_version} · ${v.connections_total}/${v.max_connections} conns`;
+  // v0.13: current database, prominent regardless of whether the switcher
+  // itself has anything to offer (fixes the documented drift — it used to
+  // be buried in `serverInfo`'s trailing text).
+  currentDb.textContent = v.database;
+  if (!switching) {
+    populateDbSwitcher(dbSwitcher, snapshot.databases, v.database);
+  }
+}
+
+// v0.13: true while a switch request is in flight — the dropdown is left
+// alone until the next snapshot confirms the new database (no optimistic
+// update; see `onDbSwitch`).
+let switching = false;
+
+dbSwitcher.addEventListener("change", () => void onDbSwitch(dbSwitcher.value));
+
+async function onDbSwitch(database: string): Promise<void> {
+  switching = true;
+  dbSwitcher.disabled = true;
+  dbSwitchStatus.hidden = false;
+  dbSwitchStatus.textContent = "switching…";
+  const ok = await requestDbSwitch(activeToken, database);
+  dbSwitcher.disabled = false;
+  dbSwitchStatus.hidden = true;
+  switching = false;
+  if (!ok) {
+    showToast(`Failed to switch to ${database}`, true);
+  }
 }
 
 /** Surface an admin action's outcome once (deduped by at_epoch_ms). */

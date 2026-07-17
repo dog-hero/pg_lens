@@ -10,6 +10,14 @@
     <div id="app">
       <header id="topbar">
         <span class="brand">pg_lens</span>
+        <span id="current-db" class="current-db"></span>
+        <select
+          id="db-switcher"
+          class="db-switcher"
+          hidden
+          title="Switch database (reconnects the server to a different database on the same cluster)"
+        ></select>
+        <span id="db-switch-status" class="db-switch-status" hidden></span>
         <span id="server-info" class="server-info"></span>
         <span
           id="read-only-badge"
@@ -121,6 +129,14 @@
               Refresh
             </button>
           </h2>
+          <input
+            id="schema-filter"
+            class="filter-input"
+            type="search"
+            placeholder="Filter by schema or table…"
+            autocomplete="off"
+            spellcheck="false"
+          />
           <p id="schema-staleness" class="staleness"></p>
           <p id="schema-warning" class="inline-warning" hidden></p>
           <p id="schema-placeholder" class="placeholder">collecting…</p>
@@ -153,6 +169,14 @@
         </section>
         <section id="queries-panel" class="panel" role="tabpanel" hidden>
           <h2>Queries <span class="panel-note">pg_stat_statements</span></h2>
+          <input
+            id="statements-filter"
+            class="filter-input"
+            type="search"
+            placeholder="Filter by query text…"
+            autocomplete="off"
+            spellcheck="false"
+          />
           <p id="statements-staleness" class="staleness"></p>
           <p id="statements-warning" class="inline-warning" hidden></p>
           <p id="statements-placeholder" class="placeholder">collecting…</p>
