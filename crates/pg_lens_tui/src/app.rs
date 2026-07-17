@@ -161,6 +161,10 @@ pub enum SchemaSortMode {
     BloatPct,
     /// Most sequential scans first.
     SeqScans,
+    /// v0.14: largest `|Δ1h|` (absolute bytes) first — surfaces the fastest
+    /// growers AND the fastest shrinkers at the top; tables with no growth
+    /// reading yet (fresh session/table) sort last.
+    Growth,
 }
 
 impl SchemaSortMode {
@@ -169,7 +173,8 @@ impl SchemaSortMode {
             SchemaSortMode::TotalSize => SchemaSortMode::DeadTuples,
             SchemaSortMode::DeadTuples => SchemaSortMode::BloatPct,
             SchemaSortMode::BloatPct => SchemaSortMode::SeqScans,
-            SchemaSortMode::SeqScans => SchemaSortMode::TotalSize,
+            SchemaSortMode::SeqScans => SchemaSortMode::Growth,
+            SchemaSortMode::Growth => SchemaSortMode::TotalSize,
         }
     }
 
@@ -179,6 +184,7 @@ impl SchemaSortMode {
             SchemaSortMode::DeadTuples => "dead",
             SchemaSortMode::BloatPct => "bloat%",
             SchemaSortMode::SeqScans => "seq",
+            SchemaSortMode::Growth => "\u{394}1h",
         }
     }
 }
@@ -291,6 +297,9 @@ pub enum StatementsSortMode {
     Mean,
     /// Most rows first.
     Rows,
+    /// Heaviest temp-file (work_mem) spillers first, by `temp_blks_written`
+    /// (v0.14) — the #1 query-tuning signal this lens adds.
+    Temp,
 }
 
 impl StatementsSortMode {
@@ -299,7 +308,8 @@ impl StatementsSortMode {
             StatementsSortMode::TotalTime => StatementsSortMode::Calls,
             StatementsSortMode::Calls => StatementsSortMode::Mean,
             StatementsSortMode::Mean => StatementsSortMode::Rows,
-            StatementsSortMode::Rows => StatementsSortMode::TotalTime,
+            StatementsSortMode::Rows => StatementsSortMode::Temp,
+            StatementsSortMode::Temp => StatementsSortMode::TotalTime,
         }
     }
 
@@ -309,6 +319,7 @@ impl StatementsSortMode {
             StatementsSortMode::Calls => "calls",
             StatementsSortMode::Mean => "mean",
             StatementsSortMode::Rows => "rows",
+            StatementsSortMode::Temp => "temp",
         }
     }
 }
@@ -1832,6 +1843,16 @@ fn resort_schema(app: &mut App) {
                 .cmp(&rows[a].seq_scan)
                 .then_with(|| by_size_then_name(a, b))
         }),
+        SchemaSortMode::Growth => {
+            // Descending by |Δ1h bytes|; unknown growth (`None`) sorts
+            // last, keyed as -1 (a valid |delta| is always >= 0).
+            let abs_growth = |i: usize| rows[i].growth_1h_bytes.map_or(-1, i64::abs);
+            order.sort_by(|&a, &b| {
+                abs_growth(b)
+                    .cmp(&abs_growth(a))
+                    .then_with(|| by_size_then_name(a, b))
+            });
+        }
     }
     app.schema_row_order = order;
 }
@@ -1937,6 +1958,12 @@ fn resort_statements(app: &mut App) {
             rows[b]
                 .rows
                 .cmp(&rows[a].rows)
+                .then_with(|| tiebreak(a, b))
+        }),
+        StatementsSortMode::Temp => order.sort_by(|&a, &b| {
+            rows[b]
+                .temp_blks_written
+                .cmp(&rows[a].temp_blks_written)
                 .then_with(|| tiebreak(a, b))
         }),
     }
@@ -3033,6 +3060,14 @@ mod tests {
         let seqs = schema_displayed(&app, |t| t.seq_scan);
         assert!(seqs.windows(2).all(|w| w[0] >= w[1]));
 
+        // s → |Δ1h| descending (mock's biggest grower: order_items), unknown
+        // growth (raw_events, no ring sample yet in mock) sorts last.
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.schema_sort_mode, SchemaSortMode::Growth);
+        let names = schema_displayed(&app, |t| t.name.clone());
+        assert_eq!(names[0], "order_items", "largest |growth| first");
+        assert_eq!(names[names.len() - 1], "raw_events", "unknown growth sorts last");
+
         // s → back to size; the Micro Lens sort was never touched.
         update(&mut app, press(KeyCode::Char('s')));
         assert_eq!(app.schema_sort_mode, SchemaSortMode::TotalSize);
@@ -3212,6 +3247,13 @@ mod tests {
         assert_eq!(app.statements_sort_mode, StatementsSortMode::Rows);
         let rows = statements_displayed(&app, |s| s.rows);
         assert!(rows.windows(2).all(|w| w[0] >= w[1]));
+
+        // s → temp-spill descending (v0.14: the heaviest spiller first).
+        update(&mut app, press(KeyCode::Char('s')));
+        assert_eq!(app.statements_sort_mode, StatementsSortMode::Temp);
+        let temp = statements_displayed(&app, |s| s.temp_blks_written);
+        assert!(temp.windows(2).all(|w| w[0] >= w[1]));
+        assert!(temp[0] > 0, "the mock's heavy spiller must sort first");
 
         // s → back to total; the other lenses' sorts were never touched.
         update(&mut app, press(KeyCode::Char('s')));

@@ -111,6 +111,28 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 - **Modern Web Lens dashboard** — a redesigned dashboard: sidenav, a
   database switcher, a light/dark theme toggle, and full keyboard
   navigation; see [Web Lens](#web-lens).
+- **Vitals trend arrows** — the Macro Lens vitals cards (Connections,
+  Cache hit, Lock table) show a `↑`/`↓`/`→` trend arrow comparing the
+  current reading against ~5 minutes ago (5% deadband), tinted yellow only
+  when the direction is the concerning one. TUI + Web (web adds a tooltip
+  with the exact delta).
+- **History time-scrubber** (Web Lens only) — hover the TPS/sessions chart
+  for a live readout of that moment's vitals, click to pin it (survives the
+  live stream), `←`/`→` to step tick-by-tick, `Esc`/`✕` to unpin; see
+  [Web Lens](#web-lens).
+- **Table size growth (Schema Lens)** — a `Δ1h` column showing signed
+  size change over the last hour per table, tinted yellow/red past 10%/25%
+  growth on tables ≥10 MiB; a new "growth" mode in the `s` sort cycle. TUI
+  + Web.
+- **Query I/O & temp-spill profile (Query Lens)** — a `Temp` column (temp
+  bytes written, tinted yellow past 100 MiB) plus a full I/O breakdown
+  (temp read/written, shared blocks dirtied/written, block read/write
+  time, WAL bytes) in the `Enter` detail panel; a new "temp" mode in the
+  `s` sort cycle. TUI + Web.
+- **Interactive `serve` service picker** — on a real terminal, `pg_lens
+  serve` with an ambiguous `services.toml` now prompts with a numbered
+  list instead of only failing loud; non-TTY processes keep the fail-loud
+  behavior. See [Quickstart](#quickstart).
 - **Keyboard help overlay** — press `?` for a full reference of every
   binding, grouped by navigation / sub-views / data / admin / quit.
 - **Read-only mode** — `--read-only` / `PG_LENS_READ_ONLY` / config.toml
@@ -161,9 +183,9 @@ prefer `curl` — browser downloads get the quarantine attribute and
 Gatekeeper will refuse to run the unsigned binary:
 
 ```sh
-# macOS (Apple Silicon) — replace v0.13.0 with the latest tag from the releases page
-curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.13.0/pg_lens-v0.13.0-aarch64-apple-darwin.tar.gz | tar xz
-./pg_lens-v0.13.0-aarch64-apple-darwin/pg_lens --mock
+# macOS (Apple Silicon) — replace v0.14.0 with the latest tag from the releases page
+curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.14.0/pg_lens-v0.14.0-aarch64-apple-darwin.tar.gz | tar xz
+./pg_lens-v0.14.0-aarch64-apple-darwin/pg_lens --mock
 ```
 
 If you already downloaded it with a browser and macOS says the app
@@ -253,13 +275,13 @@ forbids `_` in package names); it installs `/usr/bin/pg_lens` plus docs
 and has no dependencies.
 
 ```sh
-# Debian / Ubuntu (pick amd64 or arm64) — replace 0.13.0 with the latest release
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.13.0/pg-lens_0.13.0_amd64.deb
-sudo dpkg -i pg-lens_0.13.0_amd64.deb
+# Debian / Ubuntu (pick amd64 or arm64) — replace 0.14.0 with the latest release
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.14.0/pg-lens_0.14.0_amd64.deb
+sudo dpkg -i pg-lens_0.14.0_amd64.deb
 
 # RHEL / Fedora / SUSE (x86_64 or aarch64)
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.13.0/pg-lens-0.13.0-1.x86_64.rpm
-sudo rpm -i pg-lens-0.13.0-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.13.0-1.x86_64.rpm
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.14.0/pg-lens-0.14.0-1.x86_64.rpm
+sudo rpm -i pg-lens-0.14.0-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.14.0-1.x86_64.rpm
 ```
 
 ### Cargo (crates.io)
@@ -500,9 +522,13 @@ restarts**: each sample is appended to
 `~/.local/state/pg_lens/history-<host>_<port>_<db>.jsonl`
 (`$XDG_STATE_HOME` if set), per connection target, and reloaded on start so
 the chart resumes with prior data instead of a blank canvas. The default ring
-holds an hour at the 2s poll. Persistence is entirely best-effort — a
-read-only or full state directory just falls back to in-memory only, and the
-file self-compacts so it never grows without bound.
+holds an hour at the 2s poll. Since v0.14 each sample also carries
+connections, cache-hit%, lock-pressure%, and oldest-XID age (powering the
+trend arrows and the web time-scrubber); JSONL files written by older
+versions load in place seamlessly, with those fields simply unknown until
+the ring refills. Persistence is entirely best-effort — a read-only or full
+state directory just falls back to in-memory only, and the file
+self-compacts so it never grows without bound.
 
 ### Keybindings
 
@@ -683,6 +709,16 @@ there's only one database.
 active panel's filter input, `Esc` blurs it; shortcuts are suppressed while
 a text input has focus (except `Esc`).
 
+**History time-scrubber** — hover over the TPS/sessions chart for a live
+readout of that moment's vitals (TPS, sessions, connections, cache hit%,
+lock pressure%, oldest-XID age); click to pin the moment (a dashed marker
+appears on the chart, and the pin survives the live SSE stream since it's
+keyed by timestamp, not index). `✕`, `Esc`, or clicking again unpins;
+`←`/`→` step the pinned moment one history sample at a time. A pinned
+moment that ages out of the 1h history window unpins itself with a toast.
+Vitals trend arrows dim while pinned so they don't appear to describe the
+pinned moment.
+
 <!-- TODO: screenshot of the web dashboard -->
 
 ### Quickstart
@@ -696,13 +732,18 @@ pg_lens serve --listen 127.0.0.1:9000     # different port (default 8080)
 Open the printed address in a browser — the dashboard updates in real time
 on every poll.
 
-**Fail-loud on ambiguous services** — `serve` has no TTY to show the TUI's
-interactive service picker. If a `services.toml` defines one or more
-services and none is chosen (`--service` / `--dsn` / `PGSERVICE` /
-`PG_LENS_SERVICE` / `PG_LENS_DSN` all unset), `pg_lens serve` refuses to
-guess: it prints the available service names (host/user, never secrets) to
-stderr and exits non-zero, instead of silently connecting to `localhost`.
-Pass `--service <name>` (or `--dsn`) to disambiguate.
+**Ambiguous services: prompt on a TTY, fail loud otherwise** — if a
+`services.toml` defines one or more services and none is chosen
+(`--service` / `--dsn` / `PGSERVICE` / `PG_LENS_SERVICE` / `PG_LENS_DSN`
+all unset), `pg_lens serve` refuses to silently connect to `localhost`. On
+a real terminal (stdin is a TTY) it now prompts with the same numbered
+picker the TUI uses — index or name, re-prompting on invalid input, with
+a single defined service auto-selected and a notice printed instead of a
+prompt. Piped/daemonized/CI invocations (no TTY) keep the original
+fail-loud behavior: it prints the available service names (host/user,
+never secrets) to stderr and exits non-zero, so an unattended process
+never hangs waiting on stdin. Pass `--service <name>` (or `--dsn`) to
+skip the prompt/disambiguate either way.
 
 The frontend (Vite + TypeScript, `crates/pg_lens_web/frontend/`) is
 embedded in the binary at compile time. Building with the `web` feature
@@ -755,10 +796,13 @@ waits panel, Vacuum sub-view), v0.9 "problem transactions" (idle-in-tx
 hunter, blocking-chain graph, prepared-transaction watch, keyboard help
 overlay), v0.10 (read-only mode, remote connection config), v0.11
 "incident precursors & connection visibility" (idle-connection census,
-lock-table pressure gauge, invalid-index flag, `psql` shell launch), and
-v0.13 (tab-number navigation and fast scroll, Schema/Query Lens filters,
-a modern Web Lens redesign with a database switcher and keyboard
-navigation). See [ROADMAP.md](ROADMAP.md) for what's next.
+lock-table pressure gauge, invalid-index flag, `psql` shell launch), v0.13
+(tab-number navigation and fast scroll, Schema/Query Lens filters, a
+modern Web Lens redesign with a database switcher and keyboard
+navigation), and v0.14 "see the trend, not just the moment" (vitals trend
+arrows, a web history time-scrubber, Schema Lens `Δ1h` size growth, Query
+Lens temp-spill/I/O profile, an interactive `serve` service picker). See
+[ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Changelog
 

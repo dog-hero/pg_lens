@@ -16,6 +16,7 @@ pub mod poller;
 pub mod prepared_xacts;
 pub mod queries;
 pub mod remote_config;
+pub mod schema_growth;
 pub mod services;
 pub mod settings;
 pub mod waits;
@@ -26,7 +27,9 @@ pub mod xact_age;
 pub use tokio_postgres;
 
 pub use blocking::{BlockingChain, blocking_chain};
-pub use history::{HistoryPoint, SnapshotHistory};
+pub use history::{
+    HistoryPoint, SnapshotHistory, TREND_DEADBAND, TREND_LOOKBACK_TICKS, Trend, trend,
+};
 pub use index_advisor::{IndexCatalogRow, classify as classify_indexes};
 pub use models::{
     ActivityRow, AdminActionResult, AdminCommand, AdminKind, AdminOutcome, BloatRow,

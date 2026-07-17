@@ -25,22 +25,23 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use pg_lens_core::schema_growth;
 use pg_lens_core::{BloatRow, SchemaSnapshot, SchemaStatus, VacuumTableRow};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Clear, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap},
 };
 
 use crate::app::{App, SchemaView, find_table_bloat, find_table_for_vacuum_row};
 use crate::ui::{format, style, vacuum};
 
 /// Fixed widths of every column except the flexible Table one, in order:
-/// severity, Size, Live, Dead, Bloat%, Bloat, Last AV, Seq/Idx.
+/// severity, Size, Δ1h, Live, Dead, Bloat%, Bloat, Last AV, Seq/Idx.
 const SEVERITY_WIDTH: u16 = 2;
-const FIXED_WIDTHS: [u16; 7] = [9, 6, 6, 7, 9, 10, 11];
+const FIXED_WIDTHS: [u16; 8] = [9, 9, 6, 6, 7, 9, 10, 11];
 const COLUMN_SPACING: u16 = 1;
 /// Highlight symbol "▶ " rendered left of the selected row.
 const HIGHLIGHT_WIDTH: u16 = 2;
@@ -382,7 +383,16 @@ fn draw_prepared_xacts(app: &App, frame: &mut Frame, area: Rect) {
 
 fn draw_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
     let header = Row::new([
-        "!", "Table", "Size", "Live", "Dead", "Bloat%", "Bloat", "Last AV", "Seq/Idx",
+        "!",
+        "Table",
+        "Size",
+        "\u{394}1h",
+        "Live",
+        "Dead",
+        "Bloat%",
+        "Bloat",
+        "Last AV",
+        "Seq/Idx",
     ])
     .style(Style::new().bold());
 
@@ -430,19 +440,29 @@ fn draw_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: R
                     .idx_scan
                     .map_or_else(|| "\u{2014}".to_string(), format::human_count),
             );
+            let growth_text = table
+                .growth_1h_bytes
+                .map_or_else(|| "\u{2014}".to_string(), format::human_bytes_signed);
+            let growth_sev = schema_growth::severity(table.total_bytes, table.growth_1h_pct);
+            let growth_style = match growth_sev {
+                Some(schema_growth::Severity::Bad) => Style::new().fg(Color::Red).bold(),
+                Some(schema_growth::Severity::Warn) => Style::new().fg(Color::Yellow),
+                None => Style::new(),
+            };
             Row::new([
-                marker.to_string(),
-                format::truncate_with_ellipsis(
+                Cell::from(marker.to_string()),
+                Cell::from(format::truncate_with_ellipsis(
                     &format!("{}.{}", table.schema, table.name),
                     table_width,
-                ),
-                format::human_bytes(table.total_bytes),
-                format::human_count(table.n_live_tup),
-                format::human_count(table.n_dead_tup),
-                bloat_pct,
-                bloat_bytes,
-                last_av,
-                seq_idx,
+                )),
+                Cell::from(format::human_bytes(table.total_bytes)),
+                Cell::from(growth_text).style(growth_style),
+                Cell::from(format::human_count(table.n_live_tup)),
+                Cell::from(format::human_count(table.n_dead_tup)),
+                Cell::from(bloat_pct),
+                Cell::from(bloat_bytes),
+                Cell::from(last_av),
+                Cell::from(seq_idx),
             ])
             .style(style)
         });
@@ -457,6 +477,7 @@ fn draw_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: R
         Constraint::Length(FIXED_WIDTHS[4]),
         Constraint::Length(FIXED_WIDTHS[5]),
         Constraint::Length(FIXED_WIDTHS[6]),
+        Constraint::Length(FIXED_WIDTHS[7]),
     ];
 
     let table = Table::new(rows, widths)
@@ -547,7 +568,8 @@ fn draw_table_empty(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area:
 /// width (same arithmetic as the Micro Lens's query column).
 fn table_column_width(area_width: u16) -> usize {
     let fixed: u16 = FIXED_WIDTHS.iter().sum::<u16>() + SEVERITY_WIDTH;
-    let overhead = 2 /* block borders */ + HIGHLIGHT_WIDTH + fixed + 8 * COLUMN_SPACING;
+    // 10 columns total (severity, Table, + 8 FIXED_WIDTHS) => 9 gaps.
+    let overhead = 2 /* block borders */ + HIGHLIGHT_WIDTH + fixed + 9 * COLUMN_SPACING;
     usize::from(area_width.saturating_sub(overhead))
 }
 
@@ -725,8 +747,8 @@ mod tests {
 
     #[test]
     fn table_width_shrinks_with_the_terminal_and_never_underflows() {
-        // 120 cols: 120 - (2 + 2 + 60 + 8) = 48 chars for the table name.
-        assert_eq!(table_column_width(120), 48);
+        // 120 cols: 120 - (2 + 2 + 69 + 9) = 38 chars for the table name.
+        assert_eq!(table_column_width(120), 38);
         assert!(table_column_width(80) < table_column_width(120));
         assert_eq!(table_column_width(10), 0);
     }

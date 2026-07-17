@@ -13,6 +13,16 @@ import {
 import { populateDbSwitcher } from "./db_switcher";
 import { renderVitals } from "./vitals";
 import { HistoryChart } from "./chart";
+import {
+  cacheHitReadoutSeverity,
+  formatPinAge,
+  formatReadoutTime,
+  lockPressureReadoutSeverity,
+  readoutAtIndex,
+  resolvePinnedIndex,
+  type ReadoutPoint,
+} from "./scrubber";
+import type { SnapshotHistory } from "./types";
 import { ActivityTable } from "./table";
 import { SchemaLens } from "./schema";
 import { IndexAdvisor } from "./index-advisor";
@@ -32,6 +42,7 @@ import {
 } from "./stream";
 import { loadStoredTheme, nextTheme, resolveInitialTheme, saveTheme, type Theme } from "./theme";
 import { filterInputIdForPanel, isEditableTag, tabIdForKey } from "./keyboard";
+import { humanCount } from "./format";
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -67,7 +78,34 @@ let activeToken: string | null = null;
 // handler is the real, unconditional gate (see pg_lens_web::admin).
 let readOnly = false;
 
-const chart = new HistoryChart(el<HTMLDivElement>("chart"));
+const scrubReadout = el<HTMLDivElement>("scrub-readout");
+const scrubReadoutTime = el<HTMLSpanElement>("scrub-readout-time");
+const scrubReadoutPinnedHint = el<HTMLSpanElement>("scrub-readout-pinned-hint");
+const scrubReadoutTps = el<HTMLElement>("scrub-readout-tps");
+const scrubReadoutSessions = el<HTMLElement>("scrub-readout-sessions");
+const scrubReadoutConns = el<HTMLElement>("scrub-readout-conns");
+const scrubReadoutCache = el<HTMLElement>("scrub-readout-cache");
+const scrubReadoutLock = el<HTMLElement>("scrub-readout-lock");
+const scrubReadoutXidWrap = el<HTMLSpanElement>("scrub-readout-xid-wrap");
+const scrubReadoutXid = el<HTMLElement>("scrub-readout-xid");
+const scrubUnpinBtn = el<HTMLButtonElement>("scrub-unpin");
+
+const chart = new HistoryChart(el<HTMLDivElement>("chart"), {
+  onHover: (idx) => {
+    if (pinnedEpochMs !== null) return; // pinned readout holds until unpinned
+    const r = readoutAtIndex(currentHistory, idx);
+    if (r === null) hideReadout();
+    else renderReadout(r, false);
+  },
+  onClick: (idx) => {
+    if (pinnedEpochMs !== null) {
+      unpinScrub();
+      return;
+    }
+    const r = readoutAtIndex(currentHistory, idx);
+    if (r !== null) pinScrub(r);
+  },
+});
 const table = new ActivityTable(
   el<HTMLTableElement>("activity"),
   document.getElementById("activity-filter") as HTMLInputElement | null,
@@ -78,6 +116,81 @@ const table = new ActivityTable(
   },
 );
 const vitalsContainer = el<HTMLElement>("vitals");
+
+// ── history time-scrubber (v0.14) ─────────────────────────────────────────
+// `currentHistory` is whatever the chart is currently plotting (kept in
+// sync with every snapshot so the chart's hover/click callbacks — fired
+// from uPlot's own event loop, not ours — can resolve a data index into a
+// moment). `pinnedEpochMs` identifies the pinned moment by TIMESTAMP, not
+// index: the ring buffer shifts under incoming SSE snapshots, so only the
+// timestamp survives across updates (see scrubber.ts's resolvePinnedIndex).
+let currentHistory: SnapshotHistory = { cap: 0, points: [] };
+let pinnedEpochMs: number | null = null;
+
+function pctText(pct: number | null): string {
+  return pct === null ? "—" : `${pct.toFixed(1)}%`;
+}
+
+function renderReadout(r: ReadoutPoint, pinned: boolean): void {
+  scrubReadoutTime.textContent = formatReadoutTime(r.epochMs);
+  scrubReadoutTps.textContent = humanCount(r.tps);
+  scrubReadoutSessions.textContent = humanCount(r.activeSessions);
+  scrubReadoutConns.textContent = humanCount(r.connectionsTotal);
+  scrubReadoutCache.textContent = pctText(r.cacheHitPct);
+  scrubReadoutCache.className = cacheHitReadoutSeverity(r.cacheHitPct);
+  scrubReadoutLock.textContent = pctText(r.lockPressurePct);
+  scrubReadoutLock.className = lockPressureReadoutSeverity(r.lockPressurePct);
+  if (r.oldestXidAge === null) {
+    scrubReadoutXidWrap.hidden = true;
+  } else {
+    scrubReadoutXidWrap.hidden = false;
+    scrubReadoutXid.textContent = humanCount(r.oldestXidAge);
+  }
+  scrubReadoutPinnedHint.hidden = !pinned;
+  if (pinned) {
+    scrubReadoutPinnedHint.textContent = `(pinned ${formatPinAge(r.epochMs, Date.now())})`;
+  }
+  scrubUnpinBtn.hidden = !pinned;
+  scrubReadout.hidden = false;
+  scrubReadout.classList.toggle("pinned", pinned);
+}
+
+function hideReadout(): void {
+  scrubReadout.hidden = true;
+}
+
+function pinScrub(r: ReadoutPoint): void {
+  pinnedEpochMs = r.epochMs;
+  chart.setPinMarker(r.epochMs / 1000);
+  vitalsContainer.classList.add("scrub-pinned");
+  renderReadout(r, true);
+}
+
+function unpinScrub(): void {
+  pinnedEpochMs = null;
+  chart.setPinMarker(null);
+  vitalsContainer.classList.remove("scrub-pinned");
+  hideReadout();
+}
+
+scrubUnpinBtn.addEventListener("click", unpinScrub);
+
+/** Called once per rendered snapshot: while pinned, re-resolves the pinned
+ * timestamp against the freshly-streamed history — gracefully unpinning
+ * ("moment aged out") once it scrolls out of the 1h ring, and otherwise just
+ * refreshing the "(pinned Xm ago)" hint (the readout's own values are frozen
+ * — a pinned `HistoryPoint` never changes once pushed). */
+function refreshPinnedScrub(): void {
+  if (pinnedEpochMs === null) return;
+  const idx = resolvePinnedIndex(currentHistory, pinnedEpochMs);
+  if (idx === null) {
+    showToast("Pinned moment aged out of the history window", true);
+    unpinScrub();
+    return;
+  }
+  const r = readoutAtIndex(currentHistory, idx);
+  if (r !== null) renderReadout(r, true);
+}
 const waitsStrip = el<HTMLDivElement>("waits-strip");
 const waitsDetail = el<HTMLDetailsElement>("waits-detail");
 const waitsDetailSummary = el<HTMLElement>("waits-detail-summary");
@@ -158,10 +271,28 @@ window.addEventListener("keydown", (event) => {
   const active = document.activeElement;
   const editing = active instanceof HTMLElement && isEditableTag(active.tagName);
   if (event.key === "Escape") {
+    // v0.14: Esc also unpins a scrubbed moment — checked before the blur so
+    // both happen on one keypress regardless of what else has focus.
+    if (pinnedEpochMs !== null) unpinScrub();
     if (active instanceof HTMLElement) active.blur();
     return;
   }
   if (editing) return;
+  // v0.14: while a moment is pinned, Left/Right steps it one history sample
+  // at a time — a lightweight way to walk through an incident tick by tick.
+  if (pinnedEpochMs !== null && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    const idx = resolvePinnedIndex(currentHistory, pinnedEpochMs);
+    if (idx !== null) {
+      const nextIdx =
+        event.key === "ArrowLeft" ? Math.max(0, idx - 1) : Math.min(currentHistory.points.length - 1, idx + 1);
+      const r = readoutAtIndex(currentHistory, nextIdx);
+      if (r !== null) {
+        event.preventDefault();
+        pinScrub(r);
+      }
+    }
+    return;
+  }
   const tabId = tabIdForKey(event.key);
   if (tabId !== null) {
     event.preventDefault();
@@ -236,6 +367,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.schema?.vacuum_cluster_age ?? null,
     snapshot.checkpointer,
     snapshot.lock_capacity,
+    snapshot.history,
   );
   renderReplication(
     replicationBody,
@@ -243,7 +375,9 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.replication,
     snapshot.replication_slots,
   );
+  currentHistory = snapshot.history;
   chart.update(snapshot.history);
+  refreshPinnedScrub();
   // Top waits: aggregated over the FULL activity set (never the filtered
   // subset — it answers "what is the server stuck on"), mirroring the
   // TUI's strip above the activity table.

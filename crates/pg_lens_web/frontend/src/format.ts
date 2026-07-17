@@ -28,6 +28,14 @@ export function humanBytes(bytes: number): string {
   return `${value.toFixed(digits)} ${units[unit]}`;
 }
 
+/** Signed human byte delta for growth columns: `+120 MB`, `-3.1 MB` — unlike
+ * `humanBytes`, preserves the sign (shrinkage is a valid, meaningful
+ * reading, never clamped away). Mirrors the TUI's `human_bytes_signed`. */
+export function humanBytesSigned(bytes: number): string {
+  if (!Number.isFinite(bytes)) return "-";
+  return bytes < 0 ? `-${humanBytes(-bytes)}` : `+${humanBytes(bytes)}`;
+}
+
 /** Thousands-separated integer, e.g. `1,254`. */
 export function humanCount(n: number): string {
   return Math.round(n).toLocaleString("en-US");

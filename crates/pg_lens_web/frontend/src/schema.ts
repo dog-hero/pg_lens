@@ -10,10 +10,17 @@
 // - clicking a row toggles a detail row listing that table's index bloat.
 
 import type { BloatRow, SchemaSnapshot, TableStatRow } from "./types";
-import { humanAgo, humanBytes, humanCount, humanDuration } from "./format.ts";
+import {
+  humanAgo,
+  humanBytes,
+  humanBytesSigned,
+  humanCount,
+  humanDuration,
+} from "./format.ts";
 
 const NO_ESTIMATE = "~?";
 const NO_ESTIMATE_TITLE = "estimated (needs fresh ANALYZE)";
+const NO_GROWTH = "—";
 
 type Severity = "red" | "yellow" | "na" | "none";
 
@@ -29,9 +36,30 @@ export function severity(bloat: BloatRow | undefined): Severity {
   return "none";
 }
 
+/** v0.14 growth severity — mirrors `pg_lens_core::schema_growth::{severity,
+ * WARN_GROWTH_PCT, BAD_GROWTH_PCT, SEVERITY_MIN_TABLE_BYTES}` exactly.
+ * Never colors a table under the absolute size floor, no matter the
+ * percentage — a 2 KB scratch table doubling is not an incident. */
+export const WARN_GROWTH_PCT = 10;
+export const BAD_GROWTH_PCT = 25;
+export const SEVERITY_MIN_TABLE_BYTES = 10 * 1024 * 1024;
+
+export function growthSeverity(
+  totalBytes: number,
+  growthPct: number | null,
+): "red" | "yellow" | "none" {
+  if (totalBytes < SEVERITY_MIN_TABLE_BYTES || growthPct === null)
+    return "none";
+  const pct = Math.abs(growthPct);
+  if (pct > BAD_GROWTH_PCT) return "red";
+  if (pct > WARN_GROWTH_PCT) return "yellow";
+  return "none";
+}
+
 type SortKey =
   | "name"
   | "total_bytes"
+  | "growth_1h_bytes"
   | "n_live_tup"
   | "n_dead_tup"
   | "bloat_pct"
@@ -50,6 +78,7 @@ const COLUMNS: Column[] = [
   { key: "severity", label: "!", numeric: false },
   { key: "name", label: "Table", numeric: false },
   { key: "total_bytes", label: "Size", numeric: true },
+  { key: "growth_1h_bytes", label: "Δ1h", numeric: true },
   { key: "n_live_tup", label: "Live", numeric: true },
   { key: "n_dead_tup", label: "Dead", numeric: true },
   {
@@ -304,21 +333,28 @@ export class SchemaLens {
     const seqIdx = `${humanCount(table.seq_scan)}/${
       table.idx_scan === null ? "—" : humanCount(table.idx_scan)
     }`;
-    const cells: Array<[string, boolean]> = [
-      [marker, false],
-      [rowKey, false],
-      [humanBytes(table.total_bytes), true],
-      [humanCount(table.n_live_tup), true],
-      [humanCount(table.n_dead_tup), true],
-      [bloatPct, true],
-      [bloatBytes, true],
-      [humanAgo(lastAv(table), now), true],
-      [seqIdx, true],
+    const growthText =
+      table.growth_1h_bytes === null
+        ? NO_GROWTH
+        : humanBytesSigned(table.growth_1h_bytes);
+    const growthTier = growthSeverity(table.total_bytes, table.growth_1h_pct);
+    const cells: Array<[string, boolean, string | undefined]> = [
+      [marker, false, undefined],
+      [rowKey, false, undefined],
+      [humanBytes(table.total_bytes), true, undefined],
+      [growthText, true, growthTier === "none" ? undefined : `growth-${growthTier}`],
+      [humanCount(table.n_live_tup), true, undefined],
+      [humanCount(table.n_dead_tup), true, undefined],
+      [bloatPct, true, undefined],
+      [bloatBytes, true, undefined],
+      [humanAgo(lastAv(table), now), true, undefined],
+      [seqIdx, true, undefined],
     ];
-    for (const [text, numeric] of cells) {
+    for (const [text, numeric, cls] of cells) {
       const td = document.createElement("td");
       td.textContent = text;
       if (numeric) td.classList.add("num");
+      if (cls !== undefined) td.classList.add(cls);
       if (text === NO_ESTIMATE) td.title = NO_ESTIMATE_TITLE;
       tr.append(td);
     }

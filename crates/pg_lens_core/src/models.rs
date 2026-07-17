@@ -152,6 +152,12 @@ pub struct CheckpointerStats {
 /// plus on-disk sizes, for one user table of the *connected database*.
 #[derive(Clone, Debug, Serialize)]
 pub struct TableStatRow {
+    /// The table's `pg_class.oid`. Used by the poller as the key for the
+    /// per-table size-growth ring (`crate::schema_growth`) — stabler than
+    /// schema+name across a rename, and correctly starts a fresh ring on a
+    /// drop+recreate (new oid) instead of splicing the new table's sizes
+    /// onto the old table's history.
+    pub oid: i64,
     pub schema: String,
     pub name: String,
     /// `pg_total_relation_size(relid)` — heap + indexes + TOAST.
@@ -185,6 +191,19 @@ pub struct TableStatRow {
     pub autovacuum_count: i64,
     pub analyze_count: i64,
     pub autoanalyze_count: i64,
+
+    /// v0.14: `total_bytes` delta over the last hour, from the poller's
+    /// bounded per-table size ring (`crate::schema_growth`). `None` until
+    /// the ring has at least two samples for this table (a fresh session,
+    /// or a table that just appeared). Negative is a valid, meaningful
+    /// value (VACUUM FULL, TRUNCATE, partition drop) — never clamped to 0.
+    #[serde(default)]
+    pub growth_1h_bytes: Option<i64>,
+    /// `growth_1h_bytes` expressed as a percentage of the oldest sample in
+    /// the window. `None` under the same conditions as `growth_1h_bytes`,
+    /// OR when the oldest sample was `0` bytes (percentage undefined).
+    #[serde(default)]
+    pub growth_1h_pct: Option<f32>,
 }
 
 /// One estimated-bloat row (table or btree index), shaped after the output
@@ -436,6 +455,7 @@ impl SchemaSnapshot {
         let churn = (seq as i64) * 37;
         let tables = vec![
             TableStatRow {
+                oid: 16_401,
                 schema: "public".to_string(),
                 name: "pgbench_accounts".to_string(),
                 total_bytes: 671_088_640,
@@ -461,10 +481,14 @@ impl SchemaSnapshot {
                 autovacuum_count: 42,
                 analyze_count: 1,
                 autoanalyze_count: 40,
+                // Flat: pgbench_accounts is the steady-state table.
+                growth_1h_bytes: Some(2_097_152),
+                growth_1h_pct: Some(0.3),
             },
             // The bloated-looking one: dead tuples rival live ones and
-            // autovacuum has not caught up.
+            // autovacuum has not caught up. Also the mock's "big grower".
             TableStatRow {
+                oid: 16_405,
                 schema: "public".to_string(),
                 name: "order_items".to_string(),
                 total_bytes: 219_152_384,
@@ -490,8 +514,14 @@ impl SchemaSnapshot {
                 autovacuum_count: 7,
                 analyze_count: 2,
                 autoanalyze_count: 6,
+                // Big grower: +42% in the last hour, above the red tier.
+                growth_1h_bytes: Some(65_011_712),
+                growth_1h_pct: Some(42.3),
             },
+            // Shrinker: a recent VACUUM FULL / TRUNCATE-and-reload dropped
+            // its size — negative growth is valid and shown, not clamped.
             TableStatRow {
+                oid: 16_409,
                 schema: "public".to_string(),
                 name: "pgbench_branches".to_string(),
                 total_bytes: 933_888,
@@ -517,10 +547,16 @@ impl SchemaSnapshot {
                 autovacuum_count: 210,
                 analyze_count: 0,
                 autoanalyze_count: 204,
+                growth_1h_bytes: Some(-3_244_032),
+                growth_1h_pct: Some(-25.8),
             },
             // A table with no indexes at all: idx_scan is NULL, exercising
-            // the Option path end to end (SQL → model → JSON → UI).
+            // the Option path end to end (SQL → model → JSON → UI). Also
+            // the "insufficient samples" case: `None` growth (e.g. right
+            // after this table first appeared in the ring), exercised
+            // alongside the populated rows above.
             TableStatRow {
+                oid: 16_413,
                 schema: "audit".to_string(),
                 name: "raw_events".to_string(),
                 total_bytes: 96_468_992,
@@ -546,6 +582,8 @@ impl SchemaSnapshot {
                 autovacuum_count: 0,
                 analyze_count: 0,
                 autoanalyze_count: 3,
+                growth_1h_bytes: None,
+                growth_1h_pct: None,
             },
         ];
         let table_bloat = vec![
@@ -835,6 +873,25 @@ pub struct StatementRow {
     pub rows: i64,
     pub shared_blks_hit: i64,
     pub shared_blks_read: i64,
+    /// Shared buffers dirtied/written by this statement (present since ext
+    /// 1.8, v0.14).
+    pub shared_blks_dirtied: i64,
+    pub shared_blks_written: i64,
+    /// Temp-file (work_mem spill) blocks read/written (8kB each, present
+    /// since ext 1.8, v0.14) — the #1 query-tuning signal this row adds.
+    /// `temp_blks_written` drives the Temp column/sort/severity.
+    pub temp_blks_read: i64,
+    pub temp_blks_written: i64,
+    /// Milliseconds spent on shared-buffer I/O. `None` when the
+    /// `track_io_timing` GUC is off — the raw counters read back as 0 in
+    /// that case, indistinguishable from "no I/O", so the parser collapses
+    /// both to `None` rather than shipping a misleading zero (see
+    /// `db::statement_from_row`).
+    pub blk_read_time_ms: Option<f64>,
+    pub blk_write_time_ms: Option<f64>,
+    /// Total WAL bytes generated. `None` on `pg_stat_statements` < 1.9 (the
+    /// release that added this column).
+    pub wal_bytes: Option<i64>,
 }
 
 /// Health of the Query Lens collection. `Unavailable` is NOT an error: the
@@ -892,6 +949,18 @@ impl StatementsSnapshot {
             rows,
             shared_blks_hit: hit,
             shared_blks_read: read,
+            // v0.14 defaults: no spill, dirty/written scaled crudely off
+            // hit/read so the detail panel shows plausible nonzero numbers;
+            // track_io_timing "on" (the common case) with timings scaled
+            // off read volume; wal_bytes absent by default (ext < 1.9) —
+            // two rows below override it to demo the ext >= 1.9 path.
+            shared_blks_dirtied: hit / 40,
+            shared_blks_written: read / 15,
+            temp_blks_read: 0,
+            temp_blks_written: 0,
+            blk_read_time_ms: Some(read as f64 * 0.0021),
+            blk_write_time_ms: Some(hit as f64 * 0.00004),
+            wal_bytes: None,
         };
         let statements = vec![
             row(
@@ -915,17 +984,25 @@ impl StatementsSnapshot {
                 18_309_441,
                 2_205_118,
             ),
-            row(
-                551_202_998_310_442_781,
-                "SELECT date_trunc($1, created_at) AS day, count(*) FROM events GROUP BY \
-                 $2 ORDER BY $3",
-                "analytics_ro",
-                42,
-                61_204.9,
-                18_230,
-                1_202_312,
-                8_814_209,
-            ),
+            // v0.14: the heavy spiller — an unindexed GROUP BY blowing past
+            // work_mem, demoing the Temp column/sort/severity tint.
+            StatementRow {
+                temp_blks_read: 1_180_442 + churn / 3,
+                temp_blks_written: 2_840_209 + churn / 2,
+                blk_read_time_ms: Some(842.3 + churn as f64 * 0.01),
+                blk_write_time_ms: Some(310.6 + churn as f64 * 0.004),
+                ..row(
+                    551_202_998_310_442_781,
+                    "SELECT date_trunc($1, created_at) AS day, count(*) FROM events GROUP BY \
+                     $2 ORDER BY $3",
+                    "analytics_ro",
+                    42,
+                    61_204.9,
+                    18_230,
+                    1_202_312,
+                    8_814_209,
+                )
+            },
             row(
                 7_113_940_012_385_720_114,
                 "INSERT INTO order_items (order_id, product_id, qty, price) VALUES \
@@ -958,27 +1035,39 @@ impl StatementsSnapshot {
                 9_213_808,
                 44_021,
             ),
-            row(
-                2_004_113_679_120_881_442,
-                "INSERT INTO events (kind, payload, created_at) VALUES ($1, $2, now())",
-                "collector",
-                730_112 + churn,
-                3_209.4 + churn as f64 * 0.02,
-                730_112 + churn,
-                2_204_119,
-                1_202,
-            ),
-            // Zero shared blocks touched: exercises the Hit% "—" path.
-            row(
-                -3_310_224_887_664_190_007,
-                "SELECT pg_sleep($1)",
-                "leonardo",
-                3,
-                45_002.1,
-                3,
-                0,
-                0,
-            ),
+            // v0.14: a writer with wal_bytes populated — demos the
+            // ext >= 1.9 path (base/1.8 rows above stay None).
+            StatementRow {
+                wal_bytes: Some(482_112_004 + churn * 64),
+                ..row(
+                    2_004_113_679_120_881_442,
+                    "INSERT INTO events (kind, payload, created_at) VALUES ($1, $2, now())",
+                    "collector",
+                    730_112 + churn,
+                    3_209.4 + churn as f64 * 0.02,
+                    730_112 + churn,
+                    2_204_119,
+                    1_202,
+                )
+            },
+            // Zero shared blocks touched: exercises the Hit% "—" path. Also
+            // v0.14: track_io_timing "off" for this row — exercises the
+            // detail panel's "--" I/O-timing path (see `blk_read_time_ms`
+            // doc comment above).
+            StatementRow {
+                blk_read_time_ms: None,
+                blk_write_time_ms: None,
+                ..row(
+                    -3_310_224_887_664_190_007,
+                    "SELECT pg_sleep($1)",
+                    "leonardo",
+                    3,
+                    45_002.1,
+                    3,
+                    0,
+                    0,
+                )
+            },
         ];
         Self {
             collected_at_epoch_ms: epoch_ms_now(),
@@ -1538,9 +1627,12 @@ impl DbSnapshot {
             // gauge (past `lock_capacity::BAD_FRACTION`) — a batch job or a
             // burst of long transactions eating the lock table, exactly the
             // precursor this gauge exists to surface before the "out of
-            // shared memory" outage.
+            // shared memory" outage. v0.14: a slow ramp over the first ~300
+            // ticks (on top of the jitter) so the Macro Lens trend arrow has
+            // an actual upward trend to demo, not just noise — capped so it
+            // doesn't blow past the gauge's own ceiling.
             lock_capacity: Some(crate::lock_capacity::compute(crate::db::LockCapacityRow {
-                locks_held: 5_850 + jitter(seq, 32, 200) as i64,
+                locks_held: 5_400 + seq.min(300) as i64 * 2 + jitter(seq, 32, 200) as i64,
                 max_locks_per_xact: 64,
                 max_connections: 100,
                 max_prepared_xacts: 0,

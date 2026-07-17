@@ -93,6 +93,10 @@ mod tests {
             epoch_ms: i,
             tps: i as f64,
             active_sessions: i as u32,
+            connections_total: i as u32,
+            cache_hit_pct: Some(i as f32),
+            lock_pressure_pct: Some(i as f32),
+            oldest_xid_age: Some(i as i64),
         }
     }
 
@@ -144,6 +148,29 @@ mod tests {
             loaded.iter().map(|p| p.epoch_ms).collect::<Vec<_>>(),
             vec![95, 96, 97, 98, 99]
         );
+    }
+
+    /// A JSONL file written entirely by a pre-v0.14 build (only the original
+    /// three fields per line) must still load in full, with the new fields
+    /// defaulting — a dropped-history regression on upgrade would be bad.
+    #[test]
+    fn old_format_jsonl_file_loads_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        std::fs::write(
+            &path,
+            "{\"epoch_ms\":1,\"tps\":1.0,\"active_sessions\":1}\n\
+             {\"epoch_ms\":2,\"tps\":2.0,\"active_sessions\":2}\n",
+        )
+        .unwrap();
+        let store = HistoryStore::new(path);
+        let loaded = store.load(10);
+        assert_eq!(loaded.len(), 2, "old-format lines must not be dropped");
+        assert_eq!(loaded[0].epoch_ms, 1);
+        assert_eq!(loaded[0].connections_total, 0);
+        assert_eq!(loaded[0].cache_hit_pct, None);
+        assert_eq!(loaded[0].lock_pressure_pct, None);
+        assert_eq!(loaded[0].oldest_xid_age, None);
     }
 
     #[test]

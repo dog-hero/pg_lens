@@ -18,7 +18,13 @@
 --
 -- LIMIT guards against databases with tens of thousands of tables: the top
 -- 200 by total size is what the lens can usefully show.
+--
+-- v0.14 added `relid` (the table's `oid`, ::int8 — tokio-postgres has no
+-- native `oid` mapping) so the poller can key the per-table size-growth
+-- ring on something that survives a rename but correctly resets on a
+-- drop+recreate (a fresh oid), unlike schema+name.
 SELECT
+      s.relid::int8 AS relid,
       s.schemaname::text AS schemaname,
       s.relname::text AS relname,
       pg_total_relation_size(s.relid) AS total_bytes,

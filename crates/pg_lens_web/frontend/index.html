@@ -209,6 +209,21 @@
           <section class="panel">
             <h2>TPS &amp; active sessions</h2>
             <div id="chart"></div>
+            <!-- v0.14 History time-scrubber: hover shows a live readout of
+                 that moment, click pins it (survives streaming updates,
+                 unpinned by clicking again, the ✕, or Esc) — see
+                 src/scrubber.ts for the pure resolution/formatting logic. -->
+            <div id="scrub-readout" class="scrub-readout" hidden>
+              <span id="scrub-readout-time" class="scrub-readout-time"></span>
+              <span id="scrub-readout-pinned-hint" class="scrub-readout-pinned-hint" hidden></span>
+              <span class="scrub-readout-item">TPS <strong id="scrub-readout-tps"></strong></span>
+              <span class="scrub-readout-item">Sessions <strong id="scrub-readout-sessions"></strong></span>
+              <span class="scrub-readout-item">Conns <strong id="scrub-readout-conns"></strong></span>
+              <span class="scrub-readout-item">Cache hit <strong id="scrub-readout-cache"></strong></span>
+              <span class="scrub-readout-item">Lock pressure <strong id="scrub-readout-lock"></strong></span>
+              <span id="scrub-readout-xid-wrap" class="scrub-readout-item" hidden>XID age <strong id="scrub-readout-xid"></strong></span>
+              <button id="scrub-unpin" class="scrub-unpin" type="button" hidden aria-label="Unpin the scrubbed moment (Esc)" title="Unpin (Esc)">✕</button>
+            </div>
           </section>
           <section id="activity-panel" class="panel" role="tabpanel">
             <h2>Activity <span id="activity-count" class="panel-note"></span></h2>

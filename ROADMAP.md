@@ -145,6 +145,38 @@ sources — pure interaction/ergonomics, TUI-first with web parity where cheap.
 Explicitly NOT doing (discovery correction): `s` sort-cycle on Index/Replication
 Lens — those are intentionally fixed severity-ranked order, not a gap.
 
+## v0.14 — "See the trend, not just the moment" (in progress — owner-selected 2026-07-17)
+
+The persisted 1h history (JSONL ring, survives restarts) today carries only
+`tps` + `active_sessions`; every lens is otherwise point-in-time. This batch
+turns the history into pg_lens's differentiator (pg_activity/pgcenter are pure
+point-in-time; trend charts are pghero/pganalyze's headline). Plus one
+independent Query Lens win as a hedge.
+
+- [x] **Widen `SnapshotHistory` + vitals trend arrows** — add per-tick scalars
+  already computed by the poller (lock-pressure %, oldest-XID age, connections,
+  cache-hit) to `HistoryPoint` with `#[serde(default)]` (old JSONL keeps
+  loading). Trend arrows (↑/↓/→ vs ~5 min ago) on the Macro Lens vitals cards;
+  web mirrors with a tooltip delta. No new SQL. Foundational — every future
+  trend feature becomes an S extension. **S/M.**
+- [x] **History time-scrubber (web)** — drag over the history chart to pin a
+  moment and read the vitals as they were then (incident review). Reuses the
+  widened history already streamed over SSE + uPlot's cursor API. Web-only. **S.**
+- [x] **Table/index size growth (Schema Lens)** — "this table grew 40% in the
+  last hour": a Δsize(1h) column from a bounded per-table ring (cap top-N by
+  size, evict on schema refresh — never unbounded). Slow cadence only. TUI +
+  Web. **M.**
+- [x] **Query I/O & temp-spill profile** (deferred from v0.11) —
+  `pg_stat_statements` `temp_blks_read/written`, `shared_blks_dirtied/written`,
+  `blk_read_time`/`blk_write_time` (gated on `track_io_timing`, mirroring the
+  checkpointer's optional-timing pattern), `wal_bytes` (ext ≥1.9). Pure column
+  addition to the Query Lens table/detail. TUI + Web. **S/M.**
+
+Also in tree (unreleased, built 2026-07-17 from owner feedback): interactive
+service picker for `pg_lens serve` — TTY prompt with a numbered list when a
+services file exists and nothing was selected (auto-select with notice when
+exactly one); non-TTY keeps the v0.13 fail-loud.
+
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
 - [ ] **I/O profile** — `pg_stat_io` (PG 16+ only), backend_type × context

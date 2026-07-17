@@ -6,12 +6,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { schemaRowMatches } from "./schema.ts";
+import { growthSeverity, schemaRowMatches } from "./schema.ts";
 import type { TableStatRow } from "./types.ts";
 
 /** Minimal row builder: only schema/name matter to the matcher. */
 function table(schema: string, name: string): TableStatRow {
   return {
+    oid: 0,
     schema,
     name,
     total_bytes: 0,
@@ -37,6 +38,8 @@ function table(schema: string, name: string): TableStatRow {
     autovacuum_count: 0,
     analyze_count: 0,
     autoanalyze_count: 0,
+    growth_1h_bytes: null,
+    growth_1h_pct: null,
   };
 }
 
@@ -62,4 +65,25 @@ test("matches a fully-qualified term that straddles the dot", () => {
 test("empty needle is never reached by callers (the filter step short-circuits), but is not a false negative", () => {
   const row = table("public", "orders");
   assert.ok(schemaRowMatches(row, ""));
+});
+
+// v0.14: growthSeverity mirrors pg_lens_core::schema_growth::severity.
+const BIG = 10 * 1024 * 1024; // SEVERITY_MIN_TABLE_BYTES
+
+test("growthSeverity never colors a table below the absolute size floor", () => {
+  assert.equal(growthSeverity(1024, 50), "none");
+});
+
+test("growthSeverity is red past 25%, yellow past 10%, on a big-enough table", () => {
+  assert.equal(growthSeverity(BIG, 50), "red");
+  assert.equal(growthSeverity(BIG, 15), "yellow");
+  assert.equal(growthSeverity(BIG, 5), "none");
+});
+
+test("growthSeverity uses the absolute value (a large shrink also tints)", () => {
+  assert.equal(growthSeverity(BIG, -30), "red");
+});
+
+test("growthSeverity is calm when growth is unknown", () => {
+  assert.equal(growthSeverity(BIG, null), "none");
 });

@@ -495,6 +495,21 @@ main {
   font-weight: 600;
 }
 
+/* v0.14: trend arrow next to the card label (now vs ~5 min ago). Dim/neutral
+   by default; `.warn` only when the direction is the concerning one for that
+   metric (rising connections/lock pressure, falling cache hit) — subtle on
+   purpose, this flags risk rather than celebrating the calm direction. */
+.card-trend {
+  color: var(--fg-dim);
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.card-trend.warn {
+  color: var(--warn);
+}
+
 .card-value {
   /* `clamp()` lets a compound value (e.g. "5887 / 6400 (92.0%)") shrink a
      little on its own before falling back to wrapping — `overflow-wrap` is
@@ -577,6 +592,95 @@ main {
 #chart .u-legend {
   color: var(--fg-dim);
   font-size: 0.75rem;
+}
+
+#chart {
+  cursor: crosshair;
+}
+
+/* ── history time-scrubber (v0.14) ─────────────────────────────────────── */
+/* The readout strip under the chart: hover shows a live moment, a click
+   pins it (`.pinned` — a slightly raised, accent-bordered treatment so it
+   reads as "frozen" rather than "just another hover tick"). */
+.scrub-readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  position: relative;
+}
+
+.scrub-readout.pinned {
+  border-color: var(--accent);
+  background: var(--info-bg);
+}
+
+/* `.scrub-readout`'s own `display: flex` above ties with the UA `[hidden]`
+ * rule's specificity, so an explicit override is needed (same trap as
+ * `#token-overlay[hidden]`) — otherwise unpinning never actually hides it. */
+.scrub-readout[hidden] {
+  display: none;
+}
+
+.scrub-readout-time {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.scrub-readout-pinned-hint {
+  font-style: italic;
+  color: var(--fg-dim);
+}
+
+.scrub-readout-item strong {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.scrub-readout-item strong.warn {
+  color: var(--warn);
+}
+
+.scrub-readout-item strong.bad {
+  color: var(--bad);
+}
+
+.scrub-unpin {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  padding: 0;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.scrub-unpin:hover {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+/* v0.14 optional cheap win: while a moment is pinned, the trend arrows on
+   the (still-live) vitals cards dim — a subtle cue that the readout below
+   is historical without freezing the cards themselves. */
+#vitals.scrub-pinned .card-trend {
+  opacity: 0.35;
 }
 
 /* ── activity table ─────────────────────────────────────────────────── */
@@ -938,6 +1042,20 @@ table#schema {
   color: var(--fg-dim);
 }
 
+/* v0.14 size-growth column: cell-level tint (the row's own tint is already
+   spoken for by bloat severity above) — same thresholds as the TUI's
+   pg_lens_core::schema_growth (>25%/1h red, >10%/1h yellow, tables under
+   10 MiB never colored). */
+#schema td.growth-yellow {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+#schema td.growth-red {
+  color: var(--bad);
+  font-weight: 700;
+}
+
 #schema tr.schema-detail td {
   white-space: pre-line;
   color: var(--fg-dim);
@@ -1159,6 +1277,18 @@ table#statements {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--fg-dim);
+}
+
+/* Temp-spill severity (v0.14): any nonzero spill is notable; yellow once
+   it crosses TEMP_SPILL_WARN_BYTES (100 MiB), same threshold/color as the
+   TUI's Temp cell. */
+#statements td.temp.warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+#statements tr.statement-detail div.warn {
+  color: var(--warn);
 }
 
 #statements tr.statement-detail td {

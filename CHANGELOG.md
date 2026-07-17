@@ -4,6 +4,61 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.14.0] — 2026-07-17 — "See the trend, not just the moment"
+
+### Added
+- **Vitals trend arrows** — the persisted 1h history now also carries
+  `connections_total`, `cache_hit_pct`, `lock_pressure_pct`, and
+  `oldest_xid_age` per tick (all `#[serde(default)]`, so pre-v0.14 JSONL
+  files keep loading intact with these defaulted to unknown, nothing
+  dropped). The Macro Lens vitals cards (Connections / Cache hit / Lock
+  table) now show a `↑`/`↓`/`→` trend arrow comparing "now" against the
+  sample from ~5 minutes ago (5% deadband so noise doesn't flicker the
+  arrow), tinted yellow only when the direction is the concerning one
+  (rising connections/lock pressure, falling cache hit). Web mirrors the
+  arrows with a tooltip spelling out the delta (e.g. "+12.0% vs 5 min
+  ago"). Foundational for future trend features. TUI + Web.
+- **History time-scrubber (Web Lens)** — hover over the TPS/sessions chart
+  for a live readout of that moment's vitals (TPS, sessions, connections,
+  cache hit%, lock pressure%, oldest-XID age); click pins the moment (a
+  dashed marker appears on the chart), and the pin survives the live SSE
+  stream because it's keyed by timestamp, not index. `✕` / `Esc` / clicking
+  again unpins; `←`/`→` step the pinned moment one sample at a time for a
+  tick-by-tick incident walkthrough; trend arrows dim while pinned to avoid
+  implying they describe the pinned moment. A pinned moment that ages out
+  of the 1h ring unpins itself with a toast instead of showing stale data.
+  Web-only.
+- **Table size growth (Schema Lens)** — a new `Δ1h` column: signed size
+  change over the last hour per table (`+120 MB`, `-3 MB`, `—` when no
+  reading yet), tinted yellow/red past 10%/25% growth on tables ≥10 MiB.
+  Backed by a bounded, in-memory, oid-keyed per-table ring (survives
+  renames, resets cleanly on drop+recreate; capped at 200 tables ≈ 288 KB,
+  never unbounded) fed only by the slow schema cadence — restarts refill
+  over the next hour rather than persisting to disk. New "growth" mode in
+  the `s` sort cycle (largest absolute Δ first). TUI + Web.
+- **Query I/O & temp-spill profile (Query Lens)** — a new `Temp` column
+  (temp bytes written, tinted yellow past 100 MiB — the #1 query-tuning
+  signal the lens was missing) plus a full I/O breakdown in the `Enter`
+  detail panel: temp read/written, shared blocks dirtied/written, block
+  read/write time (`--` when `track_io_timing` is off), and WAL bytes
+  (`--` on `pg_stat_statements` < 1.9). Three extension-version-gated SQL
+  variants (1.8 base, ≥1.9 adds `wal_bytes`, ≥1.11/PG17 renamed timing
+  columns). New "temp" mode in the `s` sort cycle. TUI + Web.
+- **Interactive service picker for `serve`** — `pg_lens serve` started on a
+  real TTY with an ambiguous `services.toml` (multiple services, none
+  selected) now prompts with a numbered list (name + host/user, never
+  secrets) instead of only failing loud; accepts an index or a name,
+  re-prompts on invalid input, and auto-selects with a notice when exactly
+  one service is defined. Non-TTY (piped/systemd/CI) keeps the v0.13
+  fail-loud list-and-exit so an unattended process never hangs on stdin.
+
+### Fixed
+- Regenerated the README demo gif and web dashboard screenshot for the
+  v0.13 redesign and fixed stale `v0.7.1`-pinned download-URL examples
+  (repo-side, `e61a6b3`).
+- Fixed the `e2e_pty_live.py` reconnect-recovery check, which had not been
+  updated for the six-lens layout (repo-side, `030471f`).
+
 ## [0.13.0] — 2026-07-17
 
 ### Navigation & filters

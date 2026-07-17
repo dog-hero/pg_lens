@@ -36,6 +36,7 @@ use crate::models::{
     ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow,
     StatementsSnapshot, StatementsStatus, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
 };
+use crate::schema_growth::{GROWTH_LOOKBACK_MS, SchemaGrowthTracker};
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
 
@@ -74,6 +75,10 @@ struct SchemaState {
     /// Last collection (or error envelope), reused by every fast tick in
     /// between at `Arc` cost.
     current: Option<Arc<SchemaSnapshot>>,
+    /// v0.14: bounded per-table size-growth ring, fed only on a successful
+    /// collection (`store`) — see `crate::schema_growth` for the bounding
+    /// guarantees and the oid-keying rationale.
+    growth: SchemaGrowthTracker,
 }
 
 impl SchemaState {
@@ -83,6 +88,7 @@ impl SchemaState {
             refresh_rx,
             last_attempt: None,
             current: None,
+            growth: SchemaGrowthTracker::new(),
         }
     }
 
@@ -111,7 +117,16 @@ impl SchemaState {
     /// the fresh tables are stored (with a fresh `collected_at`), the
     /// previous bloat vectors are kept, and the status carries the error —
     /// table stats degrade gracefully instead of vanishing.
-    fn store(&mut self, collection: SchemaCollection) {
+    fn store(&mut self, mut collection: SchemaCollection) {
+        let now = epoch_ms_now();
+        // v0.14: feed the size-growth ring from this fresh collection, then
+        // render `growth_1h_bytes`/`growth_1h_pct` onto each row before it
+        // ships in the snapshot — the only two steps the poller does for
+        // this feature; the rest (deadband, severity) is pure and tested in
+        // `crate::schema_growth`.
+        self.growth.update(&collection.tables, now);
+        self.growth
+            .apply(&mut collection.tables, now, GROWTH_LOOKBACK_MS);
         let previous = self.current.as_deref();
         let (table_bloat, index_bloat, status) = match collection.bloat {
             // Bloat not requested this cycle (auto tick): carry the last
@@ -129,7 +144,7 @@ impl SchemaState {
             ),
         };
         self.current = Some(Arc::new(SchemaSnapshot {
-            collected_at_epoch_ms: epoch_ms_now(),
+            collected_at_epoch_ms: now,
             tables: collection.tables,
             table_bloat,
             index_bloat,
@@ -150,6 +165,10 @@ impl SchemaState {
     fn reset(&mut self) {
         self.last_attempt = None;
         self.current = None;
+        // The old database's tables (and their oids) are meaningless for
+        // the new database — start the ring fresh, same reasoning as
+        // dropping `current`.
+        self.growth = SchemaGrowthTracker::new();
     }
 
     /// Stores a failed collection: the last good data (and its original
@@ -700,10 +719,24 @@ async fn poll_loop(
         Ok(q) => q,
         Err(msg) => return SessionEnd::Error(msg),
     };
-    let statements_available: Result<(), String> = match statements_extversion {
+    let statements_available: Result<(), String> = match &statements_extversion {
         Ok(extversion) => db::statements_availability(extversion.as_deref()),
-        Err(msg) => Err(msg),
+        Err(msg) => Err(msg.clone()),
     };
+    // v0.14: the I/O & temp-spill column set (and the PG17 blk_*_time
+    // rename) tracks the EXTENSION version, a SEPARATE decision from
+    // `query_set.statements` (which `for_version` picked by SERVER
+    // version — see `queries::statements_sql_for_extension`'s doc comment).
+    // Only reached meaningfully when `statements_available` is `Ok`; falls
+    // back to the base tier otherwise (never queried when unavailable).
+    let statements_sql: &'static str = statements_extversion
+        .as_ref()
+        .ok()
+        .and_then(|v| v.as_deref())
+        .and_then(db::parse_extension_version)
+        .map_or(query_set.statements, |(major, minor)| {
+            queries::statements_sql_for_extension(major, minor)
+        });
 
     let mut deltas: Option<DeltaState> = None;
 
@@ -716,10 +749,19 @@ async fn poll_loop(
         // Publish the fast tick FIRST so the dashboard appears immediately on
         // connect — the slow schema/statements collection never blocks the
         // first (or any) snapshot; its result rides the NEXT tick.
-        let mut snapshot = match poll_once(client, &query_set, &mut deltas, history).await {
-            Ok(s) => s,
-            Err(msg) => return SessionEnd::Error(format!("poll failed: {msg}")),
-        };
+        // The vacuum-cluster age is slow-cadence (Schema Lens); carry the
+        // last known reading (or None before the first collection) into this
+        // fast tick's history point — see `poll_once`'s doc comment.
+        let oldest_xid_age = schema
+            .current
+            .as_deref()
+            .and_then(|s| s.vacuum_cluster_age.as_ref())
+            .map(|v| v.max_age_xids);
+        let mut snapshot =
+            match poll_once(client, &query_set, &mut deltas, history, oldest_xid_age).await {
+                Ok(s) => s,
+                Err(msg) => return SessionEnd::Error(format!("poll failed: {msg}")),
+            };
         // Ticks between collections reuse the last one at Arc-clone cost.
         snapshot.schema = schema.current.clone();
         snapshot.statements = statements.current.clone();
@@ -761,7 +803,7 @@ async fn poll_loop(
             // unavailable decision was made at session start; a failing
             // query keeps the last good rows (status carries the error).
             match &statements_available {
-                Ok(()) => match collect_statements(client, query_set.statements).await {
+                Ok(()) => match collect_statements(client, statements_sql).await {
                     Ok(rows) => statements.store(rows),
                     Err(msg) => {
                         statements.store_error(format!("statements collection failed: {msg}"));
@@ -913,11 +955,18 @@ fn derive_checkpointer_stats(
     (stats, next)
 }
 
+/// `oldest_xid_age` is v0.14's carried-last-known vacuum-cluster-age reading
+/// (`VacuumClusterAge::max_age_xids`) — Schema Lens data on the slow cadence,
+/// stamped onto this tick's [`HistoryPoint`] anyway so the trend arrow has a
+/// step-function series instead of flapping to `None` between slow-cadence
+/// collections. The caller derives it from `SchemaState::current` (the same
+/// Arc every fast tick between collections reuses) before calling in.
 async fn poll_once(
     client: &mut Client,
     q: &queries::QuerySet,
     deltas: &mut Option<DeltaState>,
     history: &mut SnapshotHistory,
+    oldest_xid_age: Option<i64>,
 ) -> Result<DbSnapshot, String> {
     // Essential queries: four futures pipelined inside ONE read-only
     // transaction — a single consistent snapshot, and pooler-safe (prepare +
@@ -1044,6 +1093,10 @@ async fn poll_once(
         epoch_ms: epoch_ms_now(),
         tps: tps.max(0.0),
         active_sessions: info.active.max(0) as u32,
+        connections_total: info.connections_total.max(0) as u32,
+        cache_hit_pct: Some((cache_hit_ratio * 100.0) as f32),
+        lock_pressure_pct: lock_capacity.as_ref().map(|l| (l.used_fraction * 100.0) as f32),
+        oldest_xid_age,
     });
 
     let vitals = ServerVitals {
@@ -1428,6 +1481,17 @@ fn record_history(history: &mut SnapshotHistory, snapshot: &mut DbSnapshot) {
         epoch_ms: epoch_ms_now(),
         tps: snapshot.vitals.tps.max(0.0),
         active_sessions: snapshot.vitals.active,
+        connections_total: snapshot.vitals.connections_total,
+        cache_hit_pct: Some((snapshot.vitals.cache_hit_ratio * 100.0) as f32),
+        lock_pressure_pct: snapshot
+            .lock_capacity
+            .as_ref()
+            .map(|l| (l.used_fraction * 100.0) as f32),
+        oldest_xid_age: snapshot
+            .schema
+            .as_ref()
+            .and_then(|s| s.vacuum_cluster_age.as_ref())
+            .map(|v| v.max_age_xids),
     });
     snapshot.history = history.clone();
 }

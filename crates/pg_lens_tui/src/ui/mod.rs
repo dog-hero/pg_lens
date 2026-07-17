@@ -603,6 +603,12 @@ mod tests {
         for header in ["Table", "Size", "Live", "Dead", "Bloat%", "Bloat", "Last AV", "Seq/Idx"] {
             assert!(screen.contains(header), "missing column {header}: {screen}");
         }
+        // v0.14: the Δ1h growth column.
+        assert!(screen.contains("\u{394}1h"), "missing growth column header: {screen}");
+        // Mock's big grower (order_items, +42.3%/1h, above the red floor).
+        assert!(screen.contains("+62.0 MB"), "signed growth delta: {screen}");
+        // Mock's shrinker (pgbench_branches) — negative delta, not clamped.
+        assert!(screen.contains("-3.1 MB"), "negative growth delta: {screen}");
         // Mock rows, joined bloat, is_na marker, footer.
         assert!(screen.contains("public.order_items"));
         assert!(screen.contains("54.0%"), "red-tier bloat pct: {screen}");
@@ -953,19 +959,37 @@ mod tests {
         let mut app = App::new();
         app.active_tab = Tab::QueryLens;
         let screen = render(&mut app);
-        for header in ["Query", "Calls", "Total", "Mean", "Rows", "Hit%"] {
+        for header in ["Query", "Calls", "Total", "Mean", "Rows", "Hit%", "Temp"] {
             assert!(screen.contains(header), "missing column {header}: {screen}");
         }
         // Mock rows: the heaviest statement (pgbench UPDATE) is present...
         assert!(screen.contains("UPDATE pgbench_accounts"), "{screen}");
         // ...the zero-blocks row renders the Hit% dash, not a number...
         assert!(screen.contains("\u{2014}"), "zero-division dash: {screen}");
+        // v0.14: the heavy-spiller mock row (temp_blks_written) renders a
+        // humanized Temp cell, not a dash.
+        assert!(screen.contains("MB") || screen.contains("GB"), "{screen}");
         // ...and the footer names the db, the scope and the shared refresh.
         assert!(screen.contains("db: shop"));
         assert!(screen.contains("8 statements"));
         assert!(screen.contains("current database only"));
         assert!(screen.contains("R: recollect"));
         assert!(screen.contains("sort=total"));
+    }
+
+    #[test]
+    fn query_lens_temp_sort_puts_the_heaviest_spiller_first() {
+        let mut app = App::new();
+        app.active_tab = Tab::QueryLens;
+        // Cycle sort: total -> calls -> mean -> rows -> temp.
+        for _ in 0..4 {
+            press(&mut app, crossterm::event::KeyCode::Char('s'));
+        }
+        let screen = render(&mut app);
+        assert!(screen.contains("sort=temp"), "{screen}");
+        // The mock's heavy spiller (analytics GROUP BY query) must be the
+        // visible top row under this sort.
+        assert!(screen.contains("date_trunc"), "{screen}");
     }
 
     #[test]
@@ -1039,6 +1063,10 @@ mod tests {
         assert!(screen.contains("Enter/Esc: close"));
         assert!(screen.contains("shared blocks:"));
         assert!(screen.contains("per call"));
+        // v0.14: the I/O & temp-spill section.
+        assert!(screen.contains("temp spill:"));
+        assert!(screen.contains("block I/O:"));
+        assert!(screen.contains("WAL:"));
     }
 
     #[test]

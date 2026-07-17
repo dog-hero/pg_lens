@@ -57,6 +57,17 @@ pub fn human_bytes(bytes: i64) -> String {
     }
 }
 
+/// Signed human byte delta for growth columns: `+120 MB`, `-3.4 MB`, `+0 B`.
+/// Unlike [`human_bytes`] this preserves the sign (shrinkage is a valid,
+/// meaningful reading — VACUUM FULL/TRUNCATE — never clamped away).
+pub fn human_bytes_signed(bytes: i64) -> String {
+    if bytes < 0 {
+        format!("-{}", human_bytes(bytes.saturating_abs()))
+    } else {
+        format!("+{}", human_bytes(bytes))
+    }
+}
+
 /// Compact human tuple/scan count (decimal, not 1024-based): `988`, `14.2K`,
 /// `1.2M`, `3.4B`. Negative inputs clamp to `0`.
 pub fn human_count(n: i64) -> String {
@@ -155,6 +166,14 @@ mod tests {
         assert_eq!(human_bytes(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
         assert_eq!(human_bytes((1.2 * 1024.0 * 1024.0 * 1024.0) as i64), "1.2 GB");
         assert_eq!(human_bytes(-7), "0 B");
+    }
+
+    #[test]
+    fn signed_bytes_keep_the_sign() {
+        assert_eq!(human_bytes_signed(0), "+0 B");
+        assert_eq!(human_bytes_signed(3 * 1024 * 1024 + 400 * 1024), "+3.4 MB");
+        assert_eq!(human_bytes_signed(-(3 * 1024 * 1024 + 400 * 1024)), "-3.4 MB");
+        assert!(human_bytes_signed(i64::MIN).starts_with('-'));
     }
 
     #[test]

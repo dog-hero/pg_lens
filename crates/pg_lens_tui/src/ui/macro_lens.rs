@@ -7,8 +7,8 @@
 //! [`DbSnapshot::history`]: pg_lens_core::DbSnapshot
 
 use pg_lens_core::{
-    CheckpointerStats, LockCapacity, LockCapacitySeverity, ReplicationInfo, ReplicationSlotRow,
-    SchemaSnapshot,
+    CheckpointerStats, HistoryPoint, LockCapacity, LockCapacitySeverity, ReplicationInfo,
+    ReplicationSlotRow, SchemaSnapshot, TREND_DEADBAND, TREND_LOOKBACK_TICKS, Trend,
 };
 use ratatui::{
     Frame,
@@ -152,6 +152,50 @@ fn lock_capacity_label(lc: &LockCapacity) -> String {
     )
 }
 
+/// v0.14: `now` vs the sample ~5 minutes back (see
+/// [`pg_lens_core::SnapshotHistory::sample_for_trend`]), with the shared 5%
+/// deadband. `then = None` (a fresh session, or a history point predating
+/// this metric — old JSONL) renders `Flat`: no data to compare against is
+/// not the same as "no change", but a flapping arrow on absent data would be
+/// worse than a calm one.
+fn card_trend(now: f64, then: Option<f64>) -> Trend {
+    match then {
+        Some(t) => pg_lens_core::trend(now, t, TREND_DEADBAND),
+        None => Trend::Flat,
+    }
+}
+
+/// `↑`/`↓`/`→`.
+fn trend_glyph(t: Trend) -> &'static str {
+    match t {
+        Trend::Up => "\u{2191}",
+        Trend::Down => "\u{2193}",
+        Trend::Flat => "\u{2192}",
+    }
+}
+
+/// Subtle color for the trend arrow: flat is dim on every card. For metrics
+/// where rising is the concerning direction (connections filling up, lock
+/// pressure climbing), an `Up` trend tints yellow; for cache-hit (rising is
+/// good), it is `Down` that tints yellow instead. The "good" direction stays
+/// dim rather than green — the arrow flags risk, it doesn't celebrate.
+fn trend_color(t: Trend, up_is_bad: bool) -> Color {
+    match (t, up_is_bad) {
+        (Trend::Up, true) | (Trend::Down, false) => Color::Yellow,
+        _ => Color::DarkGray,
+    }
+}
+
+/// Builds a gauge/panel title carrying the base name plus a trend arrow
+/// span, e.g. `Connections ↑` with the arrow tinted per [`trend_color`].
+fn title_with_trend(title: &'static str, t: Trend, up_is_bad: bool) -> Block<'static> {
+    let line = Line::from(vec![
+        Span::styled(format!("{title} "), style::accent_style()),
+        Span::styled(trend_glyph(t), Style::new().fg(trend_color(t, up_is_bad))),
+    ]);
+    Block::bordered().title(line)
+}
+
 /// `12.3/s`, or `--` while no delta window exists yet (first poll of a
 /// session — same rule as TPS).
 fn rate_per_sec(v: Option<f64>) -> String {
@@ -275,13 +319,32 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     ])
     .areas(gauge_area);
 
+    // v0.14: trend arrows compare "now" against the sample ~5 minutes back
+    // (clamped to the oldest available point on a young ring/session).
+    let trend_baseline: Option<&HistoryPoint> = history.sample_for_trend(TREND_LOOKBACK_TICKS);
+    let conn_trend = card_trend(
+        f64::from(vitals.connections_total),
+        trend_baseline.map(|p| f64::from(p.connections_total)),
+    );
+    let cache_trend = card_trend(
+        vitals.cache_hit_ratio * 100.0,
+        trend_baseline.and_then(|p| p.cache_hit_pct.map(f64::from)),
+    );
+    let lock_trend = match app.snapshot.lock_capacity.as_ref() {
+        Some(lc) => card_trend(
+            lc.used_fraction * 100.0,
+            trend_baseline.and_then(|p| p.lock_pressure_pct.map(f64::from)),
+        ),
+        None => Trend::Flat,
+    };
+
     let ratio = if vitals.max_connections > 0 {
         f64::from(vitals.connections_total) / f64::from(vitals.max_connections)
     } else {
         0.0
     };
     let gauge = Gauge::default()
-        .block(titled_block("Connections"))
+        .block(title_with_trend("Connections", conn_trend, true))
         .gauge_style(Style::new().fg(Color::Cyan))
         .ratio(ratio.clamp(0.0, 1.0))
         .label(format!(
@@ -291,7 +354,7 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(gauge, conn_gauge_area);
 
     let cache_gauge = Gauge::default()
-        .block(titled_block("Cache hit"))
+        .block(title_with_trend("Cache hit", cache_trend, false))
         .gauge_style(Style::new().fg(Color::Magenta))
         .ratio(vitals.cache_hit_ratio.clamp(0.0, 1.0))
         .label(format!("{:.1}%", vitals.cache_hit_ratio * 100.0));
@@ -305,7 +368,7 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
             let sev = pg_lens_core::lock_capacity_severity(lc.used_fraction);
             let color = lock_capacity_color(sev);
             let lock_gauge = Gauge::default()
-                .block(titled_block("Lock table"))
+                .block(title_with_trend("Lock table", lock_trend, true))
                 .gauge_style(Style::new().fg(color))
                 .ratio(lc.used_fraction.clamp(0.0, 1.0))
                 .label(lock_capacity_label(lc));
@@ -697,6 +760,90 @@ mod tests {
             .collect();
         assert!(text.contains("-- timed / -- req"));
         assert!(text.contains("no checkpoint yet this session"));
+    }
+
+    // --- v0.14: Macro Lens trend arrows -----------------------------------
+
+    #[test]
+    fn card_trend_is_flat_with_no_baseline() {
+        assert_eq!(card_trend(50.0, None), Trend::Flat);
+    }
+
+    #[test]
+    fn card_trend_delegates_to_core_trend_with_the_deadband() {
+        // 100 -> 120 is a 20% rise, past the 5% deadband.
+        assert_eq!(card_trend(120.0, Some(100.0)), Trend::Up);
+        // 100 -> 101 is within the deadband.
+        assert_eq!(card_trend(101.0, Some(100.0)), Trend::Flat);
+    }
+
+    #[test]
+    fn trend_glyph_matches_direction() {
+        assert_eq!(trend_glyph(Trend::Up), "\u{2191}");
+        assert_eq!(trend_glyph(Trend::Down), "\u{2193}");
+        assert_eq!(trend_glyph(Trend::Flat), "\u{2192}");
+    }
+
+    #[test]
+    fn trend_color_tints_the_bad_direction_only() {
+        // Lock pressure / connections: up is bad.
+        assert_eq!(trend_color(Trend::Up, true), Color::Yellow);
+        assert_eq!(trend_color(Trend::Down, true), Color::DarkGray);
+        assert_eq!(trend_color(Trend::Flat, true), Color::DarkGray);
+        // Cache hit: down is bad.
+        assert_eq!(trend_color(Trend::Down, false), Color::Yellow);
+        assert_eq!(trend_color(Trend::Up, false), Color::DarkGray);
+    }
+
+    /// The Macro Lens renders the mock's lock-table trend arrow once the
+    /// ring has enough history to compare against — the mock's lock
+    /// pressure ramps up over the first ~300 ticks (see `DbSnapshot::mock`),
+    /// so replaying enough ticks through the mock poller's own history
+    /// bookkeeping produces a real `Up` trend, not just a `Flat` glyph.
+    #[test]
+    fn macro_lens_renders_a_trend_arrow_on_a_trending_series() {
+        let mut history = pg_lens_core::SnapshotHistory::default();
+        // Simulate 200 ticks of a monotonically rising lock-pressure series
+        // so `sample_for_trend`'s 150-tick lookback has real headroom.
+        for i in 0..200u32 {
+            history.push(HistoryPoint {
+                epoch_ms: u64::from(i),
+                tps: 100.0,
+                active_sessions: 5,
+                connections_total: 40,
+                cache_hit_pct: Some(95.0),
+                lock_pressure_pct: Some(50.0 + i as f32 * 0.2),
+                oldest_xid_age: Some(1_000_000),
+            });
+        }
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::MacroLens;
+        let mut snapshot = (*app.snapshot).clone();
+        snapshot.history = history;
+        snapshot.lock_capacity = Some(pg_lens_core::lock_capacity::compute(
+            pg_lens_core::db::LockCapacityRow {
+                locks_held: 6_000,
+                max_locks_per_xact: 64,
+                max_connections: 100,
+                max_prepared_xacts: 0,
+            },
+        ));
+        crate::app::update(&mut app, crate::app::Action::Snapshot(snapshot.into()));
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Lock table"), "{screen}");
+        assert!(screen.contains('\u{2191}'), "expected an up arrow: {screen}");
     }
 
     #[test]

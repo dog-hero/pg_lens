@@ -7,6 +7,12 @@
 //!   tokenizer as the Micro Lens — `ui/sql.rs`);
 //! - `Hit%` = shared_blks_hit / (hit + read); `—` when zero blocks were
 //!   touched (never a made-up 0% or 100%);
+//! - `Temp` (v0.14) = `temp_blks_written * 8kB` — the work_mem spill
+//!   signal; `—` when zero, tinted yellow above [`TEMP_SPILL_WARN_BYTES`].
+//!   `s` also cycles a "temp" sort mode (heaviest spiller first). The rest
+//!   of the I/O & temp-spill profile (temp read, shared dirtied/written,
+//!   block read/write time, WAL bytes) lives in the detail panel only —
+//!   too many columns to cram into the table;
 //! - `Enter` opens a detail panel: full normalized query (highlighted,
 //!   wrapped) plus every metric incl. the queryid; `Enter`/`Esc` close it;
 //! - `Unavailable` (extension missing / older than 1.8) renders a friendly
@@ -31,11 +37,50 @@ use crate::app::App;
 use crate::ui::{format, sql, style};
 
 /// Fixed widths of every column except the flexible Query one, in order:
-/// Calls, Total, Mean, Rows, Hit%.
-const FIXED_WIDTHS: [u16; 5] = [8, 9, 9, 8, 6];
+/// Calls, Total, Mean, Rows, Hit%, Temp.
+const FIXED_WIDTHS: [u16; 6] = [8, 9, 9, 8, 6, 9];
 const COLUMN_SPACING: u16 = 1;
 /// Highlight symbol "▶ " rendered left of the selected row.
 const HIGHLIGHT_WIDTH: u16 = 2;
+
+/// Total temp-spill bytes (`temp_blks_written * 8kB`) above which the Temp
+/// cell tints yellow — any nonzero spill is notable, but this is the "go
+/// look at this query's work_mem" line. 100 MiB, named so the SQL comment
+/// and any future tuning stay in sync.
+const TEMP_SPILL_WARN_BYTES: i64 = 100 * 1024 * 1024;
+
+/// Postgres blocks are always 8kB, regardless of the cluster's `BLCKSZ`
+/// build-time override in practice — `pg_stat_statements`'s `temp_blks_*`
+/// counters are in this unit.
+const BLOCK_BYTES: i64 = 8192;
+
+/// Human bytes for a `temp_blks_written` count; `—` when zero (never a
+/// fabricated "0 B" — zero means "this statement has not spilled").
+fn temp_spill_cell(temp_blks_written: i64) -> String {
+    if temp_blks_written <= 0 {
+        "\u{2014}".to_string()
+    } else {
+        format::human_bytes(temp_blks_written.saturating_mul(BLOCK_BYTES))
+    }
+}
+
+/// Severity style for the Temp cell: dim for no spill, plain for a small
+/// one, yellow bold once it crosses [`TEMP_SPILL_WARN_BYTES`].
+fn temp_spill_style(temp_blks_written: i64) -> Style {
+    let bytes = temp_blks_written.saturating_mul(BLOCK_BYTES);
+    if bytes <= 0 {
+        Style::new().fg(Color::DarkGray)
+    } else if bytes >= TEMP_SPILL_WARN_BYTES {
+        Style::new().fg(Color::Yellow).bold()
+    } else {
+        Style::new()
+    }
+}
+
+/// `--` for a `None` I/O timing (track_io_timing off) or an absent
+/// `wal_bytes` (ext < 1.9); mirrors the checkpointer's optional-timing
+/// convention.
+const NO_DATA: &str = "\u{2014}\u{2014}";
 
 /// Shared-buffer cache hit ratio in percent; `None` when no shared blocks
 /// were touched at all — rendered `—`, never a fabricated number.
@@ -120,7 +165,7 @@ fn draw_unavailable(reason: &str, frame: &mut Frame, area: Rect) {
 }
 
 fn draw_table(app: &mut App, statements: &StatementsSnapshot, frame: &mut Frame, area: Rect) {
-    let header = Row::new(["Query", "Calls", "Total", "Mean", "Rows", "Hit%"])
+    let header = Row::new(["Query", "Calls", "Total", "Mean", "Rows", "Hit%", "Temp"])
         .style(Style::new().bold());
 
     let query_width = query_column_width(area.width);
@@ -140,6 +185,8 @@ fn draw_table(app: &mut App, statements: &StatementsSnapshot, frame: &mut Frame,
                 Cell::from(format::human_ms(row.mean_exec_ms)),
                 Cell::from(format::human_count(row.rows)),
                 Cell::from(hit_pct_cell(row.shared_blks_hit, row.shared_blks_read)),
+                Cell::from(temp_spill_cell(row.temp_blks_written))
+                    .style(temp_spill_style(row.temp_blks_written)),
             ])
         });
 
@@ -150,6 +197,7 @@ fn draw_table(app: &mut App, statements: &StatementsSnapshot, frame: &mut Frame,
         Constraint::Length(FIXED_WIDTHS[2]),
         Constraint::Length(FIXED_WIDTHS[3]),
         Constraint::Length(FIXED_WIDTHS[4]),
+        Constraint::Length(FIXED_WIDTHS[5]),
     ];
 
     let table = Table::new(rows, widths)
@@ -247,7 +295,8 @@ fn draw_table_empty(
 /// width (same arithmetic as the Micro/Schema lens tables).
 fn query_column_width(area_width: u16) -> usize {
     let fixed: u16 = FIXED_WIDTHS.iter().sum();
-    let overhead = 2 /* block borders */ + HIGHLIGHT_WIDTH + fixed + 5 * COLUMN_SPACING;
+    let gaps = FIXED_WIDTHS.len() as u16; // one gap per fixed column (+ Query)
+    let overhead = 2 /* block borders */ + HIGHLIGHT_WIDTH + fixed + gaps * COLUMN_SPACING;
     usize::from(area_width.saturating_sub(overhead))
 }
 
@@ -309,11 +358,37 @@ fn draw_detail(app: &App, frame: &mut Frame, area: Rect) {
         style::kv(
             "shared blocks: ",
             format!(
-                "hit {} \u{b7} read {} \u{b7} hit% {}",
+                "hit {} \u{b7} read {} \u{b7} hit% {} \u{b7} dirtied {} \u{b7} written {}",
                 format::human_count(row.shared_blks_hit),
                 format::human_count(row.shared_blks_read),
                 hit_pct_cell(row.shared_blks_hit, row.shared_blks_read),
+                format::human_count(row.shared_blks_dirtied),
+                format::human_count(row.shared_blks_written),
             ),
+        ),
+        Line::from(vec![
+            Span::styled("temp spill:   ", style::label_style()),
+            Span::styled(
+                format!(
+                    "read {} \u{b7} written {}",
+                    temp_spill_cell(row.temp_blks_read),
+                    temp_spill_cell(row.temp_blks_written),
+                ),
+                temp_spill_style(row.temp_blks_written),
+            ),
+        ]),
+        style::kv(
+            "block I/O:    ",
+            format!(
+                "read {} \u{b7} write {}",
+                row.blk_read_time_ms.map_or_else(|| NO_DATA.to_string(), format::human_ms),
+                row.blk_write_time_ms.map_or_else(|| NO_DATA.to_string(), format::human_ms),
+            ),
+        ),
+        style::kv(
+            "WAL:          ",
+            row.wal_bytes
+                .map_or_else(|| NO_DATA.to_string(), format::human_bytes),
         ),
         Line::from("query:").style(style::label_style()),
     ];
@@ -347,9 +422,30 @@ mod tests {
 
     #[test]
     fn query_width_shrinks_with_the_terminal_and_never_underflows() {
-        // 120 cols: 120 - (2 + 2 + 40 + 5) = 71 chars for the query.
-        assert_eq!(query_column_width(120), 71);
+        // 120 cols: 120 - (2 + 2 + 49 + 6) = 61 chars for the query.
+        assert_eq!(query_column_width(120), 61);
         assert!(query_column_width(80) < query_column_width(120));
         assert_eq!(query_column_width(10), 0);
+    }
+
+    #[test]
+    fn temp_spill_cell_renders_a_dash_or_human_bytes() {
+        assert_eq!(temp_spill_cell(0), "\u{2014}");
+        // 12800 blocks * 8kB = 100 MB.
+        assert_eq!(temp_spill_cell(12_800), "100.0 MB");
+        assert_eq!(temp_spill_cell(1), "8.0 KB");
+    }
+
+    #[test]
+    fn temp_spill_style_tints_by_severity_tier() {
+        assert_eq!(temp_spill_style(0), Style::new().fg(Color::DarkGray));
+        // Small spill (< 100 MiB): plain, not dimmed or warned.
+        assert_eq!(temp_spill_style(10), Style::new());
+        // >= 100 MiB (TEMP_SPILL_WARN_BYTES / BLOCK_BYTES blocks): yellow bold.
+        let warn_blocks = TEMP_SPILL_WARN_BYTES / BLOCK_BYTES;
+        assert_eq!(
+            temp_spill_style(warn_blocks),
+            Style::new().fg(Color::Yellow).bold()
+        );
     }
 }

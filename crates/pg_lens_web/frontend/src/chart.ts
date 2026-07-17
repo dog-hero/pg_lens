@@ -7,13 +7,30 @@ import type { SnapshotHistory } from "./types";
 
 const TPS_COLOR = "#4fc3f7";
 const SESSIONS_COLOR = "#ffb74d";
+/** Pinned-moment marker line — matches the accent used elsewhere for
+ * "you're looking at something specific" (the schema staleness dot, etc). */
+const PIN_COLOR = "#4fc3f7";
+
+/** Wired by main.ts's scrubber: fired on every cursor move (hover) and on a
+ * click inside the plotting area, both as data-array indices (uPlot's own
+ * `cursor.idx` — `null` on hover means "pointer left the plot"). */
+export interface ChartCallbacks {
+  onHover: (idx: number | null) => void;
+  onClick: (idx: number) => void;
+}
 
 export class HistoryChart {
   private readonly container: HTMLElement;
+  private readonly callbacks: ChartCallbacks | undefined;
   private plot: uPlot | null = null;
+  /** x-scale value (epoch seconds, matching the series' own x unit) of the
+   * pinned moment; `null` draws nothing. Survives `update()` because the
+   * draw hook re-reads it on every redraw instead of being baked into data. */
+  private pinnedXVal: number | null = null;
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, callbacks?: ChartCallbacks) {
     this.container = container;
+    this.callbacks = callbacks;
     window.addEventListener("resize", () => this.resize());
   }
 
@@ -29,12 +46,35 @@ export class HistoryChart {
     }
   }
 
+  /** Shows (or, with `null`, hides) the pinned-moment marker line at the
+   * given epoch-seconds x-value — called by main.ts's scrubber wiring. */
+  setPinMarker(epochSecs: number | null): void {
+    this.pinnedXVal = epochSecs;
+    this.plot?.redraw(false, false);
+  }
+
   private size(): { width: number; height: number } {
     return { width: Math.max(280, this.container.clientWidth), height: 220 };
   }
 
   private resize(): void {
     this.plot?.setSize(this.size());
+  }
+
+  private drawPinMarker(u: uPlot): void {
+    if (this.pinnedXVal === null) return;
+    const x = u.valToPos(this.pinnedXVal, "x", true);
+    if (x < u.bbox.left || x > u.bbox.left + u.bbox.width) return;
+    const ctx = u.ctx;
+    ctx.save();
+    ctx.strokeStyle = PIN_COLOR;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x, u.bbox.top);
+    ctx.lineTo(x, u.bbox.top + u.bbox.height);
+    ctx.stroke();
+    ctx.restore();
   }
 
   private options(): uPlot.Options {
@@ -78,6 +118,24 @@ export class HistoryChart {
       },
       legend: { live: true },
       cursor: { drag: { setScale: false } },
+      hooks: {
+        setCursor: [
+          (u) => {
+            this.callbacks?.onHover(u.cursor.idx ?? null);
+          },
+        ],
+        draw: [(u) => this.drawPinMarker(u)],
+        ready: [
+          (u) => {
+            // uPlot has no built-in "click" hook — `u.over` is the
+            // pointer-event-owning overlay div documented for exactly this.
+            u.over.addEventListener("click", () => {
+              const idx = u.cursor.idx;
+              if (idx !== null && idx !== undefined) this.callbacks?.onClick(idx);
+            });
+          },
+        ],
+      },
     };
   }
 }

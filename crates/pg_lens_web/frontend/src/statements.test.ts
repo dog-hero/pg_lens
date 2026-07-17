@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { statementsRowMatches } from "./statements.ts";
+import { statementsRowMatches, tempSpillCell } from "./statements.ts";
 import type { StatementRow } from "./types.ts";
 
 /** Minimal row builder: only query/query_id matter to the matcher. */
@@ -21,6 +21,13 @@ function row(query: string, queryId: string | null = null): StatementRow {
     rows: 0,
     shared_blks_hit: 0,
     shared_blks_read: 0,
+    shared_blks_dirtied: 0,
+    shared_blks_written: 0,
+    temp_blks_read: 0,
+    temp_blks_written: 0,
+    blk_read_time_ms: null,
+    blk_write_time_ms: null,
+    wal_bytes: null,
   };
 }
 
@@ -40,4 +47,13 @@ test("matches the queryid when present", () => {
 test("a null queryid never matches, never throws", () => {
   const r = row("SELECT 1", null);
   assert.ok(!statementsRowMatches(r, "anything"));
+});
+
+// v0.14: I/O & temp-spill profile — tempSpillCell mirrors the TUI's
+// temp_spill_cell (crates/pg_lens_tui/src/ui/query_lens.rs).
+test("tempSpillCell renders a dash for zero, human bytes otherwise", () => {
+  assert.equal(tempSpillCell(0), "—");
+  // 12800 blocks * 8kB = 100 MB.
+  assert.equal(tempSpillCell(12_800), "100 MB");
+  assert.equal(tempSpillCell(1), "8.0 KB");
 });

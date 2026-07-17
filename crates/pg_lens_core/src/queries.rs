@@ -107,11 +107,17 @@ const TABLE_STATS_POST_130000: &str = include_str!("../queries/table_stats_post_
 // on 13 and 16 in the Fase S2 run) — no post_NNNNNN variants needed.
 const BLOAT_TABLES: &str = include_str!("../queries/bloat_tables.sql");
 const BLOAT_INDEXES: &str = include_str!("../queries/bloat_indexes.sql");
-// pg_stat_statements top statements. One file serves 13+ because the lens
-// requires EXTENSION >= 1.8 (the `total_exec_time` schema, shipped with PG
-// 13) and refuses older extensions at detection time instead of carrying a
-// pre-1.8 (`total_time`) variant.
+// pg_stat_statements top statements. One SERVER-version-independent file
+// serves 13+ because the lens requires EXTENSION >= 1.8 (the
+// `total_exec_time` schema, shipped with PG 13) and refuses older
+// extensions at detection time instead of carrying a pre-1.8 (`total_time`)
+// variant. `QuerySet.statements` always holds this base (1.8) tier; the
+// v0.14 I/O/temp-spill columns widen as the EXTENSION version climbs, a
+// SEPARATE decision made at session-init time by
+// `statements_sql_for_extension` (see statements.sql's header).
 const STATEMENTS: &str = include_str!("../queries/statements.sql");
+const STATEMENTS_EXT_1_9: &str = include_str!("../queries/statements_ext_1_9.sql");
+const STATEMENTS_EXT_1_11: &str = include_str!("../queries/statements_ext_1_11.sql");
 // Admin actions, adapted from dalibo/pg_activity's do_pg_cancel_backend.sql /
 // do_pg_terminate_backend.sql. Version-independent (both functions predate
 // PG 13), so one file each serves the whole supported range.
@@ -220,6 +226,24 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
     }
 }
 
+/// Picks the Query Lens SQL variant for a PARSED `pg_stat_statements`
+/// EXTENSION version (major, minor) — v0.14's I/O & temp-spill profile.
+/// Independent of [`for_version`]'s server-version selection: these column
+/// renames/additions track the extension, not the server (see
+/// `queries/statements.sql`'s header for the full tier rundown). Only
+/// called once the caller already knows the extension clears the >= 1.8
+/// [`crate::db::statements_availability`] floor — below that this function
+/// is never reached (the Query Lens is `Unavailable` instead).
+pub fn statements_sql_for_extension(major: u32, minor: u32) -> &'static str {
+    if (major, minor) >= (1, 11) {
+        STATEMENTS_EXT_1_11
+    } else if (major, minor) >= (1, 9) {
+        STATEMENTS_EXT_1_9
+    } else {
+        STATEMENTS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +328,38 @@ mod tests {
                 "SQL row cap must match STATEMENTS_LIMIT"
             );
         }
+    }
+
+    #[test]
+    fn statements_ext_tiers_alias_to_the_same_column_names() {
+        // v0.14: one Rust parser serves all three extension tiers — every
+        // variant must expose the SAME output column names.
+        for sql in [STATEMENTS, STATEMENTS_EXT_1_9, STATEMENTS_EXT_1_11] {
+            for marker in [
+                "AS temp_blks_read",
+                "AS temp_blks_written",
+                "AS shared_blks_dirtied",
+                "AS shared_blks_written",
+                "AS blk_read_time_ms",
+                "AS blk_write_time_ms",
+                "AS wal_bytes",
+                "AS track_io_timing_on",
+            ] {
+                assert!(sql.contains(marker), "{marker} missing from a statements tier");
+            }
+        }
+    }
+
+    #[test]
+    fn statements_sql_for_extension_picks_the_right_tier() {
+        assert_eq!(statements_sql_for_extension(1, 8), STATEMENTS);
+        assert!(statements_sql_for_extension(1, 8).contains("NULL::int8 AS wal_bytes"));
+        assert_eq!(statements_sql_for_extension(1, 9), STATEMENTS_EXT_1_9);
+        assert!(statements_sql_for_extension(1, 9).contains("s.wal_bytes::int8 AS wal_bytes"));
+        assert_eq!(statements_sql_for_extension(1, 10), STATEMENTS_EXT_1_9);
+        assert_eq!(statements_sql_for_extension(1, 11), STATEMENTS_EXT_1_11);
+        assert!(statements_sql_for_extension(1, 11).contains("s.shared_blk_read_time::float8"));
+        assert_eq!(statements_sql_for_extension(2, 0), STATEMENTS_EXT_1_11);
     }
 
     #[test]

@@ -1,10 +1,17 @@
 // Macro Lens: vitals cards rendered from ServerVitals.
 
-import type { CheckpointerStats, LockCapacity, ServerVitals, VacuumClusterAge } from "./types";
+import type {
+  CheckpointerStats,
+  LockCapacity,
+  ServerVitals,
+  SnapshotHistory,
+  VacuumClusterAge,
+} from "./types";
 import { humanBytes, humanCount, humanDuration, humanPercent } from "./format";
 import { ageSeverity } from "./vacuum";
 import { checkpointerCard } from "./checkpointer";
 import { lockCapacitySeverity } from "./lock_capacity";
+import { TREND_LOOKBACK_TICKS, cardTrend, sampleForTrend, trendGlyph, trendTitle, trendTone } from "./trend";
 
 interface Card {
   label: string;
@@ -18,6 +25,9 @@ interface Card {
    * render bigger and span two grid columns — real visual hierarchy instead
    * of a flat wall of same-size cards. */
   lead?: boolean;
+  /** v0.14: trend arrow (now vs ~5 min ago) next to the label — `undefined`
+   * on cards this doesn't apply to. */
+  trend?: { glyph: string; tone: "" | "warn"; title: string };
 }
 
 /**
@@ -77,7 +87,10 @@ function checkpointCard(cp: CheckpointerStats | null): Card {
  * no poll yet) renders a calm collecting-state card instead of being
  * omitted — same "always present" rule as `checkpointCard`.
  */
-function lockCapacityCard(lc: LockCapacity | null): Card {
+function lockCapacityCard(
+  lc: LockCapacity | null,
+  trendInfo: Card["trend"],
+): Card {
   if (lc === null) {
     return {
       label: "Lock table",
@@ -94,6 +107,7 @@ function lockCapacityCard(lc: LockCapacity | null): Card {
     detail: `max_locks_per_transaction=${lc.max_locks_per_xact} · max_connections=${lc.max_connections} · max_prepared_transactions=${lc.max_prepared_xacts}`,
     meter: lc.used_fraction,
     tone: sev,
+    trend: trendInfo,
   };
 }
 
@@ -102,10 +116,22 @@ function cards(
   vacuumAge: VacuumClusterAge | null,
   checkpointer: CheckpointerStats | null,
   lockCapacity: LockCapacity | null,
+  history: SnapshotHistory,
 ): Card[] {
   const saturation =
     v.max_connections > 0 ? v.connections_total / v.max_connections : 0;
   const warning = vacuumCard(vacuumAge);
+
+  // v0.14: trend arrows compare "now" against the sample ~5 minutes back
+  // (clamped to the oldest available point on a young ring/session).
+  const baseline = sampleForTrend(history, TREND_LOOKBACK_TICKS);
+  const connTrend = cardTrend(v.connections_total, baseline?.connections_total ?? null);
+  const cacheNow = v.cache_hit_ratio * 100;
+  const cacheTrend = cardTrend(cacheNow, baseline?.cache_hit_pct ?? null);
+  const lockNow = lockCapacity !== null ? lockCapacity.used_fraction * 100 : null;
+  const lockTrend =
+    lockCapacity !== null ? cardTrend(lockCapacity.used_fraction * 100, baseline?.lock_pressure_pct ?? null) : "flat";
+
   return [
     ...(warning ? [warning] : []),
     {
@@ -115,8 +141,25 @@ function cards(
       meter: saturation,
       tone: saturation >= 0.9 ? "bad" : saturation >= 0.7 ? "warn" : "",
       lead: true,
+      trend: {
+        glyph: trendGlyph(connTrend),
+        tone: trendTone(connTrend, true),
+        title: trendTitle(v.connections_total, baseline?.connections_total ?? null, ""),
+      },
     },
-    { ...lockCapacityCard(lockCapacity), lead: true },
+    {
+      ...lockCapacityCard(
+        lockCapacity,
+        lockNow === null
+          ? undefined
+          : {
+              glyph: trendGlyph(lockTrend),
+              tone: trendTone(lockTrend, true),
+              title: trendTitle(lockNow, baseline?.lock_pressure_pct ?? null, "%"),
+            },
+      ),
+      lead: true,
+    },
     {
       label: "TPS",
       value: humanCount(v.tps),
@@ -130,6 +173,11 @@ function cards(
       detail: "blks_hit / (hit + read)",
       meter: v.cache_hit_ratio,
       tone: v.cache_hit_ratio < 0.9 ? "warn" : "",
+      trend: {
+        glyph: trendGlyph(cacheTrend),
+        tone: trendTone(cacheTrend, false),
+        title: trendTitle(cacheNow, baseline?.cache_hit_pct ?? null, "%"),
+      },
     },
     {
       label: "Deadlocks / temp",
@@ -155,9 +203,10 @@ export function renderVitals(
   vacuumAge: VacuumClusterAge | null = null,
   checkpointer: CheckpointerStats | null = null,
   lockCapacity: LockCapacity | null = null,
+  history: SnapshotHistory = { cap: 0, points: [] },
 ): void {
   container.replaceChildren(
-    ...cards(v, vacuumAge, checkpointer, lockCapacity).map((card) => {
+    ...cards(v, vacuumAge, checkpointer, lockCapacity, history).map((card) => {
       const el = document.createElement("div");
       const classes = ["card", card.tone, card.lead ? "lead" : ""].filter(Boolean);
       el.className = classes.join(" ");
@@ -167,8 +216,11 @@ export function renderVitals(
           : `<div class="meter"><div class="meter-fill" style="width:${(
               Math.min(1, Math.max(0, card.meter)) * 100
             ).toFixed(1)}%"></div></div>`;
+      const trendSpan = card.trend
+        ? ` <span class="card-trend ${card.trend.tone}" title="${escapeHtml(card.trend.title)}">${card.trend.glyph}</span>`
+        : "";
       el.innerHTML = `
-        <div class="card-label">${card.label}</div>
+        <div class="card-label">${card.label}${trendSpan}</div>
         <div class="card-value">${escapeHtml(card.value)}</div>
         ${meter}
         <div class="card-detail">${escapeHtml(card.detail)}</div>`;

@@ -4,6 +4,10 @@
 //   query text is attacker-influenceable);
 // - Hit% = shared_blks_hit / (hit + read); `—` when zero blocks were
 //   touched (never a made-up number);
+// - Temp (v0.14) = temp_blks_written * 8kB — the work_mem spill signal;
+//   `—` when zero, tinted (`.warn`) above TEMP_SPILL_WARN_BYTES; the rest
+//   of the I/O & temp-spill profile (temp read, shared dirtied/written,
+//   block read/write time, WAL bytes) lives in the detail row only;
 // - staleness line `db: X · N statements · collected Xs ago · current
 //   database only` that ticks locally between SSE frames (the collection
 //   shares the Schema Lens slow cadence);
@@ -14,10 +18,34 @@
 //   (highlighted) plus queryid/user/blocks.
 
 import type { StatementRow, StatementsSnapshot } from "./types";
-import { humanCount, humanDuration, humanMs } from "./format.ts";
+import { humanBytes, humanCount, humanDuration, humanMs } from "./format.ts";
 import { renderSqlInto } from "./sql.ts";
 
 const NO_HIT_RATIO = "—";
+const NO_DATA = "—";
+
+/** Postgres blocks are 8kB; `temp_blks_*` counters are in this unit. */
+const BLOCK_BYTES = 8192;
+
+/** Total temp-spill bytes above which the Temp cell tints `.warn` — any
+ * nonzero spill is notable, but this is the "go look at this query's
+ * work_mem" line. Mirrors the TUI's `TEMP_SPILL_WARN_BYTES` (100 MiB). */
+const TEMP_SPILL_WARN_BYTES = 100 * 1024 * 1024;
+
+/** Human bytes for a `temp_blks_written` count; `—` when zero (zero means
+ * "this statement has not spilled", never a fabricated "0 B"). */
+export function tempSpillCell(tempBlksWritten: number): string {
+  return tempBlksWritten > 0 ? humanBytes(tempBlksWritten * BLOCK_BYTES) : NO_DATA;
+}
+
+/** `--` for a null I/O timing (track_io_timing off) or absent field
+ * (e.g. wal_bytes on ext < 1.9) — mirrors the TUI's `NO_DATA` convention. */
+function optionalCell(
+  value: number | null,
+  render: (v: number) => string,
+): string {
+  return value === null ? NO_DATA : render(value);
+}
 
 /** Hit% as a display string; `—` when no shared blocks were touched. */
 export function hitPct(hit: number, read: number): string {
@@ -26,7 +54,14 @@ export function hitPct(hit: number, read: number): string {
   return `${((hit / total) * 100).toFixed(1)}%`;
 }
 
-type SortKey = "query" | "calls" | "total_exec_ms" | "mean_exec_ms" | "rows" | "hit";
+type SortKey =
+  | "query"
+  | "calls"
+  | "total_exec_ms"
+  | "mean_exec_ms"
+  | "rows"
+  | "hit"
+  | "temp_blks_written";
 
 interface Column {
   key: SortKey;
@@ -41,6 +76,7 @@ const COLUMNS: Column[] = [
   { key: "mean_exec_ms", label: "Mean", numeric: true },
   { key: "rows", label: "Rows", numeric: true },
   { key: "hit", label: "Hit %", numeric: true },
+  { key: "temp_blks_written", label: "Temp", numeric: true },
 ];
 
 /** Case-insensitive substring match over the normalized query text (and
@@ -276,6 +312,18 @@ export class StatementsLens {
       if (text === NO_HIT_RATIO) td.title = "no shared blocks touched";
       tr.append(td);
     }
+    const tempTd = document.createElement("td");
+    tempTd.textContent = tempSpillCell(row.temp_blks_written);
+    tempTd.classList.add("num", "temp");
+    if (row.temp_blks_written <= 0) {
+      tempTd.title = "no temp-file spill";
+    } else {
+      tempTd.title = `temp read ${humanBytes(row.temp_blks_read * BLOCK_BYTES)} · written ${humanBytes(row.temp_blks_written * BLOCK_BYTES)}`;
+      if (row.temp_blks_written * BLOCK_BYTES >= TEMP_SPILL_WARN_BYTES) {
+        tempTd.classList.add("warn");
+      }
+    }
+    tr.append(tempTd);
     tr.title = "click for the full query + detail";
     tr.addEventListener("click", () => {
       if (this.expanded.has(rowKey)) this.expanded.delete(rowKey);
@@ -295,10 +343,23 @@ export class StatementsLens {
     meta.textContent =
       `queryid ${row.query_id ?? "—"} · user ${row.username} · ` +
       `shared blocks hit ${humanCount(row.shared_blks_hit)} / ` +
-      `read ${humanCount(row.shared_blks_read)}`;
+      `read ${humanCount(row.shared_blks_read)} / ` +
+      `dirtied ${humanCount(row.shared_blks_dirtied)} / ` +
+      `written ${humanCount(row.shared_blks_written)}`;
+    // v0.14: I/O & temp-spill profile.
+    const io = document.createElement("div");
+    io.textContent =
+      `temp spill: read ${tempSpillCell(row.temp_blks_read)} · ` +
+      `written ${tempSpillCell(row.temp_blks_written)} · ` +
+      `block I/O: read ${optionalCell(row.blk_read_time_ms, humanMs)} · ` +
+      `write ${optionalCell(row.blk_write_time_ms, humanMs)} · ` +
+      `WAL: ${optionalCell(row.wal_bytes, humanBytes)}`;
+    if (row.temp_blks_written * BLOCK_BYTES >= TEMP_SPILL_WARN_BYTES) {
+      io.classList.add("warn");
+    }
     const query = document.createElement("pre");
     renderSqlInto(query, row.query);
-    td.append(meta, query);
+    td.append(meta, io, query);
     tr.append(td);
     return tr;
   }

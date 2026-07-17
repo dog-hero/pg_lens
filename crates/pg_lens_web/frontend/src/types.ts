@@ -66,6 +66,19 @@ export interface HistoryPoint {
   epoch_ms: number;
   tps: number;
   active_sessions: number;
+  /** v0.14: `#[serde(default)]` in Rust — 0 on points from a pre-widening
+   * history file loaded at startup, always populated on live ticks. */
+  connections_total: number;
+  /** 0.0..=100.0 (percentage, unlike `ServerVitals.cache_hit_ratio`); null
+   * only on points predating v0.14's widening. */
+  cache_hit_pct: number | null;
+  /** 0.0..=100.0; null when the lock-capacity gauge itself was unavailable
+   * that tick, not just on old data. */
+  lock_pressure_pct: number | null;
+  /** Oldest-transaction-ID age (Schema Lens data on its own slow cadence,
+   * carried forward between collections — see `history.rs`'s doc comment).
+   * Null before the first successful schema collection of a session. */
+  oldest_xid_age: number | null;
 }
 
 export interface SnapshotHistory {
@@ -80,6 +93,8 @@ export type PollerStatus = "Ok" | "Connecting" | { Error: string };
 export type SchemaStatus = "Ok" | { Error: string };
 
 export interface TableStatRow {
+  /** `pg_class.oid` — the size-growth ring's key (see pg_lens_core::schema_growth). */
+  oid: number;
   schema: string;
   name: string;
   total_bytes: number;
@@ -105,6 +120,14 @@ export interface TableStatRow {
   autovacuum_count: number;
   analyze_count: number;
   autoanalyze_count: number;
+  /** v0.14: `total_bytes` delta over the last hour; `null` until the
+   * poller's growth ring has 2+ samples for this table. Negative is a
+   * valid, meaningful shrink (VACUUM FULL, TRUNCATE) — never clamped. */
+  growth_1h_bytes: number | null;
+  /** `growth_1h_bytes` as a percentage of the oldest sample; `null` under
+   * the same conditions as `growth_1h_bytes`, or when that oldest sample
+   * was itself 0 bytes. */
+  growth_1h_pct: number | null;
 }
 
 /** ioguix-estimated bloat of a table or btree index. */
@@ -272,6 +295,26 @@ export interface StatementRow {
   rows: number;
   shared_blks_hit: number;
   shared_blks_read: number;
+  /** Shared buffers dirtied/written by this statement (v0.14). */
+  shared_blks_dirtied: number;
+  shared_blks_written: number;
+  /**
+   * Temp-file (work_mem spill) blocks read/written, 8kB each (v0.14) —
+   * the #1 query-tuning signal this row adds. `temp_blks_written` drives
+   * the Temp column/sort/severity tint.
+   */
+  temp_blks_read: number;
+  temp_blks_written: number;
+  /**
+   * Milliseconds spent on shared-buffer I/O; null when the
+   * `track_io_timing` GUC is off — the raw counters read back as 0 in that
+   * case, indistinguishable from "no I/O", so the core collapses both to
+   * null rather than shipping a misleading zero.
+   */
+  blk_read_time_ms: number | null;
+  blk_write_time_ms: number | null;
+  /** Total WAL bytes generated; null on pg_stat_statements < 1.9. */
+  wal_bytes: number | null;
 }
 
 /**

@@ -228,6 +228,7 @@ pub fn replication_slot_from_row(row: &Row) -> Result<ReplicationSlotRow, tokio_
 /// epoch seconds `::float8` (NULL = never), per the repo convention.
 pub fn table_stat_from_row(row: &Row) -> Result<TableStatRow, tokio_postgres::Error> {
     Ok(TableStatRow {
+        oid: row.try_get("relid")?,
         schema: row.try_get("schemaname")?,
         name: row.try_get("relname")?,
         total_bytes: row.try_get("total_bytes")?,
@@ -253,6 +254,10 @@ pub fn table_stat_from_row(row: &Row) -> Result<TableStatRow, tokio_postgres::Er
         autovacuum_count: row.try_get("autovacuum_count")?,
         analyze_count: row.try_get("analyze_count")?,
         autoanalyze_count: row.try_get("autoanalyze_count")?,
+        // Filled in by the poller from the size-growth ring after every row
+        // is parsed (`crate::schema_growth`), never by the SQL itself.
+        growth_1h_bytes: None,
+        growth_1h_pct: None,
     })
 }
 
@@ -349,19 +354,32 @@ pub fn statements_availability(extversion: Option<&str>) -> Result<(), String> {
 }
 
 /// `"1.8"` → `(1, 8)`; `"1.10"` → `(1, 10)`. Tolerates a patch component
-/// (`"1.8.1"`); anything not starting `major.minor` is `None`.
-fn parse_extension_version(version: &str) -> Option<(u32, u32)> {
+/// (`"1.8.1"`); anything not starting `major.minor` is `None`. `pub` (not
+/// just `pub(crate)`) so the poller can feed the parsed tuple straight into
+/// `queries::statements_sql_for_extension` (v0.14) without re-implementing
+/// the parse.
+pub fn parse_extension_version(version: &str) -> Option<(u32, u32)> {
     let mut parts = version.trim().split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     Some((major, minor))
 }
 
-/// Maps one row of `queries/statements.sql` onto [`StatementRow`]. The
-/// queryid arrives already `::text` (JS-safe across the JSON boundary);
-/// NULLs collapse per column semantics (`query`/`usename` to `""`,
-/// `queryid` kept as `None`).
+/// Maps one row of `queries/statements.sql` (or its sibling extension-tier
+/// variants, `statements_ext_1_9.sql`/`statements_ext_1_11.sql` — see that
+/// file's header) onto [`StatementRow`]. The queryid arrives already
+/// `::text` (JS-safe across the JSON boundary); NULLs collapse per column
+/// semantics (`query`/`usename` to `""`, `queryid` kept as `None`).
+///
+/// `track_io_timing_on` (v0.14) is a per-row scalar (constant across every
+/// row of one collection): when the GUC is off, `blk_read_time_ms`/
+/// `blk_write_time_ms` read back as `0`, indistinguishable from "no time
+/// spent" — so both collapse to `None` in that case rather than shipping a
+/// misleading zero (mirrors the checkpointer's optional-timing pattern).
 pub fn statement_from_row(row: &Row) -> Result<StatementRow, tokio_postgres::Error> {
+    let track_io_timing_on: bool = row.try_get("track_io_timing_on")?;
+    let blk_read_time_ms: f64 = row.try_get("blk_read_time_ms")?;
+    let blk_write_time_ms: f64 = row.try_get("blk_write_time_ms")?;
     Ok(StatementRow {
         query_id: row.try_get("queryid")?,
         query: opt_text(row, "query")?,
@@ -372,6 +390,13 @@ pub fn statement_from_row(row: &Row) -> Result<StatementRow, tokio_postgres::Err
         rows: row.try_get("rows")?,
         shared_blks_hit: row.try_get("shared_blks_hit")?,
         shared_blks_read: row.try_get("shared_blks_read")?,
+        shared_blks_dirtied: row.try_get("shared_blks_dirtied")?,
+        shared_blks_written: row.try_get("shared_blks_written")?,
+        temp_blks_read: row.try_get("temp_blks_read")?,
+        temp_blks_written: row.try_get("temp_blks_written")?,
+        blk_read_time_ms: track_io_timing_on.then_some(blk_read_time_ms),
+        blk_write_time_ms: track_io_timing_on.then_some(blk_write_time_ms),
+        wal_bytes: row.try_get("wal_bytes")?,
     })
 }
 
