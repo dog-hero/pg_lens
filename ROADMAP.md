@@ -38,7 +38,7 @@ that also clears the stale-README debt.
 
 ## v0.10 — shipped (see Shipped section)
 
-## v0.11 — "Incident precursors & connection visibility" (in progress — owner-selected 2026-07-17)
+## v0.11 — "Incident precursors & connection visibility" (shipped — see Shipped section)
 
 Cheap, cohesive batch from the 2026-07-17 discovery: close an outright
 visibility hole (idle connections), add two leading-indicator gauges that warn
@@ -118,6 +118,17 @@ Deferred candidate from the same pass (map, don't build this batch):
 
 ## Shipped
 
+- **v0.11.0** — "Incident precursors & connection visibility": idle
+  connection / connection-age census (`I` toggle in the Micro Lens, oldest
+  idle sessions ranked with age tiers — diagnoses pool-exhaustion incidents
+  the activity table normally hides); a lock-table pressure gauge (third
+  Macro Lens vitals gauge, warns ahead of "out of shared memory, increase
+  max_locks_per_transaction"); an `INVALID`/not-ready index flag in the
+  Index Lens for indexes left behind by a failed `CREATE INDEX
+  CONCURRENTLY`; and a `psql` shell launch (`!`, TUI-only) on the same
+  connection, password only via `PGPASSWORD` env (never argv), with a
+  read-only-transaction default under `--read-only` — all in both TUI and
+  Web Lens except the TUI-only psql shell.
 - **v0.10.0** — read-only mode (`--read-only` / `PG_LENS_READ_ONLY` /
   `read_only = true` in config.toml) hard-disables `c`/`K` with a real
   server-side gate in both the TUI (refused before the confirm modal opens,
