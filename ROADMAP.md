@@ -145,7 +145,7 @@ sources — pure interaction/ergonomics, TUI-first with web parity where cheap.
 Explicitly NOT doing (discovery correction): `s` sort-cycle on Index/Replication
 Lens — those are intentionally fixed severity-ranked order, not a gap.
 
-## v0.14 — "See the trend, not just the moment" (in progress — owner-selected 2026-07-17)
+## v0.14 — "See the trend, not just the moment" (shipped — see Shipped section)
 
 The persisted 1h history (JSONL ring, survives restarts) today carries only
 `tps` + `active_sessions`; every lens is otherwise point-in-time. This batch
@@ -206,6 +206,19 @@ exactly one); non-TTY keeps the v0.13 fail-loud.
 
 ## Shipped
 
+- **v0.14.0** — "See the trend, not just the moment": widened the
+  persisted `SnapshotHistory` with connections/cache-hit%/lock-pressure%/
+  oldest-XID-age and added vitals trend arrows (↑/↓/→ vs ~5 min ago) to the
+  Macro Lens Connections/Cache hit/Lock table cards, TUI + web (web adds a
+  tooltip delta); a web-only history time-scrubber (hover for a live
+  readout, click to pin keyed by timestamp, ←/→ step, Esc/✕ unpin); a
+  Schema Lens `Δ1h` table-size-growth column from a bounded oid-keyed
+  per-table ring, with a new "growth" `s` sort mode; a Query Lens `Temp`
+  column plus a full temp-spill/I/O detail breakdown (temp read/written,
+  shared blocks dirtied/written, block I/O timing, WAL bytes) across three
+  `pg_stat_statements` extension-version gates, with a new "temp" `s` sort
+  mode; and an interactive TTY service picker for `pg_lens serve` on an
+  ambiguous `services.toml` (non-TTY keeps the v0.13 fail-loud).
 - **v0.13.0** — consolidated release of two batches (versions skip
   0.12.0 — one tag, one pipeline): "Navigation & filters" — direct tab
   jump (`1`–`6`), `Shift+Tab` backward cycle, `Backspace` last-tab
