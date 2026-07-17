@@ -609,6 +609,7 @@ pub fn resolve(spec: &ConnSpec) -> Result<Resolved, SettingsError> {
 }
 
 /// One row of `--list-services` output: never a password or `password_cmd`.
+#[derive(Clone)]
 pub struct ServiceSummary {
     pub name: String,
     pub host: Option<String>,

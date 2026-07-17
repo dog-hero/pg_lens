@@ -502,18 +502,98 @@ fn picker_services(spec: &ConnSpec) -> Option<(Vec<ServiceSummary>, Vec<String>)
     }
 }
 
-/// `serve`'s fail-loud predicate (v0.13): is the connection ambiguous for a
-/// non-interactive process? A thin, `serve`-scoped wrapper around
-/// [`picker_services`] — the EXACT same "was a connection explicitly chosen?"
-/// rule the TUI uses to decide whether to show its picker (no `--dsn`/
-/// `--service`, no PGHOST/PGSERVICE/PG_LENS_SERVICE/PG_LENS_DSN, and a
-/// services file that exists and defines >=1 service). `serve` has no TTY
-/// to show a picker in, so where the TUI would pop one up, `serve` instead
-/// treats it as an error. Takes a [`ConnSpec`] (not `ConnArgs`) for the same
-/// reason `picker_services` does — testable without touching real process
-/// env, consistent with this module's "environment is injected" discipline.
+/// `serve`'s ambiguity predicate: is the connection ambiguous for a process
+/// with no `--service`/`--dsn`/env selection? A thin, `serve`-scoped wrapper
+/// around [`picker_services`] — the EXACT same "was a connection explicitly
+/// chosen?" rule the TUI uses to decide whether to show its picker (no
+/// `--dsn`/`--service`, no PGHOST/PGSERVICE/PG_LENS_SERVICE/PG_LENS_DSN, and
+/// a services file that exists and defines >=1 service). Where the TUI would
+/// pop up its ratatui picker, `serve` instead either prompts on stdin (real
+/// terminal) or fails loud (piped/daemon — see [`run_serve`]). Takes a
+/// [`ConnSpec`] (not `ConnArgs`) for the same reason `picker_services` does —
+/// testable without touching real process env, consistent with this module's
+/// "environment is injected" discipline.
 fn serve_ambiguous_services(spec: &ConnSpec) -> Option<(Vec<ServiceSummary>, Vec<String>)> {
     picker_services(spec)
+}
+
+/// Parses one line of stdin input against the numbered/named service list:
+/// a 1-based index (`"2"`) or the literal service name (`"prod"`), either
+/// surrounded by incidental whitespace (a trailing newline, in practice).
+/// `None` on anything else — blank input, an out-of-range index, or an
+/// unknown name — which the caller re-prompts on. Pure and unit-tested
+/// without any real stdin.
+fn parse_service_choice(input: &str, services: &[ServiceSummary]) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(n) = trimmed.parse::<usize>() {
+        return (n >= 1 && n <= services.len()).then(|| services[n - 1].name.clone());
+    }
+    services
+        .iter()
+        .find(|s| s.name == trimmed)
+        .map(|s| s.name.clone())
+}
+
+/// Max invalid-input re-prompts before `prompt_service_choice` gives up and
+/// errors out — a real terminal with a real operator should never need
+/// anywhere near this many; it exists so a misbehaving/scripted stdin can't
+/// spin forever.
+const PROMPT_MAX_ATTEMPTS: u32 = 5;
+
+/// Interactive stdin service picker for `pg_lens serve` — only called when
+/// stdin is a real TTY (see [`run_serve`]); a piped/daemon invocation never
+/// reaches here. Plain, blocking line I/O: this runs before the server (or
+/// any other task) has started, so there is nothing else for the process to
+/// be doing, and no ratatui/crossterm raw-mode is initialized for it — a
+/// plain `Ctrl+C` here uses the default SIGINT behavior and exits cleanly.
+///
+/// A single defined service is auto-selected with a printed notice rather
+/// than prompted for — a "pick 1 of 1" prompt is friction with no payoff.
+/// Pure (no I/O) so the rule itself is unit-testable; the caller does the
+/// printing.
+fn auto_select_single_service(services: &[ServiceSummary]) -> Option<&ServiceSummary> {
+    match services {
+        [only] => Some(only),
+        _ => None,
+    }
+}
+
+fn prompt_service_choice(services: &[ServiceSummary]) -> color_eyre::Result<String> {
+    use std::io::Write;
+
+    if let Some(only) = auto_select_single_service(services) {
+        eprintln!("pg_lens: using the only defined service: {}", only.name);
+        return Ok(only.name.clone());
+    }
+
+    eprintln!("pg_lens: multiple services defined — choose one:");
+    for (idx, service) in services.iter().enumerate() {
+        eprintln!(
+            "  {n}) {name}\thost={host}\tuser={user}",
+            n = idx + 1,
+            name = service.name,
+            host = service.host.as_deref().unwrap_or("-"),
+            user = service.user.as_deref().unwrap_or("-"),
+        );
+    }
+
+    for _ in 0..PROMPT_MAX_ATTEMPTS {
+        eprint!("select a service [1-{}] (or Ctrl+C to abort): ", services.len());
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        let read = std::io::stdin().read_line(&mut line)?;
+        if read == 0 {
+            color_eyre::eyre::bail!("no service selected (stdin closed)");
+        }
+        match parse_service_choice(&line, services) {
+            Some(name) => return Ok(name),
+            None => eprintln!("invalid selection: {:?} — try again", line.trim()),
+        }
+    }
+    color_eyre::eyre::bail!("too many invalid selections — aborting")
 }
 
 /// Builds the picker rows: one per service, rendered exactly as the file
@@ -822,8 +902,9 @@ async fn run_tui(conn_args: ConnArgs) -> color_eyre::Result<()> {
 /// `pg_lens serve`: same resolution and poller as the TUI, but the watch
 /// channel feeds pg_lens_web's router instead of ratatui. Runs until Ctrl+C.
 #[cfg(feature = "web")]
-async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
+async fn run_serve(mut conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
     use color_eyre::eyre::eyre;
+    use std::io::IsTerminal;
 
     let config = conn.app_config();
     let overlay = conn.resolve_remote_overlay(&config).await?;
@@ -832,11 +913,12 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
         return conn.list_services(overlay.as_ref());
     }
 
-    // Fail-loud on ambiguous resolution (v0.13): `serve` has no TTY for the
-    // TUI's interactive picker, so where the TUI would show that picker,
-    // `serve` must instead refuse to guess and exit — connecting to the
-    // wrong database silently (typically localhost) is a much worse outcome
-    // for an unattended process than a startup error.
+    // Ambiguous resolution: no `--dsn`/`--service`/connection env, but the
+    // services file defines >=1 entry — `serve` has no ratatui picker to
+    // show, so it either prompts on a real terminal or, on anything else
+    // (piped stdin, systemd, CI), fails loud exactly as v0.13 did. An
+    // interactive prompt on a non-TTY stdin would hang a daemon forever, so
+    // the TTY check gates which of the two happens.
     if !conn.mock
         && let Some((services, warnings)) =
             serve_ambiguous_services(&conn.spec_with(overlay.as_ref()))
@@ -844,23 +926,28 @@ async fn run_serve(conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()> {
         for warning in &warnings {
             eprintln!("warning: {warning}");
         }
-        let names = services
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        for service in &services {
-            eprintln!(
-                "  {name}\thost={host}\tuser={user}",
-                name = service.name,
-                host = service.host.as_deref().unwrap_or("-"),
-                user = service.user.as_deref().unwrap_or("-"),
-            );
+        if std::io::stdin().is_terminal() {
+            let chosen = prompt_service_choice(&services)?;
+            conn.service = Some(chosen);
+        } else {
+            let names = services
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            for service in &services {
+                eprintln!(
+                    "  {name}\thost={host}\tuser={user}",
+                    name = service.name,
+                    host = service.host.as_deref().unwrap_or("-"),
+                    user = service.user.as_deref().unwrap_or("-"),
+                );
+            }
+            return Err(eyre!(
+                "multiple services defined and none selected — pass --service <name> \
+                 (available: {names})"
+            ));
         }
-        return Err(eyre!(
-            "multiple services defined and none selected — pass --service <name> \
-             (available: {names})"
-        ));
     }
 
     let listen = resolve_listen(args.listen, &config);
@@ -1689,5 +1776,95 @@ mod tests {
         let rendered = format!("{entries:?}");
         assert!(!rendered.contains("hidden-secret"), "got: {rendered}");
         assert!(!rendered.contains("password"), "got: {rendered}");
+    }
+
+    // --- `serve`'s interactive picker: pure input-parsing rules ---------------
+
+    fn summaries() -> Vec<ServiceSummary> {
+        vec![
+            ServiceSummary {
+                name: "prod".to_string(),
+                host: Some("db.prod.internal".to_string()),
+                user: Some("svc_ro".to_string()),
+            },
+            ServiceSummary {
+                name: "dead".to_string(),
+                host: Some("dead.invalid".to_string()),
+                user: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn parse_service_choice_accepts_a_1_based_index() {
+        let services = summaries();
+        assert_eq!(
+            parse_service_choice("1\n", &services).as_deref(),
+            Some("prod")
+        );
+        assert_eq!(
+            parse_service_choice("2", &services).as_deref(),
+            Some("dead")
+        );
+    }
+
+    #[test]
+    fn parse_service_choice_accepts_the_service_name() {
+        let services = summaries();
+        assert_eq!(
+            parse_service_choice("dead\n", &services).as_deref(),
+            Some("dead")
+        );
+        // A name that happens to look numeric-adjacent still resolves by
+        // exact match, not by accidentally parsing as an index.
+        assert_eq!(
+            parse_service_choice("prod", &services).as_deref(),
+            Some("prod")
+        );
+    }
+
+    #[test]
+    fn parse_service_choice_trims_incidental_whitespace() {
+        let services = summaries();
+        assert_eq!(
+            parse_service_choice("  1  \r\n", &services).as_deref(),
+            Some("prod")
+        );
+        assert_eq!(
+            parse_service_choice("  dead  \n", &services).as_deref(),
+            Some("dead")
+        );
+    }
+
+    #[test]
+    fn parse_service_choice_rejects_out_of_range_index() {
+        let services = summaries();
+        assert_eq!(parse_service_choice("0", &services), None);
+        assert_eq!(parse_service_choice("3", &services), None);
+        assert_eq!(parse_service_choice("999", &services), None);
+    }
+
+    #[test]
+    fn parse_service_choice_rejects_unknown_name_and_garbage() {
+        let services = summaries();
+        assert_eq!(parse_service_choice("staging", &services), None);
+        assert_eq!(parse_service_choice("abc123", &services), None);
+        assert_eq!(parse_service_choice("", &services), None);
+        assert_eq!(parse_service_choice("   \n", &services), None);
+    }
+
+    #[test]
+    fn auto_select_single_service_only_fires_with_exactly_one_entry() {
+        let one = vec![summaries()[0].clone()];
+        assert_eq!(
+            auto_select_single_service(&one).map(|s| s.name.as_str()),
+            Some("prod")
+        );
+
+        let two = summaries();
+        assert!(auto_select_single_service(&two).is_none());
+
+        let none: Vec<ServiceSummary> = vec![];
+        assert!(auto_select_single_service(&none).is_none());
     }
 }
