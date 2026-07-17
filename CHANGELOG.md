@@ -4,6 +4,42 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.10.0] — 2026-07-16
+
+### Added
+- **Read-only mode** — a `--read-only` flag / `PG_LENS_READ_ONLY` env var /
+  `read_only = true` in `config.toml` (precedence: flag → env → config →
+  default `false`) hard-disables every admin/mutating action for
+  shared or audited deployments. This is a real server-side gate, not UI
+  hiding: in the TUI, `open_confirm()` refuses `c`/`K` *before* the confirm
+  modal ever opens (inline "read-only mode — action disabled" feedback,
+  plus a permanent yellow `RO` marker in the header so the mode is never
+  silently active); in the Web Lens, the `/api/admin/*` endpoints return
+  `403` even when a valid `PG_LENS_AUTH_TOKEN` is presented. A new
+  `GET /api/config` endpoint exposes `{"read_only": bool}` and the web
+  frontend disables the cancel/terminate buttons and shows a badge to
+  match. Schema refresh (`R`) is unaffected — it only ever opens a
+  read-only transaction. `pg_lens serve` inherits the same flag/env/config
+  resolution. TUI + Web.
+- **Remote connection config** — `--config-url <URL>` / `PG_LENS_CONFIG_URL`
+  env / `remote_config` in `config.toml` loads a shared `services.toml`
+  from a remote source, so a team can point every machine at one curated
+  target list instead of copying the file by hand. Accepts either a
+  `github:OWNER/REPO/PATH[@REF]` shorthand (fetched via the GitHub
+  Contents API) or a verbatim `https://`/`http://` URL. The token is
+  never stored in a file: it comes from `PG_LENS_CONFIG_TOKEN`, then
+  `GITHUB_TOKEN`, then a `remote_config_token_cmd` in `config.toml`
+  (mirrors the existing `password_cmd` pattern — an external command,
+  trimmed stdout), sent as `Authorization: Bearer`; a token is refused
+  outright over plain `http://`. A successful fetch is cached at
+  `$XDG_CACHE_HOME/pg_lens/remote-services.toml` (mode `0600`); a failed
+  fetch falls back to that cache, then the local services file, with a
+  stderr warning at each step — startup never blocks on a flaky network
+  (10s timeout) and never hard-fails while a local or cached file can
+  still serve. Remote entries win on a same-named collision with local
+  entries; the fetch is strictly read-only, pg_lens never writes back to
+  the remote source.
+
 ## [0.9.0] — 2026-07-16 — "Problem transactions"
 
 The cheap, cohesive batch around long/idle transactions and blocking —

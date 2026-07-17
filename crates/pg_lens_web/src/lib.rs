@@ -55,6 +55,14 @@ struct WebState {
     /// Admin commands (cancel/terminate) go here; the poller (sole DB owner)
     /// executes them. Only reachable when a token is configured.
     admin: mpsc::Sender<AdminCommand>,
+    /// Read-only mode (`--read-only` / `PG_LENS_READ_ONLY` / config.toml,
+    /// resolved by the CLI and handed in here). The REAL gate: [`admin`]
+    /// refuses every admin request when this is true, BEFORE it even checks
+    /// the token — read-only outranks auth, so an authenticated caller still
+    /// cannot act. Also exposed via `GET /api/config` so the frontend can
+    /// disable its own buttons too (defense in depth; the handler check is
+    /// what actually matters).
+    read_only: bool,
 }
 
 /// Refuses non-loopback binds without an auth token (Fase 6 requirement:
@@ -113,24 +121,31 @@ where
 /// `PG_LENS_AUTH_TOKEN`); when `Some`, every `/api/*` route demands it.
 /// `schema_refresh` and `admin` are the control channels into the poller;
 /// admin routes additionally require a configured token (see [`admin`]).
+/// `read_only` (`--read-only` / `PG_LENS_READ_ONLY` / config.toml) is a
+/// stronger gate than the token: when true, [`admin`] refuses every request
+/// regardless of whether a valid token was presented.
 pub fn router(
     snapshots: watch::Receiver<Arc<DbSnapshot>>,
     schema_refresh: watch::Sender<u64>,
     admin: mpsc::Sender<AdminCommand>,
     auth_token: Option<String>,
+    read_only: bool,
 ) -> Router {
     let state = WebState {
         snapshots,
         token: auth_token.map(Arc::from),
         schema_refresh,
         admin,
+        read_only,
     };
     let api = Router::new()
         .route("/snapshot", get(snapshot))
         .route("/stream", get(stream))
+        .route("/config", get(config_handler))
         // Web parity with the TUI: recollect the Schema Lens (like `R`) and
         // signal backends (like `c`/`K`). Admin is gated a second time inside
-        // the handler — it must never work without an auth token.
+        // the handler — it must never work without an auth token, and never
+        // at all in read-only mode (see [`admin`]).
         .route("/schema/refresh", post(schema_refresh_handler))
         .route("/admin/cancel/{pid}", post(admin_cancel))
         .route("/admin/terminate/{pid}", post(admin_terminate))
@@ -255,6 +270,16 @@ async fn schema_refresh_handler(State(state): State<WebState>) -> Response {
     (StatusCode::ACCEPTED, "schema refresh requested").into_response()
 }
 
+/// `GET /api/config` — small, non-secret feature flags the frontend needs to
+/// decide what to render (currently just `read_only`). Defense in depth
+/// only: the frontend uses this to grey out its own buttons, but the actual
+/// enforcement is [`admin`]'s server-side refusal, which does not trust this
+/// endpoint or the client at all.
+async fn config_handler(State(state): State<WebState>) -> Response {
+    let body = serde_json::json!({ "read_only": state.read_only }).to_string();
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+}
+
 async fn admin_cancel(state: State<WebState>, pid: Path<i32>) -> Response {
     admin(state.0, AdminCommand::CancelBackend(pid.0)).await
 }
@@ -268,7 +293,20 @@ async fn admin_terminate(state: State<WebState>, pid: Path<i32>) -> Response {
 /// exposes it unauthenticated (the TUI, a local interactive tool, is the
 /// unauthenticated path). The command's RESULT travels back in the normal
 /// snapshot stream as `last_admin_action`, which the frontend surfaces.
+///
+/// Read-only is checked FIRST and unconditionally: it is a stronger gate
+/// than the token, so a caller presenting a perfectly valid
+/// `PG_LENS_AUTH_TOKEN` still gets refused when the server was started
+/// read-only. This is the real enforcement point on the web side — the
+/// frontend's disabled buttons (`/api/config`) are only a convenience.
 async fn admin(state: WebState, command: AdminCommand) -> Response {
+    if state.read_only {
+        return (
+            StatusCode::FORBIDDEN,
+            "server is running in read-only mode: admin actions are disabled",
+        )
+            .into_response();
+    }
     if state.token.is_none() {
         return (
             StatusCode::FORBIDDEN,
@@ -344,10 +382,20 @@ mod tests {
     }
 
     fn mock_harness(token: Option<&str>) -> Harness {
+        mock_harness_with(token, false)
+    }
+
+    fn mock_harness_with(token: Option<&str>, read_only: bool) -> Harness {
         let (snap_tx, snap_rx) = watch::channel(Arc::new(DbSnapshot::mock()));
         let (schema_tx, schema_rx) = watch::channel(0u64);
         let (admin_tx, admin_rx) = mpsc::channel(8);
-        let router = router(snap_rx, schema_tx, admin_tx, token.map(str::to_string));
+        let router = router(
+            snap_rx,
+            schema_tx,
+            admin_tx,
+            token.map(str::to_string),
+            read_only,
+        );
         Harness {
             _snap_tx: snap_tx,
             schema_refresh: schema_rx,
@@ -577,6 +625,53 @@ mod tests {
             h.admin_rx.try_recv(),
             Ok(AdminCommand::CancelBackend(777))
         ));
+    }
+
+    /// The real web-side gate: read-only refuses admin actions even with a
+    /// VALID token — a stronger gate than auth, not a substitute for it.
+    #[tokio::test]
+    async fn admin_refuses_even_with_a_valid_token_in_read_only_mode() {
+        let mut h = mock_harness_with(Some("sekret"), true);
+        let response = send(
+            h.router.clone(),
+            "POST",
+            "/api/admin/terminate/50",
+            Some("sekret"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(h.admin_rx.try_recv().is_err(), "nothing was queued");
+
+        let cancel = send(h.router.clone(), "POST", "/api/admin/cancel/50", Some("sekret")).await;
+        assert_eq!(cancel.status(), StatusCode::FORBIDDEN);
+        assert!(h.admin_rx.try_recv().is_err());
+    }
+
+    /// `schema/refresh` is pure SELECT-heavy recollection (no write
+    /// transaction — see `poller::begin_read`), so read-only leaves it
+    /// working, same as the TUI's `R` key.
+    #[tokio::test]
+    async fn schema_refresh_still_works_in_read_only_mode() {
+        let mut h = mock_harness_with(None, true);
+        let response = send(h.router.clone(), "POST", "/api/schema/refresh", None).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(*h.schema_refresh.borrow_and_update(), 1);
+    }
+
+    #[tokio::test]
+    async fn config_endpoint_reports_read_only_flag() {
+        let h = mock_harness_with(None, false);
+        let response = get_response(h.router, "/api/config", None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.expect("body").to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["read_only"], false);
+
+        let h = mock_harness_with(None, true);
+        let response = get_response(h.router, "/api/config", None).await;
+        let body = response.into_body().collect().await.expect("body").to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["read_only"], true);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 
 import "./style.css";
 import type { AdminActionResult, ActivityRow, DbSnapshot, PollerStatus } from "./types";
-import { requestAdmin, requestSchemaRefresh, type AdminKind } from "./actions";
+import { fetchConfig, requestAdmin, requestSchemaRefresh, type AdminKind } from "./actions";
 import { renderVitals } from "./vitals";
 import { HistoryChart } from "./chart";
 import { ActivityTable } from "./table";
@@ -30,6 +30,7 @@ function el<T extends HTMLElement>(id: string): T {
 }
 
 const serverInfo = el<HTMLSpanElement>("server-info");
+const readOnlyBadge = el<HTMLSpanElement>("read-only-badge");
 const connState = el<HTMLSpanElement>("conn-state");
 const statusBanner = el<HTMLDivElement>("status-banner");
 const tokenOverlay = el<HTMLDivElement>("token-overlay");
@@ -44,6 +45,10 @@ const schemaRefreshBtn = el<HTMLButtonElement>("schema-refresh-btn");
 // The token in use for the live connection (null = open server). Admin
 // controls only appear when it is set.
 let activeToken: string | null = null;
+// Read-only mode (`GET /api/config`, refreshed per connection): defense in
+// depth ONLY — hides/disables the buttons, but the server's `/api/admin/*`
+// handler is the real, unconditional gate (see pg_lens_web::admin).
+let readOnly = false;
 
 const chart = new HistoryChart(el<HTMLDivElement>("chart"));
 const table = new ActivityTable(
@@ -51,7 +56,7 @@ const table = new ActivityTable(
   document.getElementById("activity-filter") as HTMLInputElement | null,
   document.getElementById("activity-count"),
   {
-    adminEnabled: () => activeToken !== null,
+    adminEnabled: () => activeToken !== null && !readOnly,
     onAdmin: (kind, row) => void onAdmin(kind, row),
   },
 );
@@ -234,13 +239,24 @@ schemaRefreshBtn.addEventListener("click", () => {
 });
 
 async function onAdmin(kind: AdminKind, row: ActivityRow): Promise<void> {
+  // Defense in depth only: the table already hides the Actions column while
+  // `readOnly` is true (see `adminEnabled` above), so this only fires if
+  // that check was somehow bypassed — the server's own refusal below is
+  // what actually matters either way.
+  if (readOnly) {
+    showToast("Server is running in read-only mode: admin actions are disabled", true);
+    return;
+  }
   const verb = kind === "cancel" ? "Cancel query on" : "Terminate backend";
   if (!window.confirm(`${verb} PID ${row.pid} (${row.username}@${row.database})?`)) {
     return;
   }
   const result = await requestAdmin(activeToken, kind, row.pid);
   if (result.status === 403) {
-    showToast("Admin actions require the server to have a token set", true);
+    showToast(
+      "Admin actions are disabled (read-only mode, or the server has no token set)",
+      true,
+    );
   } else if (!result.ok) {
     showToast(`Admin request failed (HTTP ${result.status || "network"})`, true);
   } else {
@@ -252,6 +268,19 @@ function connect(token: string | null): void {
   stream?.close();
   activeToken = token;
   setConnState("connecting");
+  // Best-effort: a failed fetch defaults to `readOnly = false` (fail open on
+  // the UI side only — `/api/admin/*` still refuses server-side whenever the
+  // server was actually started read-only, regardless of what this reports).
+  void fetchConfig(token).then((cfg) => {
+    readOnly = cfg.readOnly;
+    readOnlyBadge.hidden = !readOnly;
+    // The Actions column depends on `adminEnabled()`, which now reads
+    // `readOnly` too — re-render just the head in case this resolved after
+    // the first snapshot already drew it (the common, fast case never
+    // notices: `fetchConfig` and the stream's first frame race, but nothing
+    // depends on which wins).
+    table.refreshHead();
+  });
   stream = openStream(token, {
     onSnapshot,
     onStateChange: setConnState,

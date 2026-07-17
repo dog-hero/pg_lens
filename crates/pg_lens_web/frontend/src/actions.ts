@@ -7,6 +7,25 @@ function authHeaders(token: string | null): HeadersInit {
   return token === null ? {} : { Authorization: `Bearer ${token}` };
 }
 
+/**
+ * GET /api/config — small, non-secret feature flags (currently just
+ * `read_only`). Used to grey out admin controls; this is defense in depth
+ * ONLY — the server refuses `/api/admin/*` itself regardless of what this
+ * endpoint reports or whether the client even calls it. Best-effort: a
+ * fetch failure is treated as "not read-only" (fail open on the UI side —
+ * the server-side gate still holds either way).
+ */
+export async function fetchConfig(token: string | null): Promise<{ readOnly: boolean }> {
+  try {
+    const res = await fetch("/api/config", { headers: authHeaders(token) });
+    if (!res.ok) return { readOnly: false };
+    const body = (await res.json()) as { read_only?: boolean };
+    return { readOnly: body.read_only === true };
+  } catch {
+    return { readOnly: false };
+  }
+}
+
 /** POST /api/schema/refresh — trigger a Schema Lens recollect. */
 export async function requestSchemaRefresh(token: string | null): Promise<boolean> {
   try {

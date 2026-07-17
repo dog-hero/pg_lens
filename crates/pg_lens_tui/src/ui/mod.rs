@@ -134,7 +134,7 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
     // database switch). U2's picker reconnects to a different `dbname`, so
     // this is the one header field that must visibly follow it — confirming
     // a switch landed without needing to open the Schema Lens.
-    let header = Line::from(format!(
+    let text = format!(
         " pg_lens v{} \u{2502} PG {} @ {} \u{2502} db {} \u{2502} up {} \u{2502} {}/{} conns",
         env!("CARGO_PKG_VERSION"),
         vitals.server_version,
@@ -143,8 +143,16 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
         format::human_uptime(vitals.uptime_secs),
         vitals.connections_total,
         vitals.max_connections,
-    ))
-    .bold();
+    );
+    let mut spans = vec![Span::raw(text).bold()];
+    // Read-only mode is a permanent header marker, not a transient toast —
+    // the mode must always be visible, not just at the moment `c`/`K` is
+    // refused (see `open_confirm`, the real enforcement point).
+    if app.read_only {
+        spans.push(Span::raw(" \u{2502} ").bold());
+        spans.push(Span::styled("RO", Style::new().fg(Color::Yellow).bold()));
+    }
+    let header = Line::from(spans);
     // Right side: the pause control. The hint lives HERE, not in the
     // statusbar — that bar was fought down to a ~4-column margin at 120
     // cols and cannot take another 15 characters on any lens. While frozen
@@ -1142,6 +1150,22 @@ mod tests {
         assert!(!screen.contains("Space: pause"));
         // The header's left side survived the split.
         assert!(screen.contains("pg_lens v"));
+    }
+
+    /// Read-only mode is a PERMANENT header marker (unlike the transient
+    /// admin-feedback toast `open_confirm` shows on a refused `c`/`K`) — it
+    /// must be visible on every frame while the mode is on, and absent
+    /// otherwise.
+    #[test]
+    fn read_only_shows_a_permanent_ro_marker_in_the_header() {
+        let mut app = App::new();
+        let screen = render(&mut app);
+        assert!(!screen.contains(" RO"), "no marker when not read-only: {screen}");
+
+        app.read_only = true;
+        let screen = render(&mut app);
+        assert!(screen.contains("pg_lens v"), "{screen}");
+        assert!(screen.contains("RO"), "read-only marker missing: {screen}");
     }
 
     /// Frozen render proof at the TestBackend level: a new snapshot arriving

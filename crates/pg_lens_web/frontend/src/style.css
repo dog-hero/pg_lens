@@ -67,6 +67,20 @@ body {
   color: var(--warn);
 }
 
+/* ── read-only badge ────────────────────────────────────────────────── */
+/* Permanent marker (unlike `.toast`, which fades) — the mode must stay
+   visible the whole session, matching the TUI header's `RO` tag. */
+
+.read-only-badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border: 1px solid var(--warn);
+  border-radius: 4px;
+  color: var(--warn);
+}
+
 /* ── poller status banner ───────────────────────────────────────────── */
 
 #status-banner {

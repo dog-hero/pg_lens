@@ -481,6 +481,13 @@ pub struct App {
     /// `handle_db_picker_key` to show the "not simulated" toast instead of
     /// queuing a real switch that no mock poller would ever act on.
     pub is_mock: bool,
+    /// Set once by `main.rs` at startup (`--read-only` / `PG_LENS_READ_ONLY`
+    /// / `config.toml`'s `read_only = true`). The real gate: `open_confirm`
+    /// refuses `c`/`K` BEFORE the confirmation modal opens (never mind
+    /// `pending_admin`/`AdminCommand`) whenever this is true — hiding the
+    /// keys in the UI alone would not be enforcement. Surfaced in the header
+    /// as a permanent `RO` marker so the mode is never silently active.
+    pub read_only: bool,
     /// Admin commands confirmed by `y` but not yet handed to the poller.
     /// `update()` only queues (pure state); the main loop drains this into
     /// the poller's `mpsc::Sender<AdminCommand>` after every update — the
@@ -560,6 +567,7 @@ impl App {
             db_picker: None,
             pending_db_switch: None,
             is_mock: false,
+            read_only: false,
             pending_admin: Vec::new(),
             admin_feedback: None,
             admin_seen_epoch_ms: None,
@@ -960,6 +968,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 /// Opens the admin confirmation modal for the selected Micro Lens row.
 /// A no-op on any other lens or with no selection — the keys must never
 /// half-work: without a target there is nothing to confirm.
+///
+/// Read-only mode's REAL gate lives here: when `app.read_only` is set, `c`/
+/// `K` are refused before the modal ever opens — no `ConfirmState`, no
+/// `pending_admin` entry, no `AdminCommand` reaches the poller. Hiding the
+/// keys in a view module would not be enforcement (the model is the only
+/// place state mutates); this early return is it.
 fn open_confirm(app: &mut App, terminate: bool) {
     if app.active_tab != Tab::MicroLens {
         return;
@@ -967,6 +981,14 @@ fn open_confirm(app: &mut App, terminate: bool) {
     let Some(row) = app.selected_row() else {
         return;
     };
+    if app.read_only {
+        app.admin_feedback = Some(AdminFeedback {
+            text: "read-only mode — action disabled".to_string(),
+            error: true,
+            expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+        });
+        return;
+    }
     let command = if terminate {
         AdminCommand::TerminateBackend(row.pid)
     } else {
@@ -2613,6 +2635,32 @@ mod tests {
         let confirm = app.confirm.as_ref().expect("modal open");
         assert_eq!(confirm.command, AdminCommand::CancelBackend(pid));
         assert!(app.pending_admin.is_empty(), "nothing executes before y");
+    }
+
+    /// The real gate (see `open_confirm`): read-only refuses `c`/`K` BEFORE
+    /// the confirmation modal opens — no `ConfirmState`, nothing queued in
+    /// `pending_admin`, so `drain_admin` would forward zero `AdminCommand`s
+    /// to the poller. Feedback still explains why.
+    #[test]
+    fn read_only_refuses_cancel_and_terminate_before_the_modal_opens() {
+        let (mut app, _pid) = micro_app();
+        app.read_only = true;
+
+        update(&mut app, press(KeyCode::Char('c')));
+        assert!(app.confirm.is_none(), "read-only must not open the cancel modal");
+        assert!(app.pending_admin.is_empty(), "no AdminCommand queued");
+        let feedback = app.admin_feedback.as_ref().expect("refusal feedback");
+        assert!(feedback.text.contains("read-only"), "{}", feedback.text);
+        assert!(feedback.error);
+
+        app.admin_feedback = None;
+        update(
+            &mut app,
+            Action::Key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT)),
+        );
+        assert!(app.confirm.is_none(), "read-only must not open the terminate modal");
+        assert!(app.pending_admin.is_empty(), "no AdminCommand queued");
+        assert!(app.admin_feedback.is_some());
     }
 
     #[test]

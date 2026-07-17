@@ -117,6 +117,14 @@ export class ActivityTable {
     return this.onAdmin !== null && this.adminEnabled();
   }
 
+  /** Re-renders just the header — for when `adminEnabled()`'s answer can
+   * change independently of a data update (e.g. `/api/config`'s read-only
+   * flag resolving after the first snapshot already drew the Actions
+   * column). Row data is untouched. */
+  refreshHead(): void {
+    this.renderHead();
+  }
+
   private setSort(key: SortKey): void {
     if (this.sortKey === key) {
       this.sortAsc = !this.sortAsc;

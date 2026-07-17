@@ -85,6 +85,14 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
   all three are common causes of XID-wraparound and lock pile-ups. TUI + Web.
 - **Keyboard help overlay** — press `?` for a full reference of every
   binding, grouped by navigation / sub-views / data / admin / quit.
+- **Read-only mode** — `--read-only` / `PG_LENS_READ_ONLY` / config.toml
+  hard-disables `c`/`K` and the web admin endpoints server-side (not just
+  hidden in the UI) for shared or audited deployments. See
+  [Read-only mode](#read-only-mode).
+- **Remote connection config** — point pg_lens at a shared `services.toml`
+  hosted in a (private) GitHub repo or any HTTPS URL, so a team uses one
+  curated target list instead of copying the file by hand. See
+  [Remote connection config](#remote-connection-config).
 - **Version-aware queries** — dedicated query sets for PostgreSQL 13, 14+,
   and 16+, following pg_activity's versioning convention.
 - **Single static binary** — no runtime, no dependencies; musl builds run
@@ -283,6 +291,8 @@ pg_lens --mock          # built-in mock data (dev/demo mode)
 | `--list-services` | Print the defined services (names + host/user, never secrets) and exit |
 | `--interval <secs>` | Poll interval in seconds (minimum 0.5). Default: 2 |
 | `--mock` | Use built-in mock data instead of a real database |
+| `--read-only` | Hard-disable admin actions (`c`/`K` in the TUI, `/api/admin/*` in the web server) — enforced server-side, not just hidden. Also `PG_LENS_READ_ONLY` env (any value other than empty/`0`/`false`/`no`/`off`, case-insensitive) or `read_only = true` in [config.toml](#config-file). See [Read-only mode](#read-only-mode) |
+| `--config-url <URL>` | Load a shared `services.toml` from a remote source: `github:OWNER/REPO/PATH[@REF]` or a plain `https://`/`http://` URL. Also `PG_LENS_CONFIG_URL` env or `remote_config` in config.toml. See [Remote connection config](#remote-connection-config) |
 
 > **Tip:** for production monitoring, use a read-only role granted the
 > [`pg_monitor`](https://www.postgresql.org/docs/current/predefined-roles.html)
@@ -378,6 +388,43 @@ short-lived tokens (Vault leases, SSO helpers) keep working across
 reconnects. If the command fails, the TUI stays alive and shows the error
 (stderr, never stdout) in the banner, retrying with backoff.
 
+### Remote connection config
+
+For a team that wants everyone pointed at the same curated target list
+instead of copying `services.toml` by hand, pg_lens can load it from a
+remote source instead of (or layered on top of) the local file:
+
+```sh
+pg_lens --config-url "github:my-org/infra/pg_lens/services.toml@main"
+pg_lens --config-url "https://config.internal.example.com/pg_lens/services.toml"
+# or in config.toml:
+# remote_config = "github:my-org/infra/pg_lens/services.toml@main"
+```
+
+Two forms are accepted:
+
+- **`github:OWNER/REPO/PATH[@REF]`** — fetched via the GitHub Contents API
+  (works for private repos with a token; `@REF` defaults to the repo's
+  default branch).
+- **A verbatim `https://`/`http://` URL** — fetched as-is.
+
+The token is resolved in this order and is **never written to a file**:
+`PG_LENS_CONFIG_TOKEN` env → `GITHUB_TOKEN` env → `remote_config_token_cmd`
+in `config.toml` (an external command, trimmed stdout — the same pattern as
+`password_cmd`), sent as `Authorization: Bearer <token>`. **A token is
+refused outright over plain `http://`** — only `https://` (or the GitHub
+API, which is always https) may carry one.
+
+A successful fetch is cached at
+`$XDG_CACHE_HOME/pg_lens/remote-services.toml` (mode `0600`). If the fetch
+fails — network down, bad token, repo moved — pg_lens falls back to that
+cache, then to the local services file, each step logging a one-line
+warning to stderr; startup never blocks on a flaky network (10s timeout)
+and only hard-fails when there is truly nothing to connect with. Remote
+entries win a same-named collision with local entries; local-only entries
+still work. The fetch is strictly **read-only** — pg_lens never writes
+back to the remote source.
+
 #### Interactive service picker
 
 When the TUI starts with no connection hints at all — no `--dsn`, no
@@ -407,12 +454,16 @@ services file. Every key is optional:
 interval = 2.0          # poll interval, seconds (--interval)
 schema_interval = 60    # Schema Lens cadence, seconds (--schema-interval)
 listen = "127.0.0.1:8080"  # serve bind address (--listen)
+read_only = false       # hard-disable admin actions (--read-only)
+remote_config = "github:my-org/infra/pg_lens/services.toml@main"  # --config-url
+# remote_config_token_cmd = "vault kv get -field=token secret/github/pg_lens"
 ```
 
 Precedence, highest first: **flag → env var → config.toml → built-in default**
-(`PG_LENS_INTERVAL`, `PG_LENS_SCHEMA_INTERVAL`, `PG_LENS_LISTEN`). A missing
-file is silently the empty config; an unparsable one is ignored with a warning
-on stderr — a broken config never stops pg_lens from starting.
+(`PG_LENS_INTERVAL`, `PG_LENS_SCHEMA_INTERVAL`, `PG_LENS_LISTEN`,
+`PG_LENS_READ_ONLY`, `PG_LENS_CONFIG_URL`). A missing file is silently the
+empty config; an unparsable one is ignored with a warning on stderr — a
+broken config never stops pg_lens from starting.
 
 ### Persistent history
 
@@ -460,6 +511,41 @@ they ever drift, trust the overlay.
 > "gone or insufficient privilege" / the server's permission error in the
 > feedback line. These actions are TUI-only — the web dashboard stays
 > read-only by design.
+
+### Read-only mode
+
+For shared or audited deployments (or a role that intentionally lacks
+`pg_signal_backend`, see
+[Creating the monitoring user](docs/connection-user.md)), pg_lens can
+hard-disable its two admin actions entirely:
+
+```sh
+pg_lens --read-only --dsn "..."
+pg_lens serve --read-only --dsn "..."
+```
+
+Three equivalent config surfaces, same precedence as `--interval`
+(flag → env → config.toml → default `false`): the `--read-only` flag,
+the `PG_LENS_READ_ONLY` env var (any value other than empty/`0`/`false`/
+`no`/`off`, case-insensitive), or `read_only = true` in
+[config.toml](#config-file).
+
+This is enforced **twice**, both server-side:
+
+- **TUI** — `c`/`K` are refused before the confirmation modal ever opens
+  (inline "read-only mode — action disabled" feedback), and a permanent
+  yellow `RO` marker sits in the header so the mode is never silently
+  active.
+- **Web Lens** — `/api/admin/*` returns `403` even when a valid
+  `PG_LENS_AUTH_TOKEN` is presented; a valid token no longer implies
+  permission to act. `GET /api/config` exposes `{"read_only": true}` so
+  the web frontend can grey out the cancel/terminate buttons and show a
+  badge, but that is a UI convenience only — the `403` above is the real
+  gate, checked before the token itself.
+
+Schema/query-stats refresh (`R`) is **not** gated — it only ever opens a
+read-only transaction. `pg_lens serve` inherits the same flag/env/config
+resolution as the TUI.
 
 ## Architecture
 
@@ -580,9 +666,10 @@ The full plan lives in [ROADMAP.md](ROADMAP.md) (product requirements in
 [PRD.md](PRD.md)). Shipped so far: v0.7 "what should I go fix" (top waits,
 vacuum health / XID-wraparound, index advisor, checkpointer panel), v0.8
 "room to breathe" (Index/Replication Lens tabs, database selector, full
-waits panel, Vacuum sub-view), and v0.9 "problem transactions" (idle-in-tx
+waits panel, Vacuum sub-view), v0.9 "problem transactions" (idle-in-tx
 hunter, blocking-chain graph, prepared-transaction watch, keyboard help
-overlay). See [ROADMAP.md](ROADMAP.md) for what's next.
+overlay), and v0.10 (read-only mode, remote connection config). See
+[ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Changelog
 

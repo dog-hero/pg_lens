@@ -65,9 +65,15 @@ GRANT pg_signal_backend TO pg_lens_ro;
 
 `pg_signal_backend` still cannot signal superuser backends. If you want pg_lens
 to be strictly look-but-don't-touch, **omit this grant** — the panels all work,
-and `c`/`K` simply report a permission error when used. (A first-class
-read-only *mode* that disables these actions entirely is on the roadmap for
-v0.10.)
+and `c`/`K` simply report a permission error when used.
+
+For a stronger guarantee than "the grant is absent," pair this with pg_lens's
+own **[read-only mode](../README.md#read-only-mode)** (`--read-only` /
+`PG_LENS_READ_ONLY` / `read_only = true` in config.toml, shipped in v0.10):
+it disables `c`/`K` before the confirmation modal ever opens in the TUI, and
+the Web Lens returns `403` on `/api/admin/*` even with a valid
+`PG_LENS_AUTH_TOKEN` — a real server-side gate on top of (not instead of)
+the database-role restriction described above.
 
 ---
 
