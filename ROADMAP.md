@@ -8,6 +8,53 @@ section on release.
 
 ---
 
+## v0.9 — "Problem transactions" (in progress — owner-selected 2026-07-16)
+
+The cheap, cohesive batch around long/idle transactions and blocking — every
+item reuses data already polled (`pg_stat_activity`), plus the help overlay
+that also clears the stale-README debt.
+
+- [x] **Idle-in-transaction / transaction-age hunter** — surface
+  `pg_stat_activity.xact_start` (already in the activity poll, one new column):
+  a transaction-age column + marker in the Micro Lens, and a headline for the
+  oldest `idle in transaction` / long-running xact (the session driving
+  XID-wraparound risk and lock retention). Yellow/red age tiers. TUI + Web.
+- [x] **Blocking chain / lock-wait graph** — reuse the `blocked_by` arrays
+  already returned (no new SQL): render the wait-for chain (A→B→C) in the
+  Micro Lens detail panel for the selected PID, root blocker highlighted;
+  watch for deadlock cycles. TUI + Web.
+- [x] **Prepared-transaction (orphaned 2PC) watch** — `pg_prepared_xacts`:
+  orphaned two-phase commits hold locks and block vacuum forever; show them
+  (gid, age, owner, database) inside the Vacuum sub-view. Best-effort absent
+  panel when empty/unavailable. TUI + Web.
+- [x] **Keyboard help overlay (`?`)** — static overlay listing every binding
+  (no data source); doubles as the single source of truth the README
+  keybindings table is reconciled against.
+- [x] **Docs: connection user & least-privilege** — a `docs/` page (linked
+  from the README) on how to create the monitoring role and the exact grants
+  each lens needs (`pg_monitor` vs. explicit `GRANT`s: `pg_stat_activity`
+  full rows, `pg_stat_statements`, replication views, `pg_stat_progress_*`),
+  what degrades to an absent panel without them, and the read-only posture.
+
+## v0.10 candidates (mapped 2026-07-16 — owner priorities)
+
+- [ ] **Remote connection config** — load connection definitions
+  (`services.toml`-shaped) from a remote source, including a **private GitHub
+  repo**, so a team shares one curated target list instead of copying files.
+  Design notes / open questions: auth (GitHub token via env/keychain, reuse
+  the `password_cmd` secret pattern — never a token in the file); fetch on
+  startup with a local cache + offline fallback; a `remote_config` URL/ref in
+  `config.toml` and/or a `--config-url` flag; refuse to persist secrets;
+  precedence vs. local `services.toml`. Read-only fetch — pg_lens never writes
+  back to the repo.
+- [ ] **Read-only mode (no actions)** — a mode that hard-disables every
+  admin/mutating action (`c` cancel, `K` terminate, schema/bloat refresh
+  writes if any) and the write transaction path, for shared/audited
+  deployments and least-privilege roles. Surfaced in the header; enforced in
+  `update()` and the web admin endpoints (not just hidden in the UI); settable
+  via `config.toml`, a `--read-only` flag, and ideally auto-detected when the
+  role lacks the privilege. Pairs with the v0.9 least-privilege docs.
+
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
 - [ ] **I/O profile** — `pg_stat_io` (PG 16+ only), backend_type × context

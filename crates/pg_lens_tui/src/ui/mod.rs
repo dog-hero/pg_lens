@@ -3,6 +3,7 @@
 pub mod format;
 mod confirm;
 mod db_picker;
+mod help;
 mod index_lens;
 mod macro_lens;
 mod micro_lens;
@@ -87,6 +88,12 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     }
     if app.db_picker.is_some() {
         db_picker::draw(app, frame);
+    }
+    // Highest-priority overlay: drawn last, over everything (including the
+    // other overlays above) — matches `handle_key`'s precedence, and the
+    // two can never legitimately overlap in practice (see `app.rs`).
+    if app.help_open {
+        help::draw(app, frame);
     }
 }
 
@@ -285,6 +292,7 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(d);
     };
     push_hint(&mut spans, "q/Esc", ": quit".into(), false);
+    push_hint(&mut spans, "?", ": help".into(), true);
     push_hint(&mut spans, "Tab", ": lens".into(), true);
     push_hint(&mut spans, "j/k", format!(": row {row}"), true);
     // The Micro Lens trades the Enter hint for the admin keys (the open
@@ -465,7 +473,7 @@ mod tests {
         let mut app = App::new();
         app.active_tab = Tab::MicroLens;
         let screen = render(&mut app);
-        assert!(screen.contains("4/6 waiting"), "ratio: {screen}");
+        assert!(screen.contains("5/7 waiting"), "ratio: {screen}");
         assert!(screen.contains("Lock:transactionid \u{d7}1"), "{screen}");
         assert!(screen.contains("IO:DataFileRead \u{d7}1"), "{screen}");
     }
@@ -487,7 +495,7 @@ mod tests {
         // `×count` is strip-only vocabulary ("waiting" also appears in the
         // pre-first-snapshot statusbar, so it can't be the absence probe).
         assert!(!screen.contains('\u{d7}'), "no strip when idle: {screen}");
-        assert!(!screen.contains("/6 waiting"), "{screen}");
+        assert!(!screen.contains("/7 waiting"), "{screen}");
         assert!(screen.contains("PID"), "table still renders");
 
         // Narrow terminal (< 80 cols body): strip hidden, table intact.
@@ -595,6 +603,70 @@ mod tests {
         assert_eq!(app.schema_view, crate::app::SchemaView::Tables);
         let screen = render(&mut app);
         assert!(!screen.contains("Worst tables by XID age"), "{screen}");
+    }
+
+    /// v0.9: the Vacuum sub-view shows the mock's one dangling prepared
+    /// transaction, red-tier marker included (the mock row is well past
+    /// `prepared_xacts::BAD_AGE_SECS`); the calm "no orphaned" and
+    /// "unavailable" states are both reachable from an edited snapshot.
+    #[test]
+    fn schema_vacuum_view_renders_prepared_xacts() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        press(&mut app, crossterm::event::KeyCode::Char('v'));
+        let screen = render(&mut app);
+        assert!(screen.contains("prepared: payment_batch_2026_07_14"), "{screen}");
+        assert!(screen.contains("owner app_rw"), "{screen}");
+        assert!(screen.contains("db shop"), "{screen}");
+        assert!(screen.contains("!!"), "red-tier marker: {screen}");
+
+        use std::sync::Arc;
+        let mut snap = app.snapshot.as_ref().clone();
+        snap.prepared_xacts = Some(Vec::new());
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
+        let screen = render(&mut app);
+        assert!(screen.contains("no orphaned prepared transactions"), "{screen}");
+
+        let mut snap = app.snapshot.as_ref().clone();
+        snap.prepared_xacts = None;
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
+        let screen = render(&mut app);
+        assert!(screen.contains("prepared transactions: unavailable"), "{screen}");
+    }
+
+    /// v0.9 regression: the Vacuum sub-view's lower sections (progress,
+    /// prepared-xacts, footer) render at TALL terminals, not just the
+    /// harness's default 36 rows. A QA pass flagged them "missing" at
+    /// ROWS >= 39 — that was an artifact of `e2e_pty.py`'s VT parser (it
+    /// does not model scroll regions), not ratatui: `TestBackend` (the
+    /// ground truth of what ratatui actually paints) shows every section at
+    /// every height. This locks that in so the panel can't silently clip.
+    #[test]
+    fn schema_vacuum_view_renders_all_sections_on_tall_terminals() {
+        for rows in [36u16, 39, 40, 60] {
+            let mut app = App::new();
+            app.active_tab = Tab::SchemaLens;
+            press(&mut app, crossterm::event::KeyCode::Char('v'));
+            let backend = TestBackend::new(120, rows);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(
+                screen.contains("prepared: payment_batch_2026_07_14"),
+                "prepared-xacts section missing at {rows} rows: {screen}"
+            );
+            // No bleed-through from a differently-laid-out lens.
+            assert!(
+                !screen.contains("Waiting"),
+                "stale glyph bleed-through at {rows} rows: {screen}"
+            );
+        }
     }
 
     /// Below the yellow threshold the cluster headline renders un-alarming
@@ -1130,6 +1202,92 @@ mod tests {
         let screen = render(&mut app);
         assert!(!screen.contains("DB error"));
         assert!(!screen.contains("connecting to PostgreSQL"));
+    }
+
+    // --- keyboard help overlay (`?`, v0.9) ------------------------------------
+
+    #[test]
+    fn statusbar_advertises_the_help_hint() {
+        let mut app = App::new();
+        let screen = render(&mut app);
+        assert!(screen.contains("?: help"), "{screen}");
+    }
+
+    #[test]
+    fn question_mark_opens_the_help_overlay_with_known_bindings() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Char('?'));
+        assert!(app.help_open);
+        let screen = render(&mut app);
+        assert!(screen.contains("keyboard help"), "{screen}");
+        assert!(screen.contains("Navigation"), "{screen}");
+        assert!(screen.contains("cycle lenses"), "{screen}");
+        assert!(screen.contains("terminate the backend"), "{screen}");
+        assert!(screen.contains("Esc / ?: close"), "{screen}");
+        // The dashboard underneath is still there (overlay, not full-screen).
+        assert!(screen.contains("Macro Lens"), "{screen}");
+    }
+
+    #[test]
+    fn esc_closes_the_help_overlay_without_arming_quit() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Char('?'));
+        assert!(app.help_open);
+        press(&mut app, crossterm::event::KeyCode::Esc);
+        assert!(!app.help_open);
+        assert!(!app.should_quit);
+        assert!(
+            app.esc_quit_armed_until.is_none(),
+            "closing the help overlay must not arm the quit barrier"
+        );
+        let screen = render(&mut app);
+        assert!(!screen.contains("keyboard help"), "{screen}");
+    }
+
+    #[test]
+    fn question_mark_again_also_closes_the_help_overlay() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Char('?'));
+        assert!(app.help_open);
+        press(&mut app, crossterm::event::KeyCode::Char('?'));
+        assert!(!app.help_open);
+    }
+
+    /// While the help overlay is open every other key is inert — including
+    /// `q` (matches the confirm modal / db picker convention) and
+    /// navigation, which must not move the underlying selection.
+    #[test]
+    fn other_keys_are_inert_while_help_is_open() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        let before = app.table_state.selected();
+        press(&mut app, crossterm::event::KeyCode::Char('?'));
+        press(&mut app, crossterm::event::KeyCode::Char('q'));
+        assert!(!app.should_quit, "q must be inert while help is open");
+        press(&mut app, crossterm::event::KeyCode::Char('j'));
+        assert_eq!(
+            app.table_state.selected(),
+            before,
+            "navigation must be inert while help is open"
+        );
+        assert!(app.help_open);
+    }
+
+    #[test]
+    fn help_overlay_fits_a_small_terminal() {
+        let mut app = App::new();
+        press(&mut app, crossterm::event::KeyCode::Char('?'));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("keyboard help"), "{screen}");
     }
 
 }

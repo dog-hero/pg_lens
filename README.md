@@ -77,6 +77,14 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
   `CREATE INDEX` statement and the duplicate partner spelled out as
   evidence, and a footer naming the stats-reset age — an `idx_scan = 0`
   claim means nothing right after a reset.
+- **Problem-transaction hunting** — a transaction-age column and headline
+  for the oldest `idle in transaction` / long-running session (yellow/red
+  age tiers), a blocking-chain view (`A→B→C`, root blocker highlighted,
+  deadlock-cycle warning) in the Micro Lens detail panel, and an orphaned
+  two-phase-commit (`pg_prepared_xacts`) watch inside the Vacuum sub-view —
+  all three are common causes of XID-wraparound and lock pile-ups. TUI + Web.
+- **Keyboard help overlay** — press `?` for a full reference of every
+  binding, grouped by navigation / sub-views / data / admin / quit.
 - **Version-aware queries** — dedicated query sets for PostgreSQL 13, 14+,
   and 16+, following pg_activity's versioning convention.
 - **Single static binary** — no runtime, no dependencies; musl builds run
@@ -278,7 +286,9 @@ pg_lens --mock          # built-in mock data (dev/demo mode)
 
 > **Tip:** for production monitoring, use a read-only role granted the
 > [`pg_monitor`](https://www.postgresql.org/docs/current/predefined-roles.html)
-> predefined role in the DSN.
+> predefined role in the DSN. See
+> **[Creating the monitoring user & least-privilege grants](docs/connection-user.md)**
+> for the exact role and the per-lens privilege map.
 
 ### Connecting
 
@@ -417,19 +427,31 @@ file self-compacts so it never grows without bound.
 
 ### Keybindings
 
+The in-app `?` overlay is the single source of truth for this table — if
+they ever drift, trust the overlay.
+
 | Key | Action |
 |---|---|
-| `q` | Quit immediately |
-| `Esc` | Close the open overlay (detail/filter/modal); at the top level, press **twice within ~2s** to quit — a single stray `Esc` never exits |
 | `Tab` | Cycle lenses (Macro → Micro → Replication → Schema → Indexes → Queries → Macro) |
-| `j` / `k` / `↓` / `↑` | Move selection in the activity table |
-| `s` | Cycle sort column (duration / state / pid) |
-| `/` | Filter the activity table (Micro Lens) — type to narrow by pid, database, user, application, client, state, wait or query text; `Enter` applies, `Esc` reverts |
-| `Enter` | Open/close query detail for the selected row |
+| `j` / `↓` | Move selection down |
+| `k` / `↑` | Move selection up |
+| `Enter` | Open/close the selected row's detail panel |
+| `/` | Filter the activity table (Micro Lens only) — type to narrow by pid, database, user, application, client, state, wait or query text; `Enter` applies, `Esc` reverts |
+| `w` | Full waits panel (Micro Lens only) |
+| `v` | Vacuum sub-view (Schema Lens only) |
+| `d` | Database picker (any lens) — reconnects the poller to the chosen database |
+| `?` | Keyboard help overlay — lists every binding |
+| `R` | Force schema/query-stats refresh (any lens) |
+| `s` | Cycle sort column (Micro Lens / Schema Lens tables / Query Lens; inert on Index, Replication, and the Vacuum sub-view) |
+| `+` / `=` | Increase the poll interval |
+| `-` | Decrease the poll interval |
 | `Space` | Pause / resume the display refresh (freeze for point-in-time analysis) |
-| `+` / `-` | Increase / decrease the poll interval |
-| `c` | Cancel the selected session's query (`pg_cancel_backend`) — asks for confirmation first |
-| `K` | Terminate the selected session's backend (`pg_terminate_backend`, kills the connection) — asks for confirmation first (uppercase on purpose; `k` stays navigation) |
+| `c` | Cancel the selected session's query (`pg_cancel_backend`, Micro Lens) — asks for confirmation first |
+| `K` | Terminate the selected session's backend (`pg_terminate_backend`, kills the connection, Micro Lens) — asks for confirmation first (uppercase on purpose; `k` stays navigation) |
+| `y` / `n` | Confirm / abort — only while a confirm modal is open |
+| `q` | Quit immediately |
+| `Ctrl+C` | Quit immediately (works everywhere) |
+| `Esc` | Close the topmost overlay (help → detail/waits/vacuum sub-view → db picker → filter revert → confirm abort); at the top level, press **twice within ~2s** to quit — a single stray `Esc` never exits |
 
 > **Tip:** `c`/`K` need permission on the server side: PostgreSQL only lets
 > you signal backends of the **same user**, or any backend if your role is a
@@ -544,7 +566,8 @@ and never expose the server without TLS.
 - **Read-only DSN**: connect with a role granted only
   [`pg_monitor`](https://www.postgresql.org/docs/current/predefined-roles.html)
   (`CREATE ROLE lens LOGIN PASSWORD '...'; GRANT pg_monitor TO lens;`) —
-  the dashboard needs nothing more.
+  the dashboard needs nothing more. Full per-lens privilege map:
+  [Creating the monitoring user](docs/connection-user.md).
 - **TLS**: the binary does not terminate TLS; put a reverse proxy (Caddy,
   nginx) in front for any non-localhost deployment.
 - **Default bind is `127.0.0.1`** — exposure is an explicit operator
@@ -554,9 +577,12 @@ and never expose the server without TLS.
 ## Roadmap
 
 The full plan lives in [ROADMAP.md](ROADMAP.md) (product requirements in
-[PRD.md](PRD.md)). Currently in progress — **v0.7, "what should I go fix"**:
-a top-waits panel, vacuum health / XID-wraparound visibility, an
-unused/redundant index advisor, and a checkpointer panel.
+[PRD.md](PRD.md)). Shipped so far: v0.7 "what should I go fix" (top waits,
+vacuum health / XID-wraparound, index advisor, checkpointer panel), v0.8
+"room to breathe" (Index/Replication Lens tabs, database selector, full
+waits panel, Vacuum sub-view), and v0.9 "problem transactions" (idle-in-tx
+hunter, blocking-chain graph, prepared-transaction watch, keyboard help
+overlay). See [ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Changelog
 

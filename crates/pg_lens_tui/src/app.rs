@@ -516,6 +516,13 @@ pub struct App {
     /// Double-Esc quit barrier: `Some(tick)` while a first top-level Esc is
     /// armed — a second Esc at or before that tick quits; later ones re-arm.
     pub esc_quit_armed_until: Option<u64>,
+    /// `true` while the keyboard-help overlay (`?`) is on screen — a static,
+    /// no-data modal (see `ui/help.rs`). Overlay semantics like `confirm`/
+    /// `db_picker`: every other key is inert while it is open, and Esc (or
+    /// `?` again) closes it WITHOUT arming the top-level quit barrier. It
+    /// takes priority over every other overlay's Esc handling — see the
+    /// dedicated check at the top of [`handle_key`].
+    pub help_open: bool,
     pub should_quit: bool,
 }
 
@@ -562,6 +569,7 @@ impl App {
             filter_editing: false,
             filter_saved: String::new(),
             esc_quit_armed_until: None,
+            help_open: false,
             should_quit: false,
         };
         resort(&mut app);
@@ -756,6 +764,18 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         handle_picker_key(app, key);
         return;
     }
+    // Keyboard help overlay (`?`): the highest-priority overlay — checked
+    // before the admin modal/db picker/filter editing below, so its own
+    // Esc handling always wins and never falls through to arm the
+    // double-Esc quit barrier or close some OTHER overlay underneath.
+    // Mutually exclusive with every other overlay by construction: `?` is
+    // only recognized in the bottom match (reached only when none of the
+    // other overlay checks fired), so it can never open while one of them
+    // is already up.
+    if app.help_open {
+        handle_help_key(app, key);
+        return;
+    }
     // Admin confirmation modal: y confirms, n/Esc aborts, EVERYTHING else
     // (including q) is deliberately inert — no accidental double-meaning
     // while a destructive action awaits confirmation.
@@ -872,6 +892,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // `d` opens the database picker (U2) from ANY lens — reconnecting is
         // a cluster-wide, not a per-lens, action.
         KeyCode::Char('d') => open_db_picker(app),
+        // `?` opens the keyboard help overlay (v0.9) from ANY lens — a
+        // static, no-data modal (see `ui/help.rs`). Closing it is handled
+        // entirely by `handle_help_key` (Esc or `?` again), reached via the
+        // dedicated check above `handle_key`'s overlay chain.
+        KeyCode::Char('?') => app.help_open = true,
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
         // `s` cycles the sort of whichever lens is active (each keeps its
@@ -1044,6 +1069,23 @@ fn handle_db_picker_key(app: &mut App, key: KeyEvent) {
                     app.pending_db_switch = Some(name);
                 }
             }
+        }
+        _ => {}
+    }
+}
+
+/// Keymap of the keyboard help overlay (`?`): `Esc` or `?` again closes it
+/// WITHOUT arming the top-level quit barrier — the same overlay-dismissal
+/// rule the detail panel and other overlays follow. `Ctrl+C` still quits
+/// (universal escape hatch, same convention as the confirm modal and the
+/// database picker); every other key — including `q` — is deliberately
+/// inert while it is open (it is a pure reference screen, not a place where
+/// stray keystrokes should do anything).
+fn handle_help_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('?') => app.help_open = false,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.should_quit = true;
         }
         _ => {}
     }
@@ -1575,6 +1617,88 @@ mod tests {
             app.esc_quit_armed_until.is_none(),
             "closing an overlay must not arm the quit barrier"
         );
+    }
+
+    // --- v0.9: keyboard help overlay (`?`) ---------------------------------
+
+    #[test]
+    fn question_mark_opens_the_help_overlay_from_any_lens() {
+        for tab in [
+            Tab::MacroLens,
+            Tab::MicroLens,
+            Tab::ReplicationLens,
+            Tab::SchemaLens,
+            Tab::IndexLens,
+            Tab::QueryLens,
+        ] {
+            let mut app = App::new();
+            app.active_tab = tab;
+            update(&mut app, press(KeyCode::Char('?')));
+            assert!(app.help_open, "{tab:?}");
+        }
+    }
+
+    #[test]
+    fn esc_closes_help_without_arming_the_quit_barrier() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char('?')));
+        assert!(app.help_open);
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.help_open);
+        assert!(!app.should_quit);
+        assert!(
+            app.esc_quit_armed_until.is_none(),
+            "closing the help overlay must not arm the quit barrier"
+        );
+    }
+
+    #[test]
+    fn question_mark_again_closes_help() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char('?')));
+        assert!(app.help_open);
+        update(&mut app, press(KeyCode::Char('?')));
+        assert!(!app.help_open);
+    }
+
+    /// Help takes priority over every other overlay's Esc handling: opening
+    /// it while the waits panel is up (impossible via real input, since `?`
+    /// is only reachable from the bottom match — but proven directly here
+    /// for the precedence contract) means Esc closes HELP first.
+    #[test]
+    fn help_esc_precedence_closes_help_before_other_overlay_state() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        app.waits_open = true;
+        app.help_open = true;
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.help_open, "help must close first");
+        assert!(app.waits_open, "the overlay underneath is untouched");
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn q_and_navigation_are_inert_while_help_is_open() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        let before = app.table_state.selected();
+        update(&mut app, press(KeyCode::Char('?')));
+        update(&mut app, press(KeyCode::Char('q')));
+        assert!(!app.should_quit, "q must be inert while help is open");
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_eq!(app.table_state.selected(), before);
+        assert!(app.help_open);
+    }
+
+    #[test]
+    fn ctrl_c_still_quits_while_help_is_open() {
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::Char('?')));
+        update(
+            &mut app,
+            Action::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
+        assert!(app.should_quit);
     }
 
     #[test]

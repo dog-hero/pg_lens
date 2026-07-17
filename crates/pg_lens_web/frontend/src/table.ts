@@ -7,6 +7,8 @@
 import type { ActivityRow, LockRow } from "./types";
 import { humanDuration } from "./format";
 import { renderSqlInto } from "./sql";
+import { xactAgeSeverity } from "./xact_age";
+import { blockingChain, renderBlockingChain } from "./blocking";
 import type { AdminKind } from "./actions";
 
 type SortKey =
@@ -17,6 +19,7 @@ type SortKey =
   | "state"
   | "wait_event"
   | "duration_secs"
+  | "xact_age_secs"
   | "query";
 
 interface Column {
@@ -34,6 +37,7 @@ const COLUMNS: Column[] = [
   { key: "state", label: "State", numeric: false },
   { key: "wait_event", label: "Wait", numeric: false },
   { key: "duration_secs", label: "Duration", numeric: true },
+  { key: "xact_age_secs", label: "Xact", numeric: true },
   { key: "query", label: "Query", numeric: false },
 ];
 
@@ -57,6 +61,10 @@ export class ActivityTable {
   private sortAsc = false;
   private rows: ActivityRow[] = [];
   private blocked = new Set<number>();
+  private locks: LockRow[] = [];
+  /** pid of the blocked row whose wait-for chain is expanded, if any —
+   * mirrors the TUI's detail panel (v0.9), toggled by clicking a `B` row. */
+  private expandedChainPid: number | null = null;
   private filter = "";
   private readonly thead: HTMLTableSectionElement;
   private readonly tbody: HTMLTableSectionElement;
@@ -91,7 +99,14 @@ export class ActivityTable {
 
   update(activity: ActivityRow[], locks: LockRow[]): void {
     this.rows = activity;
+    this.locks = locks;
     this.blocked = new Set(locks.map((lock) => lock.pid));
+    // A pid can stop being blocked between polls (deadlock resolved, query
+    // finished) — drop a stale expansion rather than showing a chain for a
+    // pid that no longer has one.
+    if (this.expandedChainPid !== null && !this.blocked.has(this.expandedChainPid)) {
+      this.expandedChainPid = null;
+    }
     // Re-render the head too: the Actions column appears once a token makes
     // admin available (it may become enabled after the first render).
     this.renderHead();
@@ -177,43 +192,84 @@ export class ActivityTable {
       this.tbody.replaceChildren(tr);
       return;
     }
-    this.tbody.replaceChildren(
-      ...rows.map((row) => {
-        const isBlocked = this.blocked.has(row.pid);
-        const isWaiting = row.wait_event !== null;
-        const tr = document.createElement("tr");
-        if (isBlocked) tr.classList.add("blocked");
-        else if (isWaiting) tr.classList.add("waiting");
-        const marker = isBlocked ? "B" : isWaiting ? "W" : "";
-        const cells: Array<[string, boolean]> = [
-          [marker, false],
-          [String(row.pid), true],
-          [row.database, false],
-          [row.username, false],
-          [row.client, false],
-          [row.state, false],
-          [row.wait_event ?? "", false],
-          [humanDuration(row.duration_secs), true],
-        ];
-        for (const [text, numeric] of cells) {
+    const colCount = COLUMNS.length + (this.showActions() ? 1 : 0);
+    const trs: HTMLTableRowElement[] = [];
+    for (const row of rows) {
+      const isBlocked = this.blocked.has(row.pid);
+      const isWaiting = row.wait_event !== null;
+      const tr = document.createElement("tr");
+      if (isBlocked) tr.classList.add("blocked");
+      else if (isWaiting) tr.classList.add("waiting");
+      const marker = isBlocked ? "B" : isWaiting ? "W" : "";
+      const cells: Array<[string, boolean]> = [
+        [marker, false],
+        [String(row.pid), true],
+        [row.database, false],
+        [row.username, false],
+        [row.client, false],
+        [row.state, false],
+        [row.wait_event ?? "", false],
+        [humanDuration(row.duration_secs), true],
+      ];
+      for (const [text, numeric] of cells) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        if (numeric) td.classList.add("num");
+        tr.append(td);
+      }
+      // Xact column: age of the open transaction ("—" when none), tinted
+      // by the same severity the oldest-xact headline uses —
+      // idle-in-transaction reads worse than an equally-old active query.
+      const xactTd = document.createElement("td");
+      xactTd.classList.add("num");
+      if (row.xact_age_secs !== null) {
+        xactTd.textContent = humanDuration(row.xact_age_secs);
+        const severity = xactAgeSeverity(row.xact_age_secs, row.state);
+        if (severity === "warn") xactTd.classList.add("xact-warn");
+        else if (severity === "bad") xactTd.classList.add("xact-bad");
+      } else {
+        xactTd.textContent = "—";
+        xactTd.classList.add("xact-none");
+      }
+      tr.append(xactTd);
+      // Query cell: SQL-highlighted spans (XSS-safe — renderSqlInto only
+      // ever writes textContent), tooltip carries the full text.
+      const query = document.createElement("td");
+      query.classList.add("query");
+      query.title = row.query;
+      renderSqlInto(query, row.query);
+      tr.append(query);
+      if (this.showActions()) {
+        tr.append(this.actionsCell(row));
+      }
+      // v0.9: blocked rows are clickable — toggles the wait-for chain
+      // (mirrors the TUI's Enter-to-open detail panel) into a sub-row
+      // right below, so the reader gets to the root blocker without
+      // leaving the table.
+      if (isBlocked) {
+        tr.classList.add("blocking-chain-toggle");
+        tr.addEventListener("click", (e) => {
+          // Don't hijack clicks on the Cancel/Kill buttons.
+          if (e.target instanceof HTMLButtonElement) return;
+          this.expandedChainPid = this.expandedChainPid === row.pid ? null : row.pid;
+          this.renderBody();
+        });
+      }
+      trs.push(tr);
+      if (isBlocked && this.expandedChainPid === row.pid) {
+        const chain = blockingChain(row.pid, this.locks);
+        if (chain !== null) {
+          const chainTr = document.createElement("tr");
+          chainTr.classList.add("blocking-chain-row");
           const td = document.createElement("td");
-          td.textContent = text;
-          if (numeric) td.classList.add("num");
-          tr.append(td);
+          td.colSpan = colCount;
+          td.append(renderBlockingChain(chain));
+          chainTr.append(td);
+          trs.push(chainTr);
         }
-        // Query cell: SQL-highlighted spans (XSS-safe — renderSqlInto only
-        // ever writes textContent), tooltip carries the full text.
-        const query = document.createElement("td");
-        query.classList.add("query");
-        query.title = row.query;
-        renderSqlInto(query, row.query);
-        tr.append(query);
-        if (this.showActions()) {
-          tr.append(this.actionsCell(row));
-        }
-        return tr;
-      }),
-    );
+      }
+    }
+    this.tbody.replaceChildren(...trs);
   }
 
   /** Cancel / Kill buttons for one row (only rendered when admin is on). */

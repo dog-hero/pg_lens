@@ -4,6 +4,37 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.9.0] — 2026-07-16 — "Problem transactions"
+
+The cheap, cohesive batch around long/idle transactions and blocking —
+every item reuses data already polled from `pg_stat_activity`, plus a
+keyboard help overlay that also clears the stale-README debt.
+
+### Added
+- **Idle-in-transaction / transaction-age hunter** — a new transaction-age
+  column and marker in the Micro Lens, plus a headline for the oldest
+  `idle in transaction` / long-running transaction (the session driving
+  XID-wraparound risk and lock retention). Yellow/red age tiers (idle-in-tx
+  escalates earlier than a plain long-running transaction). TUI + Web.
+- **Blocking chain / lock-wait graph** — the Micro Lens detail panel for a
+  selected PID now renders the full wait-for chain (`A→B→C`) to the root
+  blocker, with the root highlighted and a warning if a deadlock cycle is
+  detected. Reuses the `blocked_by` data already polled. TUI + Web.
+- **Prepared-transaction (orphaned 2PC) watch** — orphaned two-phase
+  commits (`pg_prepared_xacts`) hold locks and block vacuum forever; they
+  now show up (gid, age, owner, database) inside the Vacuum sub-view, with
+  yellow/red age tiers and a best-effort absent panel when none exist or
+  the view isn't visible. TUI + Web.
+- **Keyboard help overlay (`?`)** — a static reference listing every
+  binding, grouped by navigation / sub-views / data & refresh / admin /
+  quit; doubles as the source of truth the README keybindings table is
+  reconciled against.
+- **Docs: connection user & least-privilege** — a new
+  [`docs/connection-user.md`](docs/connection-user.md) page (linked from
+  the README) covering how to create the monitoring role and the exact
+  grants each lens needs, what degrades to an absent panel without them,
+  and the read-only posture.
+
 ## [0.8.0] — 2026-07-16 — "Room to breathe"
 
 Give the v0.7 data room to breathe: dedicated tabs, scrollable lists,

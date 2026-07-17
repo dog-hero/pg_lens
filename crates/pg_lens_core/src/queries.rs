@@ -59,6 +59,10 @@ pub struct QuerySet {
     /// on the fast tick, best-effort like `replication_slots` — a cheap
     /// catalog read, but never allowed to fail the poll.
     pub databases: &'static str,
+    /// Orphaned two-phase-commit watch (v0.9, `pg_prepared_xacts`). Runs on
+    /// the fast tick, best-effort like `databases` — a tiny system-view
+    /// read, but never allowed to fail the poll.
+    pub prepared_xacts: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -124,6 +128,9 @@ const BGWRITER_POST_170000: &str = include_str!("../queries/bgwriter_post_170000
 // Databases (U2). Version-independent 13+ (pg_database/has_database_privilege
 // are stable across the whole supported range) — no post_NNNNNN variant.
 const DATABASES: &str = include_str!("../queries/databases.sql");
+// Orphaned 2PC watch (v0.9). pg_prepared_xacts is stable across the whole
+// supported range — no post_NNNNNN variant needed.
+const PREPARED_XACTS: &str = include_str!("../queries/prepared_xacts.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -154,6 +161,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             db_stats_reset: DB_STATS_RESET,
             bgwriter,
             databases: DATABASES,
+            prepared_xacts: PREPARED_XACTS,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -176,6 +184,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             db_stats_reset: DB_STATS_RESET,
             bgwriter,
             databases: DATABASES,
+            prepared_xacts: PREPARED_XACTS,
         })
     } else {
         Err(format!(

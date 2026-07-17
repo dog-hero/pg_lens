@@ -191,6 +191,10 @@ def main():
         # Enter: statement detail with the highlighted full query + queryid.
         send("\r"); pump(0.6); snaps["q4_query_detail"] = screen.snapshot()
         send("\r"); pump(0.6); snaps["q5_detail_closed"] = screen.snapshot()
+    # v0.9: `?` opens the keyboard help overlay (static, works at any grid
+    # size); Esc closes it again without disturbing the dashboard underneath.
+    send("?"); pump(0.6); snaps["h1_help_open"] = screen.snapshot()
+    send("\x1b"); pump(0.6); snaps["h2_help_closed"] = screen.snapshot()
     send("q");  pump(1.0)
 
     try:
@@ -221,11 +225,11 @@ def main():
     check("Tab during refresh switched to Micro Lens (Activity table)",
           "Activity" in snaps["t3_after_tab"] and "PID" in snaps["t3_after_tab"])
     check("Micro Lens shows the top-waits strip (ratio + ranked waits)",
-          "4/6 waiting" in snaps["t3_after_tab"]
+          "5/7 waiting" in snaps["t3_after_tab"]
           and "Lock:transactionid ×1" in snaps["t3_after_tab"]
           and "IO:DataFileRead ×1" in snaps["t3_after_tab"])
     if not BASIC:
-        check("j moved selection (statusbar row 2/6)", "row 2/6" in snaps["t4_after_j"])
+        check("j moved selection (statusbar row 2/7)", "row 2/7" in snaps["t4_after_j"])
         check("s cycled sort (statusbar sort=state)", "sort=state" in snaps["t5_after_s"])
         check("Enter opened the detail panel", "Detail" in snaps["t6_detail_open"]
               and "Enter/Esc: close" in snaps["t6_detail_open"])
@@ -346,6 +350,12 @@ def main():
               and "pg_sleep" in snaps["q4_query_detail"])
         check("Enter closed the statement detail again",
               "Statement — queryid" not in snaps["q5_detail_closed"])
+    # --- v0.9: keyboard help overlay (`?`) ----------------------------------
+    check("? opened the keyboard help overlay (known bindings visible)",
+          "keyboard help" in snaps["h1_help_open"]
+          and "terminate the backend" in snaps["h1_help_open"])
+    check("Esc closed the help overlay again",
+          "keyboard help" not in snaps["h2_help_closed"])
     check("q exited cleanly (EXIT_CODE=0)", code == 0)
     print(f"EXIT_CODE={code}")
     sys.exit(0 if ok else 1)

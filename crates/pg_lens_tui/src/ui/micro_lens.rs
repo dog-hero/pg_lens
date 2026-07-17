@@ -14,10 +14,18 @@
 //!   list, one row per distinct `wait_event`, each with its share of
 //!   WAITING sessions and a proportional bar. `w`/`Esc` close it; it and the
 //!   detail panel are mutually exclusive (see `crate::app::handle_key`).
+//! - v0.9: a `Xact` column shows the age of each session's open transaction
+//!   (`—` when it has none), tinted by [`pg_lens_core::xact_age`]'s severity
+//!   tiers (idle-in-transaction reads worse than an equally-old active
+//!   query); an "oldest xact" one-line headline appears above the table,
+//!   same gating as the waits strip, whenever the oldest open transaction
+//!   in the snapshot is at least Warn severity (calm snapshots stay quiet).
 
 use std::collections::HashSet;
 
+use pg_lens_core::blocking::{BlockingChain, blocking_chain};
 use pg_lens_core::waits::{WaitSummary, top_waits};
+use pg_lens_core::xact_age::{OldestXact, Severity as XactSeverity, oldest_open_xact, xact_age_severity};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -31,7 +39,7 @@ use crate::ui::{format, sql, style};
 
 /// (width, spacing-follows) of every fixed column, in order. The last,
 /// flexible column (Query) takes whatever is left.
-const FIXED_WIDTHS: [u16; 7] = [6, 10, 12, 12, 11, 22, 8];
+const FIXED_WIDTHS: [u16; 8] = [6, 10, 12, 12, 11, 22, 8, 8];
 const STATUS_WIDTH: u16 = 1;
 const COLUMN_SPACING: u16 = 1;
 /// Highlight symbol "▶ " rendered left of the selected row.
@@ -52,16 +60,41 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     // and a display filter must not change that answer. One line, hidden
     // when nothing waits or the terminal is too narrow/short to afford it.
     let waits = top_waits(&app.snapshot.activity);
-    let table_area = if !waits.is_empty()
-        && area.width >= WAITS_MIN_WIDTH
-        && area.height >= WAITS_MIN_HEIGHT
-    {
-        let [strip_area, rest] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-        frame.render_widget(Paragraph::new(waits_strip(&waits)), strip_area);
-        rest
-    } else {
+    let oldest_xact = oldest_open_xact(&app.snapshot.activity);
+    let room = area.width >= WAITS_MIN_WIDTH && area.height >= WAITS_MIN_HEIGHT;
+    let show_waits = !waits.is_empty() && room;
+    // Calm snapshots (nothing past Warn) stay quiet — same "hidden unless
+    // there is something to say" contract as the waits strip.
+    let show_xact = room
+        && oldest_xact
+            .as_ref()
+            .is_some_and(|o| o.severity != XactSeverity::Ok);
+
+    let mut constraints = Vec::new();
+    if show_waits {
+        constraints.push(Constraint::Length(1));
+    }
+    if show_xact {
+        constraints.push(Constraint::Length(1));
+    }
+    let table_area = if constraints.is_empty() {
         area
+    } else {
+        constraints.push(Constraint::Min(0));
+        let chunks = Layout::vertical(constraints).split(area);
+        let mut idx = 0;
+        if show_waits {
+            frame.render_widget(Paragraph::new(waits_strip(&waits)), chunks[idx]);
+            idx += 1;
+        }
+        if show_xact {
+            // Safe: `show_xact` is only true when `oldest_xact` is `Some`.
+            if let Some(oldest) = &oldest_xact {
+                frame.render_widget(Paragraph::new(oldest_xact_headline(oldest)), chunks[idx]);
+            }
+            idx += 1;
+        }
+        chunks[idx]
     };
     draw_table(app, frame, table_area);
     // Empty state: the header/border still render (so the filter term and
@@ -111,6 +144,66 @@ fn waits_strip(waits: &WaitSummary) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Yellow warn / red bad, matching the rest of the TUI's severity
+/// convention (`ui/vacuum.rs`, the waits strip). `Ok` renders default (no
+/// tint needed — callers only reach this on a non-Ok headline anyway).
+fn xact_severity_color(severity: XactSeverity) -> Color {
+    match severity {
+        XactSeverity::Ok => Color::Reset,
+        XactSeverity::Warn => Color::Yellow,
+        XactSeverity::Bad => Color::Red,
+    }
+}
+
+/// One-line "oldest open transaction" headline: `oldest xact 38m12s │ pid
+/// 4312 │ idle in transaction`. Only rendered when the oldest transaction in
+/// the snapshot is at least Warn severity — the exact session driving
+/// XID-wraparound risk and lock retention.
+fn oldest_xact_headline(oldest: &OldestXact<'_>) -> Line<'static> {
+    let color = xact_severity_color(oldest.severity);
+    let age = oldest.row.xact_age_secs.unwrap_or(0.0);
+    Line::from(vec![
+        Span::styled(" oldest xact ", style::label_style()),
+        Span::styled(format::human_duration(age), Style::new().fg(color).bold()),
+        Span::styled(" \u{2502} pid ", style::label_style()),
+        Span::styled(oldest.row.pid.to_string(), Style::new().bold()),
+        Span::styled(" \u{2502} ", style::label_style()),
+        Span::styled(oldest.row.state.clone(), Style::new().fg(color)),
+    ])
+}
+
+/// v0.9: wait-for chain rendered inside the detail panel — one arrow-joined
+/// line `pid -> pid -> pid`, the root blocker (the one to act on) bold red,
+/// plus an explicit deadlock flag when the walk found a cycle instead of a
+/// free session at the head.
+fn blocking_chain_lines(chain: &BlockingChain) -> Vec<Line<'static>> {
+    let mut spans = vec![Span::styled("blocked by: ", style::label_style())];
+    let last_idx = chain.chain.len() - 1;
+    for (i, pid) in chain.chain.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" \u{2192} "));
+        }
+        let is_root = i == last_idx;
+        let style = if is_root {
+            Style::new().fg(Color::Red).bold()
+        } else {
+            Style::new()
+        };
+        spans.push(Span::styled(pid.to_string(), style));
+        if is_root && !chain.deadlock {
+            spans.push(Span::styled(" (root)", Style::new().fg(Color::Red)));
+        }
+    }
+    let mut lines = vec![Line::from(spans)];
+    if chain.deadlock {
+        lines.push(Line::from(Span::styled(
+            "\u{26a0} deadlock cycle detected \u{2014} the chain loops back on itself",
+            Style::new().fg(Color::Red).bold(),
+        )));
+    }
+    lines
+}
+
 /// Centered placeholder drawn inside the table body when no rows show.
 fn draw_empty(app: &App, frame: &mut Frame, area: Rect) {
     // Inside the border, below the header row.
@@ -138,7 +231,7 @@ fn draw_empty(app: &App, frame: &mut Frame, area: Rect) {
 
 fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
     let header = Row::new([
-        "S", "PID", "DB", "User", "Client", "State", "Wait", "Duration", "Query",
+        "S", "PID", "DB", "User", "Client", "State", "Wait", "Duration", "Xact", "Query",
     ])
     .style(Style::new().bold());
 
@@ -180,6 +273,16 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
             } else {
                 Cell::from(sql::highlight_line(&query_text))
             };
+            // Xact column: age of the open transaction (`—` when none),
+            // tinted by the same severity the headline uses — idle in
+            // transaction reads worse than an equally-old active query.
+            let xact_cell = match row.xact_age_secs {
+                Some(age) => {
+                    let color = xact_severity_color(xact_age_severity(age, &row.state));
+                    Cell::from(Span::styled(format::human_duration(age), Style::new().fg(color)))
+                }
+                None => Cell::from(Span::styled("\u{2014}", style::label_style())),
+            };
             Row::new(vec![
                 Cell::from(status.to_string()),
                 Cell::from(row.pid.to_string()),
@@ -189,6 +292,7 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
                 Cell::from(row.state.clone()),
                 Cell::from(row.wait_event.clone().unwrap_or_default()),
                 Cell::from(format::human_duration(row.duration_secs)),
+                xact_cell,
                 query_cell,
             ])
             .style(style)
@@ -203,6 +307,7 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
         Constraint::Length(FIXED_WIDTHS[4]),
         Constraint::Length(FIXED_WIDTHS[5]),
         Constraint::Length(FIXED_WIDTHS[6]),
+        Constraint::Length(FIXED_WIDTHS[7]),
         Constraint::Min(10),
     ];
 
@@ -260,10 +365,10 @@ fn activity_title(app: &App) -> Line<'static> {
 
 /// How many characters the Query column can hold at this terminal width:
 /// total width minus borders, highlight symbol, the fixed columns and the
-/// spacing between all nine columns.
+/// spacing between all ten columns.
 fn query_column_width(area_width: u16) -> usize {
     let fixed: u16 = FIXED_WIDTHS.iter().sum::<u16>() + STATUS_WIDTH;
-    let overhead = 2 /* block borders */ + HIGHLIGHT_WIDTH + fixed + 8 * COLUMN_SPACING;
+    let overhead = 2 /* block borders */ + HIGHLIGHT_WIDTH + fixed + 9 * COLUMN_SPACING;
     usize::from(area_width.saturating_sub(overhead))
 }
 
@@ -287,6 +392,20 @@ fn draw_detail(app: &App, frame: &mut Frame, area: Rect) {
     let mut lines = Vec::new();
     if let Some(wait) = &row.wait_event {
         lines.push(Line::from(format!("wait: {wait}")).style(Style::new().fg(Color::Yellow)));
+    }
+    if let Some(age) = row.xact_age_secs {
+        let severity = xact_age_severity(age, &row.state);
+        lines.push(
+            Line::from(format!("xact age: {}", format::human_duration(age)))
+                .style(Style::new().fg(xact_severity_color(severity))),
+        );
+    }
+    // v0.9: wait-for chain, only when this pid is actually blocked — the
+    // root blocker (the one to act on) is highlighted; a deadlock cycle is
+    // flagged explicitly rather than silently showing a chain that loops.
+    if let Some(chain) = blocking_chain(row.pid, &app.snapshot.locks) {
+        lines.push(Line::default());
+        lines.extend(blocking_chain_lines(&chain));
     }
     // Full query, line by line, with SQL syntax highlighting.
     lines.extend(sql::highlight_lines(&row.query));
@@ -372,14 +491,18 @@ fn wait_bar(count: usize, max: usize, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{WAITS_TOP_N, query_column_width, wait_bar, wait_percent, waits_strip};
+    use super::{
+        WAITS_TOP_N, blocking_chain_lines, oldest_xact_headline, query_column_width, wait_bar,
+        wait_percent, waits_strip,
+    };
     use pg_lens_core::waits::WaitSummary;
+    use pg_lens_core::xact_age::{OldestXact, Severity as XactSeverity};
     use ratatui::style::Color;
 
     #[test]
     fn query_width_shrinks_with_the_terminal_and_never_underflows() {
-        // 120 cols: 120 - (2 + 2 + 82 + 8) = 26 chars for the query.
-        assert_eq!(query_column_width(120), 26);
+        // 120 cols: 120 - (2 + 2 + 90 + 9) = 17 chars for the query.
+        assert_eq!(query_column_width(120), 17);
         assert!(query_column_width(80) < query_column_width(120));
         // Absurdly narrow terminals must not panic or wrap around.
         assert_eq!(query_column_width(10), 0);
@@ -416,6 +539,53 @@ mod tests {
     }
 
     #[test]
+    fn oldest_xact_headline_shows_age_pid_and_state() {
+        let mock_snapshot = crate::app::App::new().snapshot.clone();
+        let row = mock_snapshot
+            .activity
+            .iter()
+            .find(|r| r.pid == 4312)
+            .expect("mock's idle-in-transaction row");
+        let oldest = OldestXact {
+            row,
+            severity: XactSeverity::Bad,
+        };
+        let line = oldest_xact_headline(&oldest);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("pid 4312"), "{text}");
+        assert!(text.contains("idle in transaction"), "{text}");
+        // Bad severity tints the age span (index 1: label, age, sep, pid,
+        // sep, state) red.
+        assert_eq!(line.spans[1].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn micro_lens_renders_the_xact_column_and_oldest_headline_from_mock() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::MicroLens;
+        let snapshot = app.snapshot.clone();
+        crate::app::update(&mut app, crate::app::Action::Snapshot(snapshot));
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Xact"), "column header present: {screen}");
+        // The mock's oldest transaction is pid 4312, idle in transaction,
+        // well past the Bad threshold — the headline must call it out.
+        assert!(screen.contains("oldest xact"), "{screen}");
+        assert!(screen.contains("4312"), "{screen}");
+    }
+
+    #[test]
     fn waits_strip_caps_at_top_n() {
         let ranked: Vec<(String, usize)> = (0..WAITS_TOP_N + 3)
             .map(|i| (format!("LWLock:Fake{i}"), 1))
@@ -428,6 +598,77 @@ mod tests {
         let line = waits_strip(&summary);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.matches("LWLock:Fake").count(), WAITS_TOP_N);
+    }
+
+    // --- v0.9: blocking chain in the detail panel -------------------------
+
+    #[test]
+    fn detail_panel_shows_the_wait_for_chain_and_highlights_the_root() {
+        // Mock data: pid 5104 -> 4977 -> 4312 (root), a real 3-level chain.
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::MicroLens;
+        let snapshot = app.snapshot.clone();
+        crate::app::update(&mut app, crate::app::Action::Snapshot(snapshot));
+
+        let pos = app
+            .row_order
+            .iter()
+            .position(|&i| app.snapshot.activity[i].pid == 5104)
+            .expect("mock's deepest blocked pid is present");
+        app.table_state.select(Some(pos));
+        app.detail_open = true;
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("blocked by"), "{screen}");
+        assert!(screen.contains("5104"), "{screen}");
+        assert!(screen.contains("4977"), "{screen}");
+        assert!(screen.contains("4312"), "{screen}");
+        assert!(screen.contains("root"), "{screen}");
+    }
+
+    #[test]
+    fn blocking_chain_lines_flags_a_deadlock_cycle() {
+        use pg_lens_core::blocking::BlockingChain;
+
+        let chain = BlockingChain {
+            chain: vec![1, 2, 1],
+            deadlock: true,
+        };
+        let lines = blocking_chain_lines(&chain);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("deadlock cycle"), "{text}");
+    }
+
+    #[test]
+    fn blocking_chain_lines_highlights_the_root_blocker() {
+        use pg_lens_core::blocking::BlockingChain;
+
+        let chain = BlockingChain {
+            chain: vec![3, 2, 1],
+            deadlock: false,
+        };
+        let lines = blocking_chain_lines(&chain);
+        let root_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content == "1")
+            .expect("root pid span present");
+        assert_eq!(root_span.style.fg, Some(Color::Red));
     }
 
     // --- U3: full waits panel (`w`) --------------------------------------

@@ -9,9 +9,10 @@
 // room, so it renders the COMPLETE worst-tables list (all
 // `VACUUM_TABLES_LIMIT` rows the query ships) — no toggle needed here.
 
-import type { SchemaSnapshot, VacuumProgressRow } from "./types";
-import { humanCount } from "./format";
+import type { PreparedXactRow, SchemaSnapshot, VacuumProgressRow } from "./types";
+import { humanCount, humanDuration } from "./format";
 import { ageSeverity } from "./vacuum";
+import { preparedXactSeverity } from "./prepared_xacts";
 
 function deadPct(dead: number, live: number): number {
   const total = dead + live;
@@ -23,15 +24,18 @@ export class VacuumPanel {
     private readonly cluster: HTMLElement,
     private readonly tables: HTMLUListElement,
     private readonly progress: HTMLElement,
+    private readonly preparedXacts: HTMLUListElement,
   ) {}
 
   update(
     schema: SchemaSnapshot | null,
     vacuumProgress: VacuumProgressRow[] | null,
+    preparedXacts: PreparedXactRow[] | null,
   ): void {
     this.renderCluster(schema);
     this.renderTables(schema);
     this.renderProgress(vacuumProgress);
+    this.renderPreparedXacts(preparedXacts);
   }
 
   private renderCluster(schema: SchemaSnapshot | null): void {
@@ -93,5 +97,40 @@ export class VacuumPanel {
     this.progress.textContent =
       `vacuuming ${row.relation} — ${row.phase} (${pct.toFixed(0)}%)`;
     this.progress.className = "vacuum-progress";
+  }
+
+  /**
+   * v0.9: orphaned two-phase-commit watch (`pg_prepared_xacts`) — the
+   * classic silent incident, rendered right below the vacuum progress it
+   * blocks. `null` (best-effort collection failed this tick) renders a dim
+   * "unavailable" line; an empty array (the overwhelmingly common case)
+   * renders a dim "none" line; otherwise one severity-colored row per
+   * dangling prepared transaction (gid, owner, database, age).
+   */
+  private renderPreparedXacts(rows: PreparedXactRow[] | null): void {
+    if (rows === null) {
+      const li = document.createElement("li");
+      li.className = "vacuum-empty";
+      li.textContent = "prepared transactions: unavailable";
+      this.preparedXacts.replaceChildren(li);
+      return;
+    }
+    if (rows.length === 0) {
+      const li = document.createElement("li");
+      li.className = "vacuum-empty";
+      li.textContent = "no orphaned prepared transactions";
+      this.preparedXacts.replaceChildren(li);
+      return;
+    }
+    const items = rows.map((row) => {
+      const sev = preparedXactSeverity(row.age_seconds);
+      const li = document.createElement("li");
+      li.className = sev ? `vacuum-table ${sev}` : "vacuum-table";
+      li.textContent =
+        `${row.gid} — owner ${row.owner} · db ${row.database} · ` +
+        `age ${humanDuration(row.age_seconds)}`;
+      return li;
+    });
+    this.preparedXacts.replaceChildren(...items);
   }
 }

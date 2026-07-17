@@ -13,6 +13,7 @@ import { VacuumPanel } from "./vacuum-panel";
 import { StatementsLens } from "./statements";
 import { renderReplication } from "./replication";
 import { renderWaits, renderWaitsList } from "./waits";
+import { renderOldestXact } from "./xact_age";
 import {
   clearToken,
   openStream,
@@ -59,6 +60,10 @@ const waitsStrip = el<HTMLDivElement>("waits-strip");
 const waitsDetail = el<HTMLDetailsElement>("waits-detail");
 const waitsDetailSummary = el<HTMLElement>("waits-detail-summary");
 const waitsList = el<HTMLUListElement>("waits-list");
+const xactHeadline = el<HTMLDivElement>("xact-headline");
+const xactHeadlineAge = el<HTMLSpanElement>("xact-headline-age");
+const xactHeadlineMeta = el<HTMLSpanElement>("xact-headline-meta");
+const xactHeadlineState = el<HTMLSpanElement>("xact-headline-state");
 const replicationBody = el<HTMLElement>("replication");
 const replicationPlaceholder = el<HTMLParagraphElement>("replication-placeholder");
 const schemaLens = new SchemaLens(
@@ -77,6 +82,7 @@ const vacuumPanel = new VacuumPanel(
   el<HTMLParagraphElement>("vacuum-cluster"),
   el<HTMLUListElement>("vacuum-tables"),
   el<HTMLParagraphElement>("vacuum-progress"),
+  el<HTMLUListElement>("prepared-xacts"),
 );
 const statementsLens = new StatementsLens(
   el<HTMLTableElement>("statements"),
@@ -175,10 +181,13 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   // U3: the complete ranked list, collapsed under the activity table (the
   // strip above only ever shows the top few).
   renderWaitsList(waitsDetail, waitsDetailSummary, waitsList, snapshot.activity);
+  // v0.9: oldest open transaction, hidden on calm snapshots — the same
+  // "quiet unless something's wrong" contract as the waits strip.
+  renderOldestXact(xactHeadline, xactHeadlineAge, xactHeadlineMeta, xactHeadlineState, snapshot.activity);
   table.update(snapshot.activity, snapshot.locks);
   schemaLens.update(snapshot.schema, snapshot.vitals.database);
   indexAdvisor.update(snapshot.schema, snapshot.vitals.database);
-  vacuumPanel.update(snapshot.schema, snapshot.vacuum_progress);
+  vacuumPanel.update(snapshot.schema, snapshot.vacuum_progress, snapshot.prepared_xacts);
   statementsLens.update(snapshot.statements, snapshot.vitals.database);
   announceAdmin(snapshot.last_admin_action);
   const v = snapshot.vitals;

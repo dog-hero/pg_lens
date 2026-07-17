@@ -32,9 +32,9 @@ use crate::history_store::HistoryStore;
 use crate::index_advisor::{self, IndexCatalogRow};
 use crate::models::{
     AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats, DatabaseRow,
-    DbSnapshot, IndexRow, PollerStatus, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot,
-    SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot, StatementsStatus,
-    VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
+    DbSnapshot, IndexRow, PollerStatus, PreparedXactRow, ReplicationInfo, ReplicationSlotRow,
+    SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
+    StatementsStatus, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
 };
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
@@ -978,6 +978,11 @@ async fn poll_once(
     // simply has nothing to show this tick on any failure.
     let databases = collect_databases(client, q).await;
 
+    // Orphaned 2PC watch (v0.9) is likewise best-effort — a restricted role
+    // or a server that hides the view degrades to "no panel this tick",
+    // never a poll fault, even though pg_prepared_xacts is world-readable.
+    let prepared_xacts = collect_prepared_xacts(client, q).await;
+
     let now = Instant::now();
     let xact_total = info.xact_commit + info.xact_rollback;
     let cumulative_ratio = hit_ratio(info.blks_hit, info.blks_read);
@@ -1064,6 +1069,7 @@ async fn poll_once(
         vacuum_progress,
         checkpointer: Some(checkpointer_stats),
         databases,
+        prepared_xacts,
         status: PollerStatus::Ok,
     })
 }
@@ -1316,6 +1322,26 @@ async fn collect_databases(client: &mut Client, q: &queries::QuerySet) -> Option
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(db::database_from_row(row).ok()?);
+    }
+    tx.commit().await.ok()?;
+    Some(out)
+}
+
+/// Best-effort orphaned-2PC watch (v0.9, `queries/prepared_xacts.sql`),
+/// refreshed every fast tick. Returns `None` on ANY query or parse failure —
+/// same contract as [`collect_databases`]/[`collect_vacuum_progress`]; it
+/// must never fail the poll. `Some(vec![])` (the overwhelmingly common case)
+/// means the collection succeeded and found nothing dangling, never an
+/// error.
+async fn collect_prepared_xacts(
+    client: &mut Client,
+    q: &queries::QuerySet,
+) -> Option<Vec<PreparedXactRow>> {
+    let tx = begin_read(client).await.ok()?;
+    let rows = tx.query(q.prepared_xacts, &[]).await.ok()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        out.push(db::prepared_xact_from_row(row).ok()?);
     }
     tx.commit().await.ok()?;
     Some(out)

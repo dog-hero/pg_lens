@@ -9,12 +9,19 @@
 --   * duration cast to float8 (EXTRACT returns numeric on PG >= 14).
 --   * wait combines wait_event_type:wait_event for display.
 --   * usename aliased as usename (not `user`) to keep row extraction plain.
+--   * xact_age_seconds added (v0.9, idle-in-transaction / xact-age hunter):
+--     EXTRACT(epoch FROM (now() - xact_start))::float8, NULL when the
+--     backend has no open transaction — cast for the same numeric-on-14+
+--     reason as `duration`.
 SELECT
       a.pid AS pid,
       a.application_name AS application_name,
       a.datname AS database,
       a.client_addr::text AS client,
       EXTRACT(epoch FROM (NOW() - a.query_start))::float8 AS duration,
+      CASE WHEN a.xact_start IS NULL THEN NULL
+           ELSE EXTRACT(epoch FROM (NOW() - a.xact_start))::float8
+      END AS xact_age_seconds,
       CASE WHEN a.wait_event IS NULL THEN NULL
            ELSE a.wait_event_type || ':' || a.wait_event
       END AS wait,

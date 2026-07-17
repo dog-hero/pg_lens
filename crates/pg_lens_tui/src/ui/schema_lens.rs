@@ -183,17 +183,28 @@ fn draw_vacuum_footer(schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
 /// via its own `vacuum_table_state`), and the in-flight progress section —
 /// none of it squeezed under the Tables list anymore.
 fn draw_vacuum_view(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
-    let [headline_area, table_area, progress_area, footer_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    // v0.9: the prepared-xacts section grows with the row count (usually
+    // 0 — the calm case renders as one dim line, never an empty gap), capped
+    // so a pathological number of orphans can't push the table off-screen.
+    let prepared_height = app
+        .snapshot
+        .prepared_xacts
+        .as_deref()
+        .map_or(1, |rows| rows.len().clamp(1, 4)) as u16;
+    let [headline_area, table_area, progress_area, prepared_area, footer_area] =
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(prepared_height),
+            Constraint::Length(1),
+        ])
+        .areas(area);
 
     draw_vacuum_headline(schema, frame, headline_area);
     draw_vacuum_table(app, schema, frame, table_area);
     draw_vacuum_progress(app, frame, progress_area);
+    draw_prepared_xacts(app, frame, prepared_area);
     draw_footer(app, schema, frame, footer_area);
 }
 
@@ -329,6 +340,44 @@ fn draw_vacuum_progress(app: &App, frame: &mut Frame, area: Rect) {
         None => Line::from(" vacuum progress: unavailable").dim(),
     };
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// v0.9: orphaned 2PC watch (`pg_prepared_xacts`) — the classic silent
+/// incident, so it lives right under the vacuum progress it blocks. Rendered
+/// like [`draw_vacuum_progress`]: a calm dim line when there is nothing
+/// dangling, an "unavailable" dim line when the best-effort collection
+/// failed this tick, one severity-colored line per row otherwise (gid,
+/// owner, database, age).
+fn draw_prepared_xacts(app: &App, frame: &mut Frame, area: Rect) {
+    let lines: Vec<Line> = match app.snapshot.prepared_xacts.as_deref() {
+        None => vec![Line::from(" prepared transactions: unavailable").dim()],
+        Some([]) => vec![Line::from(" no orphaned prepared transactions").dim()],
+        Some(rows) => rows
+            .iter()
+            .map(|row| {
+                let sev = pg_lens_core::prepared_xact_severity(row.age_seconds);
+                let marker = match sev {
+                    pg_lens_core::PreparedXactSeverity::Ok => "  ",
+                    pg_lens_core::PreparedXactSeverity::Warn => "! ",
+                    pg_lens_core::PreparedXactSeverity::Bad => "!!",
+                };
+                let style = match sev {
+                    pg_lens_core::PreparedXactSeverity::Ok => Style::new(),
+                    pg_lens_core::PreparedXactSeverity::Warn => Style::new().fg(Color::Yellow),
+                    pg_lens_core::PreparedXactSeverity::Bad => Style::new().fg(Color::Red).bold(),
+                };
+                Line::from(format!(
+                    " {marker} prepared: {gid} \u{b7} owner {owner} \u{b7} db {db} \u{b7} age {age}",
+                    gid = row.gid,
+                    owner = row.owner,
+                    db = row.database,
+                    age = format::human_duration(row.age_seconds),
+                ))
+                .style(style)
+            })
+            .collect(),
+    };
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {

@@ -36,6 +36,11 @@ pub struct ActivityRow {
     pub client: String,
     /// `EXTRACT(epoch FROM (NOW() - query_start))`.
     pub duration_secs: f64,
+    /// `EXTRACT(epoch FROM (NOW() - xact_start))` — `None` when the backend
+    /// has no open transaction. Drives the idle-in-transaction / xact-age
+    /// hunter (see [`crate::xact_age`]): the age itself, plus `state`,
+    /// decide the severity tier.
+    pub xact_age_secs: Option<f64>,
     pub wait_event: Option<String>,
     pub username: String,
     pub state: String,
@@ -258,6 +263,22 @@ pub struct VacuumProgressRow {
     pub phase: String,
     pub heap_blks_total: i64,
     pub heap_blks_scanned: i64,
+}
+
+/// One orphaned two-phase-commit row (v0.9, `queries/prepared_xacts.sql`):
+/// a `PREPARE TRANSACTION` left dangling holds its locks and pins the
+/// wraparound horizon indefinitely, with no session in `pg_stat_activity` to
+/// blame (the backend that prepared it already disconnected) — the classic
+/// silent incident that blocks vacuum forever. Collected on the FAST tick,
+/// best-effort (see [`DbSnapshot::prepared_xacts`]); severity tiers live in
+/// `crate::prepared_xacts` (mirrored by the TUI/web frontends).
+#[derive(Clone, Debug, Serialize)]
+pub struct PreparedXactRow {
+    pub gid: String,
+    pub owner: String,
+    pub database: String,
+    /// `EXTRACT(epoch FROM (now() - prepared))::float8`.
+    pub age_seconds: f64,
 }
 
 /// Health of the *slow* schema collection, separate from [`PollerStatus`]:
@@ -1088,6 +1109,12 @@ pub struct DbSnapshot {
     /// connectable (never happens in practice — at least the connected
     /// database always qualifies), never an error.
     pub databases: Option<Vec<DatabaseRow>>,
+    /// Orphaned two-phase-commit watch (v0.9, `pg_prepared_xacts`), refreshed
+    /// every fast tick, best-effort like `databases`: `None` when the
+    /// collection failed this tick, `Some(vec![])` when it succeeded and
+    /// simply found no dangling prepared transaction (the overwhelmingly
+    /// common case — rendered calmly, never as an error).
+    pub prepared_xacts: Option<Vec<PreparedXactRow>>,
     pub status: PollerStatus,
 }
 
@@ -1136,6 +1163,9 @@ impl DbSnapshot {
                 client: "10.0.4.12".to_string(),
                 // Short-lived OLTP query: fresh duration every snapshot.
                 duration_secs: 0.02 + jitter(seq, 7, 80) as f64 / 1_000.0,
+                // Implicit single-statement transaction: xact age tracks
+                // the query duration.
+                xact_age_secs: Some(0.02 + jitter(seq, 7, 80) as f64 / 1_000.0),
                 wait_event: None,
                 username: "app_rw".to_string(),
                 state: "active".to_string(),
@@ -1152,6 +1182,7 @@ impl DbSnapshot {
                 database: "bench".to_string(),
                 client: "10.0.4.99".to_string(),
                 duration_secs: 12.7 + age,
+                xact_age_secs: Some(12.7 + age),
                 wait_event: Some("Lock:transactionid".to_string()),
                 username: "bench".to_string(),
                 state: "active".to_string(),
@@ -1167,6 +1198,7 @@ impl DbSnapshot {
                 database: "warehouse".to_string(),
                 client: "10.0.7.3".to_string(),
                 duration_secs: 384.2 + age,
+                xact_age_secs: Some(384.2 + age),
                 wait_event: Some("IO:DataFileRead".to_string()),
                 username: "analytics_ro".to_string(),
                 state: "active".to_string(),
@@ -1183,6 +1215,7 @@ impl DbSnapshot {
                 database: "warehouse".to_string(),
                 client: "10.0.7.3".to_string(),
                 duration_secs: 384.2 + age,
+                xact_age_secs: Some(384.2 + age),
                 wait_event: Some("IPC:MessageQueueSend".to_string()),
                 username: "analytics_ro".to_string(),
                 state: "active".to_string(),
@@ -1199,6 +1232,12 @@ impl DbSnapshot {
                 database: "shop".to_string(),
                 client: "local".to_string(),
                 duration_secs: 1_922.0 + age,
+                // U3.9: deliberately the oldest open transaction in the
+                // mock set AND idle-in-transaction — the exact story the
+                // xact-age hunter's headline exists to catch. Comfortably
+                // past `xact_age::IDLE_IN_XACT_AGE_BAD_SECS` (900s) so
+                // `--mock` opens on a visible red marker, not a calm one.
+                xact_age_secs: Some(2_450.0 + age),
                 wait_event: Some("Client:ClientRead".to_string()),
                 username: "leonardo".to_string(),
                 state: "idle in transaction".to_string(),
@@ -1214,6 +1253,7 @@ impl DbSnapshot {
                 database: "shop".to_string(),
                 client: "local".to_string(),
                 duration_secs: 88.4 + age,
+                xact_age_secs: Some(88.4 + age),
                 wait_event: None,
                 username: "postgres".to_string(),
                 state: "active".to_string(),
@@ -1222,20 +1262,55 @@ impl DbSnapshot {
                 is_parallel_worker: false,
                 query_id: None,
             },
+            // v0.9: third link of the blocking chain — waits on pid 4977,
+            // which is itself waiting on pid 4312. See `locks` below: this
+            // is what makes `--mock`/the PTY e2e exercise a real 3-level
+            // wait-for chain (A blocks B blocks C), not just a single pair.
+            ActivityRow {
+                pid: 5104,
+                application_name: "checkout-worker".to_string(),
+                database: "bench".to_string(),
+                client: "10.0.4.51".to_string(),
+                duration_secs: 6.1 + age,
+                xact_age_secs: Some(6.1 + age),
+                wait_event: Some("Lock:tuple".to_string()),
+                username: "bench".to_string(),
+                state: "active".to_string(),
+                query: "UPDATE pgbench_branches SET bbalance = bbalance - $1 WHERE bid = $2"
+                    .to_string(),
+                query_leader_pid: 5104,
+                is_parallel_worker: false,
+                query_id: Some(3_004_918_872_215_881_003),
+            },
         ];
 
         // Matches the story above: pid 4977 waits on a transactionid lock
-        // held by the idle-in-transaction psql session (pid 4312).
-        let locks = vec![LockRow {
-            pid: 4977,
-            blocked_by: vec![4312],
-            mode: Some("ShareLock".to_string()),
-            locktype: Some("transactionid".to_string()),
-            relation: None,
-            duration_secs: 12.7 + age,
-            query: "UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2"
-                .to_string(),
-        }];
+        // held by the idle-in-transaction psql session (pid 4312), and pid
+        // 5104 in turn waits on a row 4977 has touched — a 3-level chain
+        // (5104 -> 4977 -> 4312) so the Blocking Chain feature has real
+        // multi-hop data to render under `--mock`.
+        let locks = vec![
+            LockRow {
+                pid: 4977,
+                blocked_by: vec![4312],
+                mode: Some("ShareLock".to_string()),
+                locktype: Some("transactionid".to_string()),
+                relation: None,
+                duration_secs: 12.7 + age,
+                query: "UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2"
+                    .to_string(),
+            },
+            LockRow {
+                pid: 5104,
+                blocked_by: vec![4977],
+                mode: Some("RowExclusiveLock".to_string()),
+                locktype: Some("tuple".to_string()),
+                relation: Some("pgbench_branches".to_string()),
+                duration_secs: 6.1 + age,
+                query: "UPDATE pgbench_branches SET bbalance = bbalance - $1 WHERE bid = $2"
+                    .to_string(),
+            },
+        ];
 
         Self {
             vitals,
@@ -1349,6 +1424,16 @@ impl DbSnapshot {
                     size_bytes: None,
                 },
             ]),
+            // v0.9: one dangling 2PC transaction, comfortably past
+            // `prepared_xacts::BAD_AGE_SECS` (1h) — a classic orphaned
+            // incident, left there from a client that PREPAREd and vanished,
+            // so `--mock` opens on a visible red row in the Vacuum sub-view.
+            prepared_xacts: Some(vec![PreparedXactRow {
+                gid: "payment_batch_2026_07_14".to_string(),
+                owner: "app_rw".to_string(),
+                database: "shop".to_string(),
+                age_seconds: 5_412.0 + age,
+            }]),
             status: PollerStatus::Ok,
         }
     }
@@ -1386,6 +1471,7 @@ impl DbSnapshot {
             vacuum_progress: None,
             checkpointer: None,
             databases: None,
+            prepared_xacts: None,
             status: PollerStatus::Connecting,
         }
     }
@@ -1479,6 +1565,28 @@ mod tests {
         assert!(
             databases.iter().any(|d| d.size_bytes.is_none()),
             "one row must demo the best-effort size dash"
+        );
+    }
+
+    /// v0.9: the mock carries one dangling prepared transaction, old enough
+    /// to land in the red tier — the Vacuum sub-view has real data to show
+    /// under `--mock` without waiting for a live incident.
+    #[test]
+    fn mock_snapshot_carries_a_prepared_xact() {
+        let snapshot = DbSnapshot::mock();
+        let rows = snapshot
+            .prepared_xacts
+            .as_ref()
+            .expect("mock must carry prepared_xacts");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert!(!row.gid.is_empty());
+        assert!(!row.owner.is_empty());
+        assert_eq!(row.database, snapshot.vitals.database);
+        assert!(
+            row.age_seconds > crate::prepared_xacts::BAD_AGE_SECS,
+            "mock row must land in the red tier, got {}",
+            row.age_seconds
         );
     }
 

@@ -29,6 +29,8 @@ export interface ActivityRow {
   database: string;
   client: string;
   duration_secs: number;
+  /** EXTRACT(epoch FROM (now() - xact_start)); null = no open transaction. */
+  xact_age_secs: number | null;
   wait_event: string | null;
   username: string;
   state: string;
@@ -130,6 +132,20 @@ export interface VacuumProgressRow {
   phase: string;
   heap_blks_total: number;
   heap_blks_scanned: number;
+}
+
+/**
+ * One orphaned two-phase-commit row (v0.9, `pg_prepared_xacts`): a
+ * `PREPARE TRANSACTION` left dangling holds its locks and pins the
+ * wraparound horizon indefinitely, with no session in `pg_stat_activity` to
+ * blame — the classic silent incident that blocks vacuum forever.
+ */
+export interface PreparedXactRow {
+  gid: string;
+  owner: string;
+  database: string;
+  /** `EXTRACT(epoch FROM (now() - prepared))`. */
+  age_seconds: number;
 }
 
 /**
@@ -335,6 +351,13 @@ export interface DbSnapshot {
    * best-effort. null only before the first successful poll of a session.
    */
   checkpointer: CheckpointerStats | null;
+  /**
+   * Orphaned two-phase-commit watch (v0.9), refreshed every fast tick,
+   * best-effort like `vacuum_progress`: null when the collection failed
+   * this tick, an empty array when it succeeded and simply found no
+   * dangling prepared transaction (the overwhelmingly common, calm case).
+   */
+  prepared_xacts: PreparedXactRow[] | null;
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
 }

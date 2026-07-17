@@ -269,6 +269,87 @@ table#activity {
   font-weight: 700;
 }
 
+/* Xact column (v0.9): age of each session's open transaction, tinted by
+   the same severity the oldest-xact headline uses. "—" (no open
+   transaction) stays dim. */
+#activity td.xact-warn {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+#activity td.xact-bad {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+#activity td.xact-none {
+  color: var(--fg-dim);
+}
+
+/* Oldest-xact headline strip above the activity table (mirrors the TUI's
+   one-liner) — hidden unless the oldest open transaction is at least warn
+   severity. */
+.xact-headline {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+
+.xact-headline::before {
+  content: "oldest xact ";
+  color: var(--fg-dim);
+}
+
+.xact-headline .xact-headline-age {
+  font-weight: 700;
+}
+
+.xact-headline.severity-warn .xact-headline-age,
+.xact-headline.severity-warn .xact-headline-state {
+  color: var(--warn);
+}
+
+.xact-headline.severity-bad .xact-headline-age,
+.xact-headline.severity-bad .xact-headline-state {
+  color: var(--bad);
+}
+
+/* Blocking chain (v0.9): blocked rows are clickable — expands a sub-row
+   showing the wait-for chain up to the root blocker, mirrors the TUI's
+   detail panel. */
+#activity tr.blocking-chain-toggle {
+  cursor: pointer;
+}
+
+#activity tr.blocking-chain-row {
+  background: rgba(244, 112, 103, 0.06);
+}
+
+#activity tr.blocking-chain-row td {
+  padding: 6px 10px;
+}
+
+.blocking-chain-line {
+  font-size: 13px;
+}
+
+.blocking-chain-arrow {
+  color: var(--fg-dim);
+}
+
+.blocking-chain-root {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+.blocking-chain-deadlock {
+  color: var(--bad);
+  font-weight: 700;
+  margin-top: 4px;
+}
+
 /* ── replication panel ──────────────────────────────────────────────── */
 
 #replication .repl-row {

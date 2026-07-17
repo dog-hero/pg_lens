@@ -77,6 +77,11 @@
             spellcheck="false"
           />
           <div id="waits-strip" class="waits-strip" hidden></div>
+          <div id="xact-headline" class="xact-headline" hidden>
+            <span id="xact-headline-age" class="xact-headline-age"></span>
+            <span id="xact-headline-meta" class="xact-headline-meta"></span>
+            <span id="xact-headline-state" class="xact-headline-state"></span>
+          </div>
           <div class="table-wrap">
             <table id="activity">
               <thead></thead>
@@ -119,6 +124,8 @@
             <p id="vacuum-cluster" class="vacuum-cluster"></p>
             <ul id="vacuum-tables" class="vacuum-tables"></ul>
             <p id="vacuum-progress" class="vacuum-progress"></p>
+            <h3>Prepared transactions (orphaned 2PC)</h3>
+            <ul id="prepared-xacts" class="vacuum-tables"></ul>
           </div>
         </section>
         <section id="indexes-panel" class="panel" role="tabpanel" hidden>

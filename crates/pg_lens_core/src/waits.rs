@@ -79,6 +79,7 @@ mod tests {
             database: String::new(),
             client: String::new(),
             duration_secs: 0.0,
+            xact_age_secs: None,
             wait_event: wait.map(str::to_string),
             username: String::new(),
             state: "active".to_string(),

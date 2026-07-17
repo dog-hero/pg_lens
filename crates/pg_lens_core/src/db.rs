@@ -8,8 +8,9 @@ use tokio::task::JoinHandle;
 use tokio_postgres::{Client, Config, NoTls, Row, Transaction};
 
 use crate::models::{
-    ActivityRow, BloatRow, DatabaseRow, LockRow, ReplicationSlotRow, StatementRow, TableStatRow,
-    VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow,
+    ActivityRow, BloatRow, DatabaseRow, LockRow, PreparedXactRow, ReplicationSlotRow, StatementRow,
+    TableStatRow, VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalReceiverRow,
+    WalSenderRow,
 };
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
@@ -65,6 +66,7 @@ pub fn activity_from_row(row: &Row) -> Result<ActivityRow, tokio_postgres::Error
             .try_get::<_, Option<String>>("client")?
             .unwrap_or_else(|| "local".to_string()),
         duration_secs: row.try_get::<_, Option<f64>>("duration")?.unwrap_or(0.0),
+        xact_age_secs: row.try_get("xact_age_seconds")?,
         wait_event: row.try_get("wait")?,
         username: opt_text(row, "usename")?,
         state: opt_text(row, "state")?,
@@ -446,6 +448,17 @@ pub fn database_from_row(row: &Row) -> Result<DatabaseRow, tokio_postgres::Error
     Ok(DatabaseRow {
         name: row.try_get("datname")?,
         size_bytes: row.try_get("size_bytes")?,
+    })
+}
+
+/// Maps one row of `queries/prepared_xacts.sql` onto [`PreparedXactRow`]
+/// (v0.9's orphaned 2PC watch).
+pub fn prepared_xact_from_row(row: &Row) -> Result<PreparedXactRow, tokio_postgres::Error> {
+    Ok(PreparedXactRow {
+        gid: row.try_get("gid")?,
+        owner: row.try_get("owner")?,
+        database: row.try_get("database")?,
+        age_seconds: row.try_get("age_seconds")?,
     })
 }
 

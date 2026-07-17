@@ -16,6 +16,7 @@ function row(wait: string | null): ActivityRow {
     database: "",
     client: "",
     duration_secs: 0,
+    xact_age_secs: null,
     wait_event: wait,
     username: "",
     state: "active",
