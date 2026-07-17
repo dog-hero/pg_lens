@@ -14,6 +14,10 @@ interface Card {
   meter: number | null;
   /** Extra class when the metric deserves attention. */
   tone: "" | "warn" | "bad";
+  /** v0.13: the two headline saturation gauges (Connections, Lock table)
+   * render bigger and span two grid columns — real visual hierarchy instead
+   * of a flat wall of same-size cards. */
+  lead?: boolean;
 }
 
 /**
@@ -101,8 +105,9 @@ function cards(
       detail: `${v.active} active · ${v.idle} idle · ${v.idle_in_transaction} idle-in-tx · ${v.waiting} waiting`,
       meter: saturation,
       tone: saturation >= 0.9 ? "bad" : saturation >= 0.7 ? "warn" : "",
+      lead: true,
     },
-    lockCapacityCard(lockCapacity),
+    { ...lockCapacityCard(lockCapacity), lead: true },
     {
       label: "TPS",
       value: humanCount(v.tps),
@@ -145,7 +150,8 @@ export function renderVitals(
   container.replaceChildren(
     ...cards(v, vacuumAge, checkpointer, lockCapacity).map((card) => {
       const el = document.createElement("div");
-      el.className = card.tone === "" ? "card" : `card ${card.tone}`;
+      const classes = ["card", card.tone, card.lead ? "lead" : ""].filter(Boolean);
+      el.className = classes.join(" ");
       const meter =
         card.meter === null
           ? ""

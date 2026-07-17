@@ -1,17 +1,71 @@
-/* pg_lens dark theme — minimal, no framework. Palette loosely mirrors the
-   TUI: dark slate background, cyan accents, red/yellow row tints. */
+/* pg_lens — modern observability dashboard (v0.13 redesign).
+   Two CSS-variable palettes (dark default, light opt-in via
+   `html[data-theme="light"]`), a semantic severity token set shared by every
+   panel/badge/table, a system-UI type family for chrome with monospace kept
+   for data/numbers/SQL. No runtime framework, no icon font — see
+   index.html's inline `<symbol>` sprite for icons. */
 
 :root {
+  /* ── dark palette (default) — loosely mirrors the TUI's slate/cyan look */
   --bg: #0d1117;
   --bg-panel: #161b22;
   --bg-raised: #1c2129;
+  --bg-sunken: #090c10;
   --border: #30363d;
   --fg: #e6edf3;
   --fg-dim: #8b949e;
   --accent: #4fc3f7;
+  --accent-contrast: #06232f;
+
+  /* Semantic severity tokens — the single source of truth every panel,
+     badge, table row and gauge draws from. Keep these (not raw hex) in new
+     CSS so both themes stay legible/consistent automatically. */
+  --ok: #7ee787;
   --warn: #ffb74d;
   --bad: #f47067;
+  --info: var(--accent);
+
+  --ok-bg: rgba(126, 231, 135, 0.1);
+  --warn-bg: rgba(255, 183, 77, 0.09);
+  --bad-bg: rgba(244, 112, 103, 0.12);
+  --info-bg: rgba(79, 195, 247, 0.08);
+
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    monospace;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.24);
   font-size: 15px;
+  color-scheme: dark;
+}
+
+html[data-theme="light"] {
+  --bg: #f6f8fa;
+  --bg-panel: #ffffff;
+  --bg-raised: #eef1f4;
+  --bg-sunken: #e7ebef;
+  --border: #d0d7de;
+  --fg: #1f2328;
+  --fg-dim: #59636e;
+  --accent: #0969da;
+  --accent-contrast: #ffffff;
+
+  /* Darker/more saturated than the dark theme's pastel tints so text stays
+     legible on a light background — same semantic role, tuned per theme. */
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+  --info: var(--accent);
+
+  --ok-bg: rgba(26, 127, 55, 0.08);
+  --warn-bg: rgba(154, 103, 0, 0.09);
+  --bad-bg: rgba(207, 34, 46, 0.08);
+  --info-bg: rgba(9, 105, 218, 0.07);
+
+  --shadow: 0 1px 2px rgba(31, 35, 40, 0.06), 0 8px 24px rgba(31, 35, 40, 0.08);
+  color-scheme: light;
 }
 
 * {
@@ -22,46 +76,96 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font-family:
-    ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-ui);
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 #app {
-  max-width: 1280px;
+  max-width: 1600px;
   margin: 0 auto;
-  padding: 0 16px 32px;
+  padding: 0 20px 32px;
+}
+
+/* Data, numbers, code and query text stay monospace in both themes — a
+   deliberate mixed-type system (system UI for chrome/labels, mono for
+   values you're meant to compare digit-by-digit). */
+.card-value,
+.num,
+td.query,
+pre,
+code,
+.sql-kw,
+.sql-str,
+.sql-num,
+.sql-cmt,
+#token-input,
+.db-switcher,
+.server-info {
+  font-family: var(--font-mono);
+}
+
+/* ── icons ──────────────────────────────────────────────────────────── */
+
+.icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  fill: none;
+  color: currentColor;
+  vertical-align: -3px;
 }
 
 /* ── header ─────────────────────────────────────────────────────────── */
 
 #topbar {
   display: flex;
-  align-items: baseline;
-  gap: 16px;
-  padding: 14px 0;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 4px;
   border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-mark {
+  width: 22px;
+  height: 22px;
+  color: var(--accent);
 }
 
 .brand {
   font-weight: 700;
   font-size: 1.15rem;
   color: var(--accent);
+  letter-spacing: -0.01em;
 }
 
-.server-info {
+/* The headline "caught up" signal: current database, prominent, plus the
+   switcher right beside it. */
+.topbar-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.topbar-target .icon {
   color: var(--fg-dim);
-  font-size: 0.85rem;
 }
-
-/* ── database switcher (v0.13) ──────────────────────────────────────── */
-/* Minimal styling on purpose: a header redesign is a separate follow-up
-   task (see ROADMAP) that will restyle this whole area — this just needs
-   to work and not look broken in the meantime. */
 
 .current-db {
   color: var(--fg);
-  font-weight: 600;
-  font-size: 0.9rem;
+  font-weight: 700;
+  font-size: 0.92rem;
+  font-family: var(--font-mono);
 }
 
 .db-switcher {
@@ -70,42 +174,59 @@ body {
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 2px 4px;
-  font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
 }
 
 .db-switch-status {
   color: var(--fg-dim);
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-style: italic;
 }
 
+.topbar-spacer {
+  flex: 1;
+}
+
+.topbar-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.server-info {
+  color: var(--fg-dim);
+  font-size: 0.82rem;
+}
+
 .conn-state {
-  margin-left: auto;
   font-size: 0.8rem;
   color: var(--fg-dim);
+  white-space: nowrap;
 }
 
 .conn-state[data-state="live"] {
-  color: #7ee787;
+  color: var(--ok);
 }
 
 .conn-state[data-state="reconnecting"] {
   color: var(--warn);
 }
 
+.conn-state[data-paused="true"] {
+  color: var(--warn);
+}
+
 /* ── read-only badge ────────────────────────────────────────────────── */
-/* Permanent marker (unlike `.toast`, which fades) — the mode must stay
-   visible the whole session, matching the TUI header's `RO` tag. */
 
 .read-only-badge {
   font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.04em;
-  padding: 2px 6px;
+  padding: 3px 8px;
   border: 1px solid var(--warn);
-  border-radius: 4px;
+  border-radius: 999px;
   color: var(--warn);
+  background: var(--warn-bg);
 }
 
 /* ── poller status banner ───────────────────────────────────────────── */
@@ -115,39 +236,235 @@ body {
   padding: 8px 12px;
   border: 1px solid var(--warn);
   border-radius: 6px;
-  background: rgba(255, 183, 77, 0.08);
+  background: var(--warn-bg);
   color: var(--warn);
   font-size: 0.85rem;
 }
 
+/* ── shell: sidenav + main ─────────────────────────────────────────── */
+
+#shell {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  margin-top: 16px;
+}
+
+#sidenav {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 190px;
+  flex-shrink: 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  color: var(--fg-dim);
+  font: inherit;
+  font-family: var(--font-ui);
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.nav-btn:hover {
+  background: var(--bg-raised);
+  color: var(--fg);
+}
+
+.nav-btn[aria-selected="true"] {
+  background: var(--info-bg);
+  color: var(--accent);
+}
+
+.nav-icon {
+  color: inherit;
+}
+
+.nav-label {
+  flex: 1;
+}
+
+.nav-key {
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 5px;
+  opacity: 0.8;
+}
+
+.nav-btn[aria-selected="true"] .nav-key {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sidenav-footer {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.legend-dot {
+  width: 9px;
+  height: 9px;
+}
+
+.legend-dot.ok {
+  color: var(--ok);
+}
+
+.legend-dot.warn {
+  color: var(--warn);
+}
+
+.legend-dot.bad {
+  color: var(--bad);
+}
+
+.kbd-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+
+.kbd-hint .icon {
+  width: 13px;
+  height: 13px;
+  margin-top: 1px;
+}
+
+kbd {
+  font-family: var(--font-mono);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 0.85em;
+}
+
+main {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 1024px) {
+  #sidenav {
+    width: 56px;
+    align-items: center;
+  }
+  .nav-btn {
+    justify-content: center;
+    padding: 10px;
+  }
+  .nav-label,
+  .nav-key,
+  .sidenav-footer {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  #shell {
+    flex-direction: column;
+  }
+  #sidenav {
+    position: static;
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+  }
+  .nav-label {
+    display: none;
+  }
+}
+
 /* ── vitals cards ───────────────────────────────────────────────────── */
+/* Responsive grid with real hierarchy: `.card.lead` (Connections, Lock
+   table — the two headline saturation gauges) spans two columns so they
+   read first/biggest, everything else is one unit. */
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 12px;
-  margin: 16px 0;
+  margin: 0 0 16px;
 }
 
 .card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px;
+  border-radius: 10px;
+  padding: 14px 16px;
+  box-shadow: var(--shadow);
+}
+
+.card.lead {
+  grid-column: span 2;
+}
+
+@media (max-width: 640px) {
+  .card.lead {
+    grid-column: span 1;
+  }
 }
 
 .card-label {
   color: var(--fg-dim);
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.07em;
+  font-weight: 600;
 }
 
 .card-value {
-  font-size: 1.5rem;
-  font-weight: 600;
+  font-size: 1.6rem;
+  font-weight: 700;
   margin-top: 4px;
   white-space: nowrap;
+}
+
+.card.lead .card-value {
+  font-size: 1.9rem;
 }
 
 .card.warn .card-value {
@@ -162,12 +479,13 @@ body {
   color: var(--fg-dim);
   font-size: 0.75rem;
   margin-top: 6px;
+  font-family: var(--font-ui);
 }
 
 .meter {
-  height: 4px;
-  margin-top: 8px;
-  border-radius: 2px;
+  height: 5px;
+  margin-top: 9px;
+  border-radius: 3px;
   background: var(--bg-raised);
   overflow: hidden;
 }
@@ -191,21 +509,23 @@ body {
 .panel {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px;
+  border-radius: 10px;
+  padding: 14px 16px;
   margin-bottom: 16px;
+  box-shadow: var(--shadow);
 }
 
 .panel h2 {
   margin: 0 0 10px;
   font-size: 0.8rem;
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--fg-dim);
+  font-family: var(--font-ui);
 }
 
-/* uPlot dark-theme tweaks */
+/* uPlot theme tweaks */
 #chart .u-legend {
   color: var(--fg-dim);
   font-size: 0.75rem;
@@ -225,9 +545,15 @@ table#activity {
 
 #activity th,
 #activity td {
-  padding: 5px 8px;
+  padding: 6px 8px;
   text-align: left;
   white-space: nowrap;
+  font-family: var(--font-ui);
+}
+
+#activity td.num,
+#activity td.query {
+  font-family: var(--font-mono);
 }
 
 #activity th {
@@ -255,7 +581,7 @@ table#activity {
 }
 
 #activity tbody tr {
-  border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+  border-bottom: 1px solid var(--border);
 }
 
 #activity tbody tr:hover {
@@ -270,20 +596,24 @@ table#activity {
 }
 
 /* SQL syntax highlighting — same palette as the TUI's ui/sql.rs:
-   keywords bold cyan, strings green, numbers magenta, comments dim.
-   Foreground-only so the blocked/waiting row tints (subtle backgrounds)
-   still read through, exactly like the TUI's fg-only spans. */
+   keywords bold cyan, strings ok-green, numbers accent-adjacent, comments
+   dim. Foreground-only so the blocked/waiting row tints (subtle
+   backgrounds) still read through, exactly like the TUI's fg-only spans. */
 .sql-kw {
   color: var(--accent);
   font-weight: 700;
 }
 
 .sql-str {
-  color: #7ee787;
+  color: var(--ok);
 }
 
 .sql-num {
   color: #d2a8ff;
+}
+
+html[data-theme="light"] .sql-num {
+  color: #8250df;
 }
 
 .sql-cmt {
@@ -293,7 +623,7 @@ table#activity {
 
 /* waiting (W): yellow tint; blocked (B): red tint — red wins, as in the TUI */
 #activity tr.waiting {
-  background: rgba(255, 183, 77, 0.07);
+  background: var(--warn-bg);
 }
 
 #activity tr.waiting td:first-child {
@@ -302,7 +632,7 @@ table#activity {
 }
 
 #activity tr.blocked {
-  background: rgba(244, 112, 103, 0.1);
+  background: var(--bad-bg);
 }
 
 #activity tr.blocked td:first-child {
@@ -336,11 +666,13 @@ table#activity {
   align-items: baseline;
   margin: 0 0 10px;
   font-size: 13px;
+  font-family: var(--font-mono);
 }
 
 .xact-headline::before {
   content: "oldest xact ";
   color: var(--fg-dim);
+  font-family: var(--font-ui);
 }
 
 .xact-headline .xact-headline-age {
@@ -365,7 +697,7 @@ table#activity {
 }
 
 #activity tr.blocking-chain-row {
-  background: rgba(244, 112, 103, 0.06);
+  background: var(--bad-bg);
 }
 
 #activity tr.blocking-chain-row td {
@@ -374,6 +706,7 @@ table#activity {
 
 .blocking-chain-line {
   font-size: 13px;
+  font-family: var(--font-mono);
 }
 
 .blocking-chain-arrow {
@@ -397,8 +730,8 @@ table#activity {
   display: flex;
   gap: 16px;
   align-items: baseline;
-  padding: 4px 6px;
-  border-radius: 4px;
+  padding: 5px 8px;
+  border-radius: 6px;
   font-size: 0.85rem;
 }
 
@@ -406,6 +739,7 @@ table#activity {
   color: var(--accent);
   font-weight: 600;
   min-width: 16ch;
+  font-family: var(--font-mono);
 }
 
 #replication .repl-state {
@@ -415,6 +749,7 @@ table#activity {
 #replication .repl-lag {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
 /* Lag severity: same thresholds as the TUI (yellow > 10 MB / 10 s,
@@ -428,41 +763,11 @@ table#activity {
 }
 
 #replication .repl-row.lag-warn {
-  background: rgba(255, 183, 77, 0.07);
+  background: var(--warn-bg);
 }
 
 #replication .repl-row.lag-bad {
-  background: rgba(244, 112, 103, 0.1);
-}
-
-/* ── tabs (Activity / Schema) ───────────────────────────────────────── */
-
-#tabs {
-  display: flex;
-  gap: 4px;
-  margin-bottom: 12px;
-  border-bottom: 1px solid var(--border);
-}
-
-#tabs button {
-  padding: 8px 18px;
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--fg-dim);
-  font: inherit;
-  font-size: 0.85rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-#tabs button:hover {
-  color: var(--fg);
-}
-
-#tabs button[aria-selected="true"] {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
+  background: var(--bad-bg);
 }
 
 /* ── schema table ───────────────────────────────────────────────────── */
@@ -486,7 +791,7 @@ table#activity {
   padding: 6px 10px;
   border: 1px solid var(--bad);
   border-radius: 6px;
-  background: rgba(244, 112, 103, 0.08);
+  background: var(--bad-bg);
   color: var(--bad);
   font-size: 0.82rem;
 }
@@ -505,9 +810,14 @@ table#schema {
 
 #schema th,
 #schema td {
-  padding: 5px 8px;
+  padding: 6px 8px;
   text-align: left;
   white-space: nowrap;
+  font-family: var(--font-ui);
+}
+
+#schema td.num {
+  font-family: var(--font-mono);
 }
 
 #schema th {
@@ -535,7 +845,7 @@ table#schema {
 }
 
 #schema tbody tr {
-  border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+  border-bottom: 1px solid var(--border);
 }
 
 #schema tbody tr.schema-row {
@@ -549,7 +859,7 @@ table#schema {
 /* Bloat severity tiers: same thresholds as the TUI (red > 50% & 10 MiB,
    yellow > 30% & 1 MiB); is_na rows are dimmed — the `~?` marker rules. */
 #schema tr.bloat-yellow {
-  background: rgba(255, 183, 77, 0.07);
+  background: var(--warn-bg);
 }
 
 #schema tr.bloat-yellow td:first-child {
@@ -558,7 +868,7 @@ table#schema {
 }
 
 #schema tr.bloat-red {
-  background: rgba(244, 112, 103, 0.1);
+  background: var(--bad-bg);
 }
 
 #schema tr.bloat-red td:first-child {
@@ -576,9 +886,10 @@ table#schema {
   font-size: 0.78rem;
   padding: 6px 8px 10px 28px;
   background: var(--bg-raised);
+  font-family: var(--font-mono);
 }
 
-/* ── index advisor (U1: its own top-level tab) ─────────────────────── */
+/* ── index advisor ─────────────────────────────────────────────────── */
 
 #indexes {
   width: 100%;
@@ -588,9 +899,14 @@ table#schema {
 
 #indexes th,
 #indexes td {
-  padding: 5px 8px;
+  padding: 6px 8px;
   text-align: left;
   white-space: nowrap;
+  font-family: var(--font-ui);
+}
+
+#indexes td.num {
+  font-family: var(--font-mono);
 }
 
 #indexes th {
@@ -606,7 +922,7 @@ table#schema {
 }
 
 #indexes tbody tr {
-  border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+  border-bottom: 1px solid var(--border);
 }
 
 #indexes tbody tr.index-row {
@@ -621,7 +937,7 @@ table#schema {
    (Invalid red > Unused red > DuplicateExact yellow > DuplicatePrefix
    dim-yellow). */
 #indexes tr.idx-invalid {
-  background: rgba(244, 112, 103, 0.16);
+  background: color-mix(in srgb, var(--bad) 16%, var(--bg-panel));
 }
 
 #indexes tr.idx-invalid td:last-child {
@@ -630,7 +946,7 @@ table#schema {
 }
 
 #indexes tr.idx-unused {
-  background: rgba(244, 112, 103, 0.1);
+  background: var(--bad-bg);
 }
 
 #indexes tr.idx-unused td:last-child {
@@ -639,7 +955,7 @@ table#schema {
 }
 
 #indexes tr.idx-dup {
-  background: rgba(255, 183, 77, 0.07);
+  background: var(--warn-bg);
 }
 
 #indexes tr.idx-dup td:last-child {
@@ -658,9 +974,10 @@ table#schema {
   font-size: 0.78rem;
   padding: 6px 8px 10px 28px;
   background: var(--bg-raised);
+  font-family: var(--font-mono);
 }
 
-/* ── vacuum / wraparound section (F2) ──────────────────────────────── */
+/* ── vacuum / wraparound section ───────────────────────────────────── */
 
 .vacuum-section {
   margin-top: 16px;
@@ -671,7 +988,7 @@ table#schema {
 .vacuum-section h3 {
   margin: 0 0 8px;
   font-size: 0.8rem;
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--fg-dim);
@@ -701,6 +1018,7 @@ table#schema {
   margin: 0 0 8px;
   padding-left: 18px;
   font-size: 0.82rem;
+  font-family: var(--font-mono);
 }
 
 .vacuum-tables li {
@@ -719,6 +1037,7 @@ table#schema {
   color: var(--fg-dim);
   list-style: none;
   margin-left: -18px;
+  font-family: var(--font-ui);
 }
 
 /* ── statements (Queries) table ─────────────────────────────────────── */
@@ -731,9 +1050,14 @@ table#statements {
 
 #statements th,
 #statements td {
-  padding: 5px 8px;
+  padding: 6px 8px;
   text-align: left;
   white-space: nowrap;
+  font-family: var(--font-ui);
+}
+
+#statements td.num {
+  font-family: var(--font-mono);
 }
 
 #statements th {
@@ -761,7 +1085,7 @@ table#statements {
 }
 
 #statements tbody tr {
-  border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+  border-bottom: 1px solid var(--border);
 }
 
 #statements tbody tr.statement-row {
@@ -785,6 +1109,7 @@ table#statements {
   font-size: 0.78rem;
   padding: 6px 8px 10px 28px;
   background: var(--bg-raised);
+  font-family: var(--font-mono);
 }
 
 #statements tr.statement-detail pre {
@@ -800,7 +1125,7 @@ table#statements {
   margin: 8px 0;
   padding: 14px 16px;
   border: 1px dashed var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--fg-dim);
   font-size: 0.85rem;
 }
@@ -821,7 +1146,6 @@ table#statements {
 
 /* ── token overlay ──────────────────────────────────────────────────── */
 
-/* author `display: flex` would defeat the `hidden` attribute's UA style */
 #token-overlay[hidden] {
   display: none;
 }
@@ -829,7 +1153,7 @@ table#statements {
 #token-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(13, 17, 23, 0.88);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -839,9 +1163,10 @@ table#statements {
 #token-form {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 24px;
   width: min(420px, 90vw);
+  box-shadow: var(--shadow);
 }
 
 #token-form h2 {
@@ -862,20 +1187,20 @@ table#statements {
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--fg);
-  font: inherit;
 }
 
-/* Micro Lens activity filter (mirrors the TUI `/` filter). */
+/* Filter inputs (mirror the TUI `/` filter). */
 .filter-input {
   width: 100%;
   box-sizing: border-box;
-  padding: 6px 10px;
+  padding: 7px 10px;
   margin: 0 0 10px;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 7px;
   color: var(--fg);
   font: inherit;
+  font-family: var(--font-mono);
 }
 
 .filter-input:focus {
@@ -896,10 +1221,12 @@ table#statements {
   align-items: baseline;
   margin: 0 0 10px;
   font-size: 13px;
+  font-family: var(--font-mono);
 }
 
 .waits-strip .waits-ratio {
   color: var(--fg-dim);
+  font-family: var(--font-ui);
 }
 
 .waits-strip .waits-ratio::before {
@@ -918,8 +1245,8 @@ table#statements {
   color: var(--warn);
 }
 
-/* U3: the collapsible complete waits list under the activity table (the
-   strip above only shows the top few). Same Lock/IO severity tint. */
+/* Collapsible complete waits list under the activity table (the strip above
+   only shows the top few). Same Lock/IO severity tint. */
 .waits-detail {
   margin: 10px 0 0;
   font-size: 13px;
@@ -929,6 +1256,7 @@ table#statements {
   cursor: pointer;
   color: var(--fg-dim);
   user-select: none;
+  font-family: var(--font-ui);
 }
 
 .waits-detail summary:hover {
@@ -946,6 +1274,7 @@ table#statements {
   align-items: center;
   gap: 10px;
   padding: 2px 0;
+  font-family: var(--font-mono);
 }
 
 .waits-list .wait-row-label {
@@ -988,16 +1317,21 @@ table#statements {
   color: var(--fg-dim);
   padding: 20px 10px;
   font-style: italic;
+  font-family: var(--font-ui);
 }
 
-/* Small header/panel buttons (pause, schema refresh). */
+/* Small header/panel icon+text buttons (pause, schema refresh). */
 .ghost-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
   color: var(--fg);
-  border-radius: 6px;
-  padding: 4px 12px;
+  border-radius: 7px;
+  padding: 5px 12px;
   font: inherit;
+  font-family: var(--font-ui);
   font-size: 0.85em;
   cursor: pointer;
 }
@@ -1010,15 +1344,40 @@ table#statements {
 }
 h2 .ghost-btn {
   float: right;
-  margin-top: -2px;
+  margin-top: -4px;
+}
+
+/* Icon-only buttons (theme toggle). */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 7px;
+  cursor: pointer;
+  padding: 0;
+}
+.icon-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.icon-btn:focus-visible,
+.nav-btn:focus-visible,
+.ghost-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* Transient action feedback in the topbar. */
 .toast {
-  margin-left: auto;
-  padding: 3px 10px;
-  border-radius: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
   font-size: 0.85em;
+  font-family: var(--font-ui);
   background: color-mix(in srgb, var(--accent) 18%, var(--bg-panel));
   border: 1px solid var(--accent);
   color: var(--fg);
@@ -1040,6 +1399,7 @@ td.actions {
   padding: 1px 8px;
   margin-right: 4px;
   font: inherit;
+  font-family: var(--font-ui);
   font-size: 0.8em;
   cursor: pointer;
 }
@@ -1060,10 +1420,11 @@ td.actions {
 #token-form button {
   padding: 8px 16px;
   background: var(--accent);
-  color: #06232f;
+  color: var(--accent-contrast);
   border: none;
   border-radius: 6px;
   font: inherit;
+  font-family: var(--font-ui);
   font-weight: 600;
   cursor: pointer;
 }

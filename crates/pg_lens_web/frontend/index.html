@@ -3,192 +3,323 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
     <title>pg_lens</title>
   </head>
   <body>
+    <!-- Icon sprite (v0.13): every glyph used anywhere in the app is defined
+         once here as a <symbol> and referenced via <use href="#icon-...">
+         (ids mirrored in src/icons.ts). No icon font, no icon library. -->
+    <svg id="icon-sprite" aria-hidden="true" style="position: absolute; width: 0; height: 0; overflow: hidden">
+      <symbol id="icon-lens" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2" />
+        <line x1="16.2" y1="16.2" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
+      <symbol id="icon-activity" viewBox="0 0 24 24">
+        <polyline
+          points="2,13 7,13 9.5,6 14.5,20 17,13 22,13"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </symbol>
+      <symbol id="icon-replication" viewBox="0 0 24 24">
+        <circle cx="6" cy="6" r="2.5" fill="none" stroke="currentColor" stroke-width="2" />
+        <circle cx="6" cy="18" r="2.5" fill="none" stroke="currentColor" stroke-width="2" />
+        <circle cx="18" cy="12" r="2.5" fill="none" stroke="currentColor" stroke-width="2" />
+        <path d="M8 7 L16 11 M8 17 L16 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
+      <symbol id="icon-schema" viewBox="0 0 24 24">
+        <ellipse cx="12" cy="5.5" rx="8" ry="3" fill="none" stroke="currentColor" stroke-width="2" />
+        <path
+          d="M4 5.5 V12 C4 13.7 7.6 15 12 15 C16.4 15 20 13.7 20 12 V5.5"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        />
+        <path
+          d="M4 12 V18.5 C4 20.2 7.6 21.5 12 21.5 C16.4 21.5 20 20.2 20 18.5 V12"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        />
+      </symbol>
+      <symbol id="icon-indexes" viewBox="0 0 24 24">
+        <circle cx="10" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="2" />
+        <line x1="14.5" y1="14.5" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
+      <symbol id="icon-queries" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+        <polyline points="7,9 10,12 7,15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        <line x1="12" y1="15" x2="17" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
+      <symbol id="icon-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2" />
+        <g stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <line x1="12" y1="1.5" x2="12" y2="4.5" />
+          <line x1="12" y1="19.5" x2="12" y2="22.5" />
+          <line x1="1.5" y1="12" x2="4.5" y2="12" />
+          <line x1="19.5" y1="12" x2="22.5" y2="12" />
+          <line x1="4.6" y1="4.6" x2="6.7" y2="6.7" />
+          <line x1="17.3" y1="17.3" x2="19.4" y2="19.4" />
+          <line x1="4.6" y1="19.4" x2="6.7" y2="17.3" />
+          <line x1="17.3" y1="6.7" x2="19.4" y2="4.6" />
+        </g>
+      </symbol>
+      <symbol id="icon-moon" viewBox="0 0 24 24">
+        <path
+          d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.8 6.8 0 0 0 10.5 10.5Z"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linejoin="round"
+        />
+      </symbol>
+      <symbol id="icon-pause" viewBox="0 0 24 24">
+        <rect x="6" y="4" width="4" height="16" rx="1" fill="currentColor" />
+        <rect x="14" y="4" width="4" height="16" rx="1" fill="currentColor" />
+      </symbol>
+      <symbol id="icon-play" viewBox="0 0 24 24">
+        <path d="M7 4.5 L19 12 L7 19.5 Z" fill="currentColor" stroke-linejoin="round" />
+      </symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24">
+        <path
+          d="M4 12a8 8 0 0 1 13.7-5.7M20 12a8 8 0 0 1-13.7 5.7"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+        />
+        <polyline points="17,3 17.7,6.3 14.3,7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        <polyline points="7,21 6.3,17.7 9.7,17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
+      <symbol id="icon-database" viewBox="0 0 24 24">
+        <ellipse cx="12" cy="5.5" rx="7" ry="2.6" fill="none" stroke="currentColor" stroke-width="2" />
+        <path d="M5 5.5V18.5C5 20 8.1 21 12 21C15.9 21 19 20 19 18.5V5.5" fill="none" stroke="currentColor" stroke-width="2" />
+      </symbol>
+      <symbol id="icon-dot" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="6" fill="currentColor" />
+      </symbol>
+      <symbol id="icon-keyboard" viewBox="0 0 24 24">
+        <rect x="2" y="6" width="20" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+        <g fill="currentColor">
+          <rect x="5" y="9" width="2" height="2" />
+          <rect x="9" y="9" width="2" height="2" />
+          <rect x="13" y="9" width="2" height="2" />
+          <rect x="17" y="9" width="2" height="2" />
+          <rect x="7" y="13" width="10" height="2" />
+        </g>
+      </symbol>
+    </svg>
+
     <div id="app">
       <header id="topbar">
-        <span class="brand">pg_lens</span>
-        <span id="current-db" class="current-db"></span>
-        <select
-          id="db-switcher"
-          class="db-switcher"
-          hidden
-          title="Switch database (reconnects the server to a different database on the same cluster)"
-        ></select>
-        <span id="db-switch-status" class="db-switch-status" hidden></span>
-        <span id="server-info" class="server-info"></span>
-        <span
-          id="read-only-badge"
-          class="read-only-badge"
-          hidden
-          title="This server was started in read-only mode: admin actions are disabled"
-          >RO</span
-        >
-        <span id="toast" class="toast" hidden></span>
-        <button id="pause-btn" class="ghost-btn" type="button" title="Freeze the live view (Space)">
-          Pause
-        </button>
-        <span id="conn-state" class="conn-state" data-state="connecting">connecting…</span>
+        <div class="topbar-brand">
+          <svg class="icon brand-mark" aria-hidden="true"><use href="#icon-lens"></use></svg>
+          <span class="brand">pg_lens</span>
+        </div>
+        <div class="topbar-target">
+          <svg class="icon" aria-hidden="true"><use href="#icon-database"></use></svg>
+          <span id="current-db" class="current-db"></span>
+          <select
+            id="db-switcher"
+            class="db-switcher"
+            hidden
+            title="Switch database (reconnects the server to a different database on the same cluster)"
+          ></select>
+          <span id="db-switch-status" class="db-switch-status" hidden></span>
+        </div>
+        <div class="topbar-spacer"></div>
+        <div class="topbar-status">
+          <span id="server-info" class="server-info"></span>
+          <span
+            id="read-only-badge"
+            class="read-only-badge"
+            hidden
+            title="This server was started in read-only mode: admin actions are disabled"
+            >RO</span
+          >
+          <span id="toast" class="toast" hidden></span>
+          <button
+            id="theme-toggle"
+            class="icon-btn"
+            type="button"
+            title="Toggle light / dark theme"
+            aria-label="Toggle light / dark theme"
+          >
+            <svg class="icon" aria-hidden="true"><use href="#icon-moon"></use></svg>
+          </button>
+          <button id="pause-btn" class="ghost-btn" type="button" title="Freeze the live view (Space)">
+            <svg class="icon" aria-hidden="true"><use href="#icon-pause"></use></svg>
+            <span>Pause</span>
+          </button>
+          <span id="conn-state" class="conn-state" data-state="connecting">connecting…</span>
+        </div>
       </header>
       <div id="status-banner" hidden></div>
-      <main>
-        <section id="vitals" class="cards"></section>
-        <section class="panel">
-          <h2>TPS &amp; active sessions</h2>
-          <div id="chart"></div>
-        </section>
-        <nav id="tabs" role="tablist">
-          <button
-            id="tab-activity"
-            role="tab"
-            aria-selected="true"
-            aria-controls="activity-panel"
-          >
-            Activity
+      <div id="shell">
+        <nav id="sidenav" role="tablist" aria-label="Sections">
+          <button id="tab-activity" class="nav-btn" role="tab" aria-selected="true" aria-controls="activity-panel">
+            <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-activity"></use></svg>
+            <span class="nav-label">Activity</span>
+            <span class="nav-key">1</span>
           </button>
           <button
             id="tab-replication"
+            class="nav-btn"
             role="tab"
             aria-selected="false"
             aria-controls="replication-panel"
           >
-            Replication
+            <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-replication"></use></svg>
+            <span class="nav-label">Replication</span>
+            <span class="nav-key">2</span>
           </button>
-          <button
-            id="tab-schema"
-            role="tab"
-            aria-selected="false"
-            aria-controls="schema-panel"
-          >
-            Schema
+          <button id="tab-schema" class="nav-btn" role="tab" aria-selected="false" aria-controls="schema-panel">
+            <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-schema"></use></svg>
+            <span class="nav-label">Schema</span>
+            <span class="nav-key">3</span>
           </button>
-          <button
-            id="tab-indexes"
-            role="tab"
-            aria-selected="false"
-            aria-controls="indexes-panel"
-          >
-            Indexes
+          <button id="tab-indexes" class="nav-btn" role="tab" aria-selected="false" aria-controls="indexes-panel">
+            <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-indexes"></use></svg>
+            <span class="nav-label">Indexes</span>
+            <span class="nav-key">4</span>
           </button>
-          <button
-            id="tab-queries"
-            role="tab"
-            aria-selected="false"
-            aria-controls="queries-panel"
-          >
-            Queries
+          <button id="tab-queries" class="nav-btn" role="tab" aria-selected="false" aria-controls="queries-panel">
+            <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-queries"></use></svg>
+            <span class="nav-label">Queries</span>
+            <span class="nav-key">5</span>
           </button>
+          <div class="sidenav-footer">
+            <p class="legend">
+              <span class="legend-item"><svg class="icon legend-dot ok" aria-hidden="true"><use href="#icon-dot"></use></svg>ok</span>
+              <span class="legend-item"><svg class="icon legend-dot warn" aria-hidden="true"><use href="#icon-dot"></use></svg>warn</span>
+              <span class="legend-item"><svg class="icon legend-dot bad" aria-hidden="true"><use href="#icon-dot"></use></svg>bad</span>
+            </p>
+            <p class="kbd-hint" title="1-5 jump sections, / focuses the filter, Esc clears focus">
+              <svg class="icon" aria-hidden="true"><use href="#icon-keyboard"></use></svg>
+              <span><kbd>1</kbd>-<kbd>5</kbd> nav · <kbd>/</kbd> filter · <kbd>Esc</kbd> clear</span>
+            </p>
+          </div>
         </nav>
-        <section id="activity-panel" class="panel" role="tabpanel">
-          <h2>Activity <span id="activity-count" class="panel-note"></span></h2>
-          <input
-            id="activity-filter"
-            class="filter-input"
-            type="search"
-            placeholder="Filter by pid, db, user, app, state, wait or query…"
-            autocomplete="off"
-            spellcheck="false"
-          />
-          <div id="waits-strip" class="waits-strip" hidden></div>
-          <div id="xact-headline" class="xact-headline" hidden>
-            <span id="xact-headline-age" class="xact-headline-age"></span>
-            <span id="xact-headline-meta" class="xact-headline-meta"></span>
-            <span id="xact-headline-state" class="xact-headline-state"></span>
-          </div>
-          <div class="table-wrap">
-            <table id="activity">
-              <thead></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <details id="waits-detail" class="waits-detail" hidden>
-            <summary id="waits-detail-summary">All waits</summary>
-            <ul id="waits-list" class="waits-list"></ul>
-          </details>
-          <details id="idle-detail" class="waits-detail" hidden>
-            <summary id="idle-detail-summary">Idle connections</summary>
-            <ul id="idle-list" class="vacuum-tables"></ul>
-          </details>
-        </section>
-        <section id="replication-panel" class="panel" role="tabpanel" hidden>
-          <h2>Replication</h2>
-          <p id="replication-placeholder" class="placeholder">collecting…</p>
-          <div id="replication"></div>
-        </section>
-        <section id="schema-panel" class="panel" role="tabpanel" hidden>
-          <h2>
-            Schema <span class="panel-note">estimated bloat</span>
-            <button
-              id="schema-refresh-btn"
-              class="ghost-btn"
-              type="button"
-              title="Recollect table stats + estimated bloat now"
-            >
-              Refresh
-            </button>
-          </h2>
-          <input
-            id="schema-filter"
-            class="filter-input"
-            type="search"
-            placeholder="Filter by schema or table…"
-            autocomplete="off"
-            spellcheck="false"
-          />
-          <p id="schema-staleness" class="staleness"></p>
-          <p id="schema-warning" class="inline-warning" hidden></p>
-          <p id="schema-placeholder" class="placeholder">collecting…</p>
-          <div class="table-wrap">
-            <table id="schema">
-              <thead></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <div id="vacuum-section" class="vacuum-section">
-            <h3>Vacuum / wraparound</h3>
-            <p id="vacuum-cluster" class="vacuum-cluster"></p>
-            <ul id="vacuum-tables" class="vacuum-tables"></ul>
-            <p id="vacuum-progress" class="vacuum-progress"></p>
-            <h3>Prepared transactions (orphaned 2PC)</h3>
-            <ul id="prepared-xacts" class="vacuum-tables"></ul>
-          </div>
-        </section>
-        <section id="indexes-panel" class="panel" role="tabpanel" hidden>
-          <h2>Indexes <span class="panel-note">unused / duplicate / prefix-redundant</span></h2>
-          <p id="indexes-staleness" class="staleness"></p>
-          <p id="indexes-warning" class="inline-warning" hidden></p>
-          <p id="indexes-placeholder" class="placeholder">collecting…</p>
-          <div class="table-wrap">
-            <table id="indexes">
-              <thead></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </section>
-        <section id="queries-panel" class="panel" role="tabpanel" hidden>
-          <h2>Queries <span class="panel-note">pg_stat_statements</span></h2>
-          <input
-            id="statements-filter"
-            class="filter-input"
-            type="search"
-            placeholder="Filter by query text…"
-            autocomplete="off"
-            spellcheck="false"
-          />
-          <p id="statements-staleness" class="staleness"></p>
-          <p id="statements-warning" class="inline-warning" hidden></p>
-          <p id="statements-placeholder" class="placeholder">collecting…</p>
-          <div id="statements-unavailable" class="unavailable" hidden></div>
-          <div class="table-wrap">
-            <table id="statements">
-              <thead></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </section>
-      </main>
+        <main>
+          <section id="vitals" class="cards"></section>
+          <section class="panel">
+            <h2>TPS &amp; active sessions</h2>
+            <div id="chart"></div>
+          </section>
+          <section id="activity-panel" class="panel" role="tabpanel">
+            <h2>Activity <span id="activity-count" class="panel-note"></span></h2>
+            <input
+              id="activity-filter"
+              class="filter-input"
+              type="search"
+              placeholder="Filter by pid, db, user, app, state, wait or query… (/)"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <div id="waits-strip" class="waits-strip" hidden></div>
+            <div id="xact-headline" class="xact-headline" hidden>
+              <span id="xact-headline-age" class="xact-headline-age"></span>
+              <span id="xact-headline-meta" class="xact-headline-meta"></span>
+              <span id="xact-headline-state" class="xact-headline-state"></span>
+            </div>
+            <div class="table-wrap">
+              <table id="activity">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <details id="waits-detail" class="waits-detail" hidden>
+              <summary id="waits-detail-summary">All waits</summary>
+              <ul id="waits-list" class="waits-list"></ul>
+            </details>
+            <details id="idle-detail" class="waits-detail" hidden>
+              <summary id="idle-detail-summary">Idle connections</summary>
+              <ul id="idle-list" class="vacuum-tables"></ul>
+            </details>
+          </section>
+          <section id="replication-panel" class="panel" role="tabpanel" hidden>
+            <h2>Replication</h2>
+            <p id="replication-placeholder" class="placeholder">collecting…</p>
+            <div id="replication"></div>
+          </section>
+          <section id="schema-panel" class="panel" role="tabpanel" hidden>
+            <h2>
+              Schema <span class="panel-note">estimated bloat</span>
+              <button
+                id="schema-refresh-btn"
+                class="ghost-btn"
+                type="button"
+                title="Recollect table stats + estimated bloat now"
+              >
+                <svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>
+                <span>Refresh</span>
+              </button>
+            </h2>
+            <input
+              id="schema-filter"
+              class="filter-input"
+              type="search"
+              placeholder="Filter by schema or table… (/)"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <p id="schema-staleness" class="staleness"></p>
+            <p id="schema-warning" class="inline-warning" hidden></p>
+            <p id="schema-placeholder" class="placeholder">collecting…</p>
+            <div class="table-wrap">
+              <table id="schema">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="vacuum-section" class="vacuum-section">
+              <h3>Vacuum / wraparound</h3>
+              <p id="vacuum-cluster" class="vacuum-cluster"></p>
+              <ul id="vacuum-tables" class="vacuum-tables"></ul>
+              <p id="vacuum-progress" class="vacuum-progress"></p>
+              <h3>Prepared transactions (orphaned 2PC)</h3>
+              <ul id="prepared-xacts" class="vacuum-tables"></ul>
+            </div>
+          </section>
+          <section id="indexes-panel" class="panel" role="tabpanel" hidden>
+            <h2>Indexes <span class="panel-note">unused / duplicate / prefix-redundant</span></h2>
+            <p id="indexes-staleness" class="staleness"></p>
+            <p id="indexes-warning" class="inline-warning" hidden></p>
+            <p id="indexes-placeholder" class="placeholder">collecting…</p>
+            <div class="table-wrap">
+              <table id="indexes">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+          <section id="queries-panel" class="panel" role="tabpanel" hidden>
+            <h2>Queries <span class="panel-note">pg_stat_statements</span></h2>
+            <input
+              id="statements-filter"
+              class="filter-input"
+              type="search"
+              placeholder="Filter by query text… (/)"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <p id="statements-staleness" class="staleness"></p>
+            <p id="statements-warning" class="inline-warning" hidden></p>
+            <p id="statements-placeholder" class="placeholder">collecting…</p>
+            <div id="statements-unavailable" class="unavailable" hidden></div>
+            <div class="table-wrap">
+              <table id="statements">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </main>
+      </div>
       <div id="token-overlay" hidden>
         <form id="token-form">
           <h2>Authentication required</h2>

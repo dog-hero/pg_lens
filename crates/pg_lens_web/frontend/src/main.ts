@@ -30,6 +30,8 @@ import {
   storedToken,
   type StreamHandle,
 } from "./stream";
+import { loadStoredTheme, nextTheme, resolveInitialTheme, saveTheme, type Theme } from "./theme";
+import { filterInputIdForPanel, isEditableTag, tabIdForKey } from "./keyboard";
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -51,7 +53,11 @@ const tokenError = el<HTMLParagraphElement>("token-error");
 
 const toast = el<HTMLSpanElement>("toast");
 const pauseBtn = el<HTMLButtonElement>("pause-btn");
+const pauseBtnIcon = pauseBtn.querySelector("use");
+const pauseBtnLabel = pauseBtn.querySelector("span");
 const schemaRefreshBtn = el<HTMLButtonElement>("schema-refresh-btn");
+const themeToggleBtn = el<HTMLButtonElement>("theme-toggle");
+const themeToggleIcon = themeToggleBtn.querySelector("use");
 
 // The token in use for the live connection (null = open server). Admin
 // controls only appear when it is set.
@@ -123,15 +129,57 @@ const tabs: Array<[HTMLButtonElement, HTMLElement]> = [
   [el<HTMLButtonElement>("tab-indexes"), el<HTMLElement>("indexes-panel")],
   [el<HTMLButtonElement>("tab-queries"), el<HTMLElement>("queries-panel")],
 ];
-for (const [button] of tabs) {
-  button.addEventListener("click", () => {
-    for (const [other, panel] of tabs) {
-      const selected = other === button;
-      other.setAttribute("aria-selected", String(selected));
-      panel.hidden = !selected;
-    }
-  });
+/** Switches to the tab whose button has `id === tabId` (no-op if unknown —
+ * used by both the click handlers below and the `1`-`5` keyboard shortcuts). */
+function selectTab(tabId: string): void {
+  for (const [button, panel] of tabs) {
+    const selected = button.id === tabId;
+    button.setAttribute("aria-selected", String(selected));
+    panel.hidden = !selected;
+  }
 }
+
+/** The panel element of whichever tab is currently selected (drives the
+ * `/` filter-focus shortcut — each panel has at most one filter input). */
+function activePanelId(): string | null {
+  return tabs.find(([button]) => button.getAttribute("aria-selected") === "true")?.[1].id ?? null;
+}
+
+for (const [button] of tabs) {
+  button.addEventListener("click", () => selectTab(button.id));
+}
+
+// ── keyboard navigation (v0.13 ROADMAP "Web keyboard navigation") ────────
+// `1`-`5` jump tabs, `/` focuses the active panel's filter input, `Esc`
+// blurs whatever's focused. Suppressed while a text-consuming element
+// already has focus (Esc is the one exception — it must still blur).
+window.addEventListener("keydown", (event) => {
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const active = document.activeElement;
+  const editing = active instanceof HTMLElement && isEditableTag(active.tagName);
+  if (event.key === "Escape") {
+    if (active instanceof HTMLElement) active.blur();
+    return;
+  }
+  if (editing) return;
+  const tabId = tabIdForKey(event.key);
+  if (tabId !== null) {
+    event.preventDefault();
+    selectTab(tabId);
+    return;
+  }
+  if (event.key === "/") {
+    const panelId = activePanelId();
+    const inputId = panelId === null ? null : filterInputIdForPanel(panelId);
+    if (inputId !== null) {
+      const input = document.getElementById(inputId);
+      if (input instanceof HTMLInputElement) {
+        event.preventDefault();
+        input.focus();
+      }
+    }
+  }
+});
 
 let stream: StreamHandle | null = null;
 
@@ -268,13 +316,36 @@ function announceAdmin(result: AdminActionResult | null): void {
 
 pauseBtn.addEventListener("click", () => {
   paused = !paused;
-  pauseBtn.textContent = paused ? "Resume" : "Pause";
+  if (pauseBtnLabel) pauseBtnLabel.textContent = paused ? "Resume" : "Pause";
+  pauseBtnIcon?.setAttribute("href", paused ? "#icon-play" : "#icon-pause");
   pauseBtn.classList.toggle("active", paused);
   connState.dataset["paused"] = String(paused);
   if (!paused && pending !== null) {
     renderSnapshot(pending);
     pending = null;
   }
+});
+
+// ── light/dark theme toggle (v0.13 redesign) ──────────────────────────────
+// Default dark (matches every prior screenshot/demo and the TUI's own
+// always-dark terminal); the explicit choice persists in localStorage and
+// wins on every later visit. See theme.ts for the pure decision logic.
+let currentTheme: Theme = resolveInitialTheme(loadStoredTheme(window.localStorage));
+
+function applyTheme(theme: Theme): void {
+  document.documentElement.dataset["theme"] = theme;
+  themeToggleIcon?.setAttribute("href", theme === "dark" ? "#icon-moon" : "#icon-sun");
+  themeToggleBtn.setAttribute(
+    "aria-label",
+    theme === "dark" ? "Switch to light theme" : "Switch to dark theme",
+  );
+}
+
+applyTheme(currentTheme);
+themeToggleBtn.addEventListener("click", () => {
+  currentTheme = nextTheme(currentTheme);
+  applyTheme(currentTheme);
+  saveTheme(window.localStorage, currentTheme);
 });
 
 schemaRefreshBtn.addEventListener("click", () => {
