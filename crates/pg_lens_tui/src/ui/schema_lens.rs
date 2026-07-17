@@ -461,11 +461,86 @@ fn draw_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: R
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title("Tables"))
+        .block(Block::bordered().title(schema_table_title(app)))
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol("\u{25b6} ");
 
     frame.render_stateful_widget(table, area, &mut app.schema_table_state);
+    // Empty state: the header/border still render (so the filter term and
+    // count stay visible), but the body gets a centered hint distinguishing
+    // "your filter matches nothing" from a genuinely table-less database —
+    // same shape as the Micro Lens's `draw_empty`.
+    if app.schema_row_order.is_empty() {
+        draw_table_empty(app, schema, frame, area);
+    }
+}
+
+/// Block title showing the row count and the filter state — the Schema
+/// Lens's Tables-view twin of `ui/micro_lens.rs::activity_title`. Plain
+/// `Tables (N)` when unfiltered; while editing (`/`) it shows the live term
+/// with a cursor block and `shown/total`; a committed filter shows the term
+/// without the cursor.
+fn schema_table_title(app: &App) -> Line<'static> {
+    let shown = app.schema_row_order.len();
+    let total = app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len());
+    let mut spans = vec![Span::styled("Tables", Style::new().bold())];
+    if app.schema_filter_editing {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("/", Style::new().fg(Color::Cyan).bold()));
+        spans.push(Span::styled(
+            app.schema_filter.clone(),
+            Style::new().fg(Color::Cyan),
+        ));
+        spans.push(Span::styled(
+            "\u{2588}",
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK),
+        ));
+        spans.push(Span::styled(
+            format!("  {shown}/{total}"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    } else if app.schema_filter.is_empty() {
+        spans.push(Span::styled(
+            format!(" ({total})"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    } else {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("filter: {}", app.schema_filter),
+            Style::new().fg(Color::Cyan),
+        ));
+        spans.push(Span::styled(
+            format!("  {shown}/{total}"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Centered placeholder drawn inside the table body when the filter matches
+/// nothing — mirrors `ui/micro_lens.rs::draw_empty` exactly.
+fn draw_table_empty(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 2,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(3),
+    };
+    if inner.height == 0 {
+        return;
+    }
+    let msg = if !schema.tables.is_empty() && !app.schema_filter.is_empty() {
+        format!("No tables match \u{201c}{}\u{201d}", app.schema_filter)
+    } else {
+        "No tables".to_string()
+    };
+    let para = Paragraph::new(Line::from(Span::styled(
+        msg,
+        Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+    )))
+    .alignment(ratatui::layout::Alignment::Center);
+    frame.render_widget(para, inner);
 }
 
 /// How many characters the flexible Table column can hold at this terminal

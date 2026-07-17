@@ -173,6 +173,22 @@ struct ServeArgs {
 }
 
 impl ConnArgs {
+    /// `--dsn` and `--service` are mutually exclusive (`conflicts_with` on the
+    /// clap arg), but because both flags are `global`, clap's conflict check
+    /// silently misses the case where they straddle the subcommand boundary
+    /// (`pg_lens --dsn ... serve --service x`) — the two values land in
+    /// different matched-arg sets, so `conflicts_with` never fires and `--dsn`
+    /// silently wins, connecting to the wrong server with no warning. Enforce
+    /// the invariant at runtime, regardless of flag position.
+    fn ensure_conn_flags_consistent(&self) -> color_eyre::Result<()> {
+        if self.dsn.is_some() && self.service.is_some() {
+            color_eyre::eyre::bail!(
+                "the argument '--dsn <DSN>' cannot be used with '--service <NAME>'"
+            );
+        }
+        Ok(())
+    }
+
     /// Everything `settings::resolve` needs; the process environment is
     /// captured exactly once, here, and injected.
     fn spec(&self) -> ConnSpec {
@@ -755,6 +771,12 @@ fn drain_admin(app: &mut App, admin_tx: &mpsc::Sender<AdminCommand>) {
 async fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
     color_eyre::install()?;
+
+    // Runtime backstop for the `--dsn`/`--service` conflict that clap's
+    // `conflicts_with` misses across the subcommand boundary (both flags are
+    // `global`). Without this, `pg_lens --dsn ... serve --service x` silently
+    // connects to `--dsn`, ignoring the service — a wrong-server footgun.
+    cli.conn.ensure_conn_flags_consistent()?;
 
     match cli.command {
         // Bare `pg_lens [flags]` = the historical flat CLI = `tui`. The
@@ -1384,6 +1406,42 @@ mod tests {
 
         // Conflict is enforced regardless of position relative to `serve`.
         assert!(Cli::try_parse_from(["pg_lens", "--dsn", "host=x", "--service", "y", "serve"]).is_err());
+    }
+
+    /// clap's `conflicts_with` silently misses `--dsn`/`--service` when they
+    /// straddle the subcommand boundary (both flags are `global`, so the values
+    /// land in different matched-arg sets). The runtime backstop
+    /// (`ensure_conn_flags_consistent`) catches it regardless of position — the
+    /// alternative is a silent wrong-server connection.
+    #[test]
+    fn dsn_service_conflict_caught_across_the_subcommand_boundary() {
+        // These PARSE (clap misses the cross-level conflict)…
+        let straddling = [
+            vec!["pg_lens", "--dsn", "host=x", "serve", "--service", "y"],
+            vec!["pg_lens", "--service", "y", "serve", "--dsn", "host=x"],
+        ];
+        for argv in straddling {
+            let cli = Cli::try_parse_from(argv.clone())
+                .unwrap_or_else(|_| panic!("clap parses the straddling case: {argv:?}"));
+            // …but the runtime backstop must reject them.
+            assert!(
+                cli.conn.ensure_conn_flags_consistent().is_err(),
+                "must reject --dsn + --service: {argv:?}"
+            );
+        }
+
+        // Either flag alone is fine, in any position.
+        for argv in [
+            vec!["pg_lens", "--dsn", "host=x", "serve"],
+            vec!["pg_lens", "serve", "--service", "y"],
+            vec!["pg_lens", "--service", "y"],
+        ] {
+            let cli = Cli::try_parse_from(argv.clone()).expect("parse");
+            assert!(
+                cli.conn.ensure_conn_flags_consistent().is_ok(),
+                "single flag must pass: {argv:?}"
+            );
+        }
     }
 
     // --- admin command drain ---------------------------------------------------

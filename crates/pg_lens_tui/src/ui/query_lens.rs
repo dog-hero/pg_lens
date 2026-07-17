@@ -23,7 +23,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap},
 };
 
@@ -154,11 +154,93 @@ fn draw_table(app: &mut App, statements: &StatementsSnapshot, frame: &mut Frame,
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title("Statements"))
+        .block(Block::bordered().title(statements_title(app)))
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol("\u{25b6} ");
 
     frame.render_stateful_widget(table, area, &mut app.statements_table_state);
+    // Empty state: mirrors the Micro/Schema lenses' filter-aware empty hint.
+    if app.statements_row_order.is_empty() {
+        draw_table_empty(app, statements, frame, area);
+    }
+}
+
+/// Block title showing the row count and the filter state — the Query
+/// Lens's twin of `ui/micro_lens.rs::activity_title` /
+/// `ui/schema_lens.rs::schema_table_title`. Plain `Statements (N)` when
+/// unfiltered; while editing (`/`) it shows the live term with a cursor
+/// block and `shown/total`; a committed filter shows the term without the
+/// cursor.
+fn statements_title(app: &App) -> Line<'static> {
+    let shown = app.statements_row_order.len();
+    let total = app
+        .snapshot
+        .statements
+        .as_deref()
+        .map_or(0, |s| s.statements.len());
+    let mut spans = vec![Span::styled("Statements", Style::new().bold())];
+    if app.statements_filter_editing {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("/", Style::new().fg(Color::Cyan).bold()));
+        spans.push(Span::styled(
+            app.statements_filter.clone(),
+            Style::new().fg(Color::Cyan),
+        ));
+        spans.push(Span::styled(
+            "\u{2588}",
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK),
+        ));
+        spans.push(Span::styled(
+            format!("  {shown}/{total}"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    } else if app.statements_filter.is_empty() {
+        spans.push(Span::styled(
+            format!(" ({total})"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    } else {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("filter: {}", app.statements_filter),
+            Style::new().fg(Color::Cyan),
+        ));
+        spans.push(Span::styled(
+            format!("  {shown}/{total}"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Centered placeholder drawn inside the table body when the filter matches
+/// nothing — mirrors `ui/micro_lens.rs::draw_empty`.
+fn draw_table_empty(
+    app: &App,
+    statements: &StatementsSnapshot,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 2,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(3),
+    };
+    if inner.height == 0 {
+        return;
+    }
+    let msg = if !statements.statements.is_empty() && !app.statements_filter.is_empty() {
+        format!("No statements match \u{201c}{}\u{201d}", app.statements_filter)
+    } else {
+        "No statements".to_string()
+    };
+    let para = Paragraph::new(Line::from(Span::styled(
+        msg,
+        Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+    )))
+    .alignment(ratatui::layout::Alignment::Center);
+    frame.render_widget(para, inner);
 }
 
 /// How many characters the flexible Query column can hold at this terminal

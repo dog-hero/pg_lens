@@ -24,6 +24,14 @@ pub const ADMIN_FEEDBACK_TICKS: u64 = 40;
 /// Esc doesn't leave a quit landmine behind.
 pub const ESC_QUIT_WINDOW_TICKS: u64 = 8;
 
+/// `PageUp`/`PageDown` step, in rows. A fixed constant rather than the
+/// visible table height: `App` never learns the frame size (that lives only
+/// in `ui/`, which is 100% synchronous rendering with no channel back to the
+/// model), and 10 is a reasonable page on any terminal this app targets —
+/// smaller than the shortest table body, but a clear jump versus single-row
+/// `j`/`k`.
+const PAGE_SIZE: i64 = 10;
+
 /// Which lens (tab) is on screen.
 // The "Lens" postfix is the product vocabulary (Macro/Micro/Schema Lens),
 // not naming noise — keep it despite clippy's shared-postfix lint.
@@ -45,13 +53,18 @@ pub enum Tab {
 }
 
 impl Tab {
+    // v0.12: number-prefixed so the tab bar is self-documenting about the
+    // `1`-`6` direct-jump keys (see `handle_key`'s digit arm). The prefix is
+    // additive on top of the original title text (never replaces it) so
+    // every pre-existing `screen.contains("Macro Lens")`-style assertion
+    // keeps matching unchanged.
     pub const TITLES: [&'static str; 6] = [
-        "Macro Lens",
-        "Micro Lens",
-        "Replication",
-        "Schema Lens",
-        "Indexes",
-        "Query Lens",
+        "1 Macro Lens",
+        "2 Micro Lens",
+        "3 Replication",
+        "4 Schema Lens",
+        "5 Indexes",
+        "6 Query Lens",
     ];
 
     pub fn index(self) -> usize {
@@ -65,6 +78,20 @@ impl Tab {
         }
     }
 
+    /// Inverse of [`Tab::index`] — used by the `1`-`6` direct-jump keys.
+    /// `None` for anything outside `0..6` (there is no seventh tab).
+    pub fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Tab::MacroLens),
+            1 => Some(Tab::MicroLens),
+            2 => Some(Tab::ReplicationLens),
+            3 => Some(Tab::SchemaLens),
+            4 => Some(Tab::IndexLens),
+            5 => Some(Tab::QueryLens),
+            _ => None,
+        }
+    }
+
     pub fn next(self) -> Self {
         match self {
             Tab::MacroLens => Tab::MicroLens,
@@ -73,6 +100,19 @@ impl Tab {
             Tab::SchemaLens => Tab::IndexLens,
             Tab::IndexLens => Tab::QueryLens,
             Tab::QueryLens => Tab::MacroLens,
+        }
+    }
+
+    /// Backward cycle (`BackTab` / Shift+Tab) — the exact inverse of
+    /// [`Tab::next`].
+    pub fn prev(self) -> Self {
+        match self {
+            Tab::MacroLens => Tab::QueryLens,
+            Tab::MicroLens => Tab::MacroLens,
+            Tab::ReplicationLens => Tab::MicroLens,
+            Tab::SchemaLens => Tab::ReplicationLens,
+            Tab::IndexLens => Tab::SchemaLens,
+            Tab::QueryLens => Tab::IndexLens,
         }
     }
 }
@@ -415,6 +455,12 @@ pub enum Action {
 #[derive(Debug)]
 pub struct App {
     pub active_tab: Tab,
+    /// The lens `active_tab` held before the last tab change (forward `Tab`,
+    /// `BackTab`, or a `1`-`6` jump), if any — set right before every such
+    /// mutation. `Backspace` swaps `active_tab`/`previous_tab` (browser-back);
+    /// swapping again toggles right back, so repeated presses bounce between
+    /// the two most recent lenses rather than only ever going one step deep.
+    pub previous_tab: Option<Tab>,
     pub snapshot: Arc<DbSnapshot>,
     /// Indices into `snapshot.activity` in display order (see `sort_mode`).
     pub row_order: Vec<usize>,
@@ -563,6 +609,25 @@ pub struct App {
     pub filter_editing: bool,
     /// The filter value captured when editing began, restored on Esc.
     pub filter_saved: String,
+    /// v0.12: Schema Lens Tables-view filter — the exact twin of `filter`/
+    /// `filter_editing`/`filter_saved`, but its OWN field: a shared/generic
+    /// filter field would leak the search term across lenses when tabbing
+    /// (e.g. typing "orders" on the Schema Lens would silently narrow the
+    /// Micro Lens's activity table too). Case-insensitive substring over
+    /// schema name, table name, and the fully-qualified `schema.table`.
+    /// Applied in [`resort_schema`] before sorting; Tables view only — the
+    /// Vacuum sub-view has no filter of its own (same "no filter" story as
+    /// the Micro Lens's idle census).
+    pub schema_filter: String,
+    pub schema_filter_editing: bool,
+    pub schema_filter_saved: String,
+    /// v0.12: Query Lens filter — the same per-lens-state discipline as
+    /// [`schema_filter`](App::schema_filter). Case-insensitive substring
+    /// over the normalized query text (and queryid, if present). Applied in
+    /// [`resort_statements`] before sorting.
+    pub statements_filter: String,
+    pub statements_filter_editing: bool,
+    pub statements_filter_saved: String,
     /// Double-Esc quit barrier: `Some(tick)` while a first top-level Esc is
     /// armed — a second Esc at or before that tick quits; later ones re-arm.
     pub esc_quit_armed_until: Option<u64>,
@@ -587,6 +652,7 @@ impl App {
     pub fn new() -> Self {
         let mut app = Self {
             active_tab: Tab::default(),
+            previous_tab: None,
             snapshot: Arc::new(DbSnapshot::mock()),
             row_order: Vec::new(),
             sort_mode: SortMode::default(),
@@ -628,6 +694,12 @@ impl App {
             filter: String::new(),
             filter_editing: false,
             filter_saved: String::new(),
+            schema_filter: String::new(),
+            schema_filter_editing: false,
+            schema_filter_saved: String::new(),
+            statements_filter: String::new(),
+            statements_filter_editing: false,
+            statements_filter_saved: String::new(),
             esc_quit_armed_until: None,
             help_open: false,
             launch_psql_requested: false,
@@ -858,10 +930,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         handle_db_picker_key(app, key);
         return;
     }
-    // Filter editing (`/` on the Micro Lens): printable keys edit the filter
-    // live, so the table narrows as you type; Enter commits, Esc reverts.
-    // Every lens keybinding is inert until then.
-    if app.filter_editing {
+    // Filter editing (`/`): printable keys edit the ACTIVE lens's filter
+    // live, so its table narrows as you type; Enter commits, Esc reverts.
+    // Every lens keybinding is inert until then. v0.12: three independent
+    // filters (Micro/Schema/Query) share this shape but never their state —
+    // `filter_target` below picks which triple of fields is live, so typing
+    // on one lens can never leak into another's search term.
+    if app.filter_editing || app.schema_filter_editing || app.statements_filter_editing {
         handle_filter_key(app, key);
         return;
     }
@@ -936,19 +1011,105 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Tab => {
+            app.previous_tab = Some(app.active_tab);
             app.detail_open = false;
             app.waits_open = false;
             app.active_tab = app.active_tab.next();
         }
-        // `/` starts (or resumes) editing the Micro Lens activity filter.
-        // Micro Lens's Activity view only — the idle census (v0.11) has no
-        // filter of its own.
+        // v0.12: Shift+Tab cycles backward — the exact inverse of `Tab`,
+        // same overlay-close-then-switch discipline (note `schema_view`/
+        // `micro_view` deliberately are NOT reset here, matching the
+        // forward `Tab` arm: both sub-views persist across lens switches by
+        // design — see their doc comments).
+        KeyCode::BackTab => {
+            app.previous_tab = Some(app.active_tab);
+            app.detail_open = false;
+            app.waits_open = false;
+            app.active_tab = app.active_tab.prev();
+        }
+        // v0.12: direct tab jump, in `Tab::TITLES`/`Tab::index()` order (the
+        // tab bar's number prefixes document this). Reached only when no
+        // overlay/modal/picker/filter-edit owns input (they all return
+        // earlier in this function), so it can never hijack a digit typed
+        // into the filter editor or a confirm-modal keystroke. A no-op if
+        // already on that tab (nothing to remember as "previous").
+        KeyCode::Char(c @ '1'..='6') => {
+            if let Some(tab) = Tab::from_index(c as usize - '1' as usize)
+                && tab != app.active_tab
+            {
+                app.previous_tab = Some(app.active_tab);
+                app.detail_open = false;
+                app.waits_open = false;
+                app.active_tab = tab;
+            }
+        }
+        // v0.12: "go back" — swaps with `previous_tab` (browser-back), so a
+        // second press bounces right back to where you jumped from. Inert
+        // with no history yet. NOTE: this arm is only reached at the
+        // top level — `handle_filter_key` intercepts Backspace as delete
+        // BEFORE `handle_key` ever dispatches here (see the `filter_editing`
+        // early-return above), so typing in the filter editor is unaffected.
+        KeyCode::Backspace => {
+            if let Some(prev) = app.previous_tab {
+                let current = app.active_tab;
+                app.detail_open = false;
+                app.waits_open = false;
+                app.active_tab = prev;
+                app.previous_tab = Some(current);
+            }
+        }
+        // `/` starts (or resumes) editing the active lens's own filter (see
+        // `filter_target`'s doc comment for why there are three of these,
+        // never one shared field). Micro Lens's Activity view only — the
+        // idle census (v0.11) has no filter of its own; same story for the
+        // Schema Lens's Vacuum sub-view (Tables view only, guarded below).
         KeyCode::Char('/')
             if app.active_tab == Tab::MicroLens && app.micro_view == MicroView::Activity =>
         {
             app.filter_saved = app.filter.clone();
             app.filter_editing = true;
         }
+        KeyCode::Char('/')
+            if app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables =>
+        {
+            app.schema_filter_saved = app.schema_filter.clone();
+            app.schema_filter_editing = true;
+        }
+        KeyCode::Char('/') if app.active_tab == Tab::QueryLens => {
+            app.statements_filter_saved = app.statements_filter.clone();
+            app.statements_filter_editing = true;
+        }
+        // v0.12: `\` clears the ACTIVE lens's committed filter in one key —
+        // inert when there is nothing to clear (empty filter) or while
+        // editing (Esc already reverts there). Chosen over `Esc` (already
+        // overloaded: closes overlays, then arms the quit barrier — adding
+        // a THIRD meaning would make a stray Esc unpredictable) and over a
+        // digit/letter already claimed by v0.12's own navigation batch
+        // (`1`-`6`, `g`/`G`, Backspace, BackTab) or by an existing lens key
+        // (`c`/`d`/`s`/`v`/`w`/`I`/`R`/`K`/`!`/`?`). `\` is unused anywhere
+        // in `handle_key` and reads naturally as "cancel/undo the slash".
+        KeyCode::Char('\\') => match app.active_tab {
+            Tab::MicroLens
+                if app.micro_view == MicroView::Activity && !app.filter.is_empty() =>
+            {
+                app.filter.clear();
+                resort(app);
+                clamp_selection(app);
+            }
+            Tab::SchemaLens
+                if app.schema_view == SchemaView::Tables && !app.schema_filter.is_empty() =>
+            {
+                app.schema_filter.clear();
+                resort_schema(app);
+                clamp_selection(app);
+            }
+            Tab::QueryLens if !app.statements_filter.is_empty() => {
+                app.statements_filter.clear();
+                resort_statements(app);
+                clamp_selection(app);
+            }
+            _ => {}
+        },
         // `w` (U3): the Micro Lens's full ranked-waits panel — the one-line
         // strip only ever shows the top few; this is the complete list.
         // Toggle, Micro Lens only; opening it closes any open detail panel
@@ -1008,6 +1169,18 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('?') => app.help_open = true,
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
+        // v0.12: fast scroll on long tables — reuses `move_selection`'s
+        // existing per-lens (state, len) routing, so this works on every
+        // lens with a selectable table for free. `PAGE_SIZE` is a fixed
+        // constant (not derived from the frame height, which `ui/` — the
+        // only place that knows terminal size — never reports back to
+        // `App`; a constant keeps the model 100% synchronous and terminal-
+        // size-independent, same reasoning as `ESC_QUIT_WINDOW_TICKS` being
+        // tick-based rather than wall-clock).
+        KeyCode::PageUp => move_selection(app, -PAGE_SIZE),
+        KeyCode::PageDown => move_selection(app, PAGE_SIZE),
+        KeyCode::Home | KeyCode::Char('g') => move_selection_to(app, 0),
+        KeyCode::End | KeyCode::Char('G') => move_selection_to(app, i64::MAX),
         // `s` cycles the sort of whichever lens is active (each keeps its
         // own mode, so tabbing away and back never loses the choice). The
         // Index Lens and Replication Lens have no sort mode of their own
@@ -1222,36 +1395,111 @@ fn handle_help_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-/// Keymap while editing the Micro Lens filter (`app.filter_editing`): every
-/// printable char edits the filter live (the table re-filters on each
-/// keystroke), Backspace deletes, Enter commits (keeps the text, stops
-/// editing), Esc reverts to what the filter was before editing began. The
-/// selection is re-clamped after each change because the visible row count
-/// can shrink to zero.
+/// Which per-lens filter triple (`*_filter`/`*_filter_editing`/
+/// `*_filter_saved`) is currently being edited. [`handle_filter_key`]
+/// dispatches on this instead of taking a generic `&mut String` target: a
+/// shared/generic filter field was explicitly rejected (see `App::filter`'s
+/// sibling doc comments) because it would leak one lens's search term into
+/// another's row set the moment the user tabbed away mid-edit. This enum is
+/// the single least-duplicative point where the THREE keymaps (identical
+/// key-by-key behavior, different fields) converge into one implementation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilterLens {
+    Micro,
+    Schema,
+    Query,
+}
+
+/// `None` when no filter is being edited — defensive; `handle_key` only
+/// routes into [`handle_filter_key`] when at least one `*_filter_editing`
+/// flag is set, and the three flags are mutually exclusive by construction
+/// (only one `/` arm can fire per keypress, each setting exactly one).
+fn active_filter_lens(app: &App) -> Option<FilterLens> {
+    if app.filter_editing {
+        Some(FilterLens::Micro)
+    } else if app.schema_filter_editing {
+        Some(FilterLens::Schema)
+    } else if app.statements_filter_editing {
+        Some(FilterLens::Query)
+    } else {
+        None
+    }
+}
+
+/// Re-sorts (and re-filters — the filter step lives inside each `resort_*`)
+/// whichever lens [`FilterLens`] names. Shared by every editing keystroke
+/// that changes the filter text.
+fn resort_for(app: &mut App, lens: FilterLens) {
+    match lens {
+        FilterLens::Micro => resort(app),
+        FilterLens::Schema => resort_schema(app),
+        FilterLens::Query => resort_statements(app),
+    }
+}
+
+/// Keymap while editing ANY lens's filter (`app.filter_editing` /
+/// `schema_filter_editing` / `statements_filter_editing` — exactly one is
+/// true when this is reached): every printable char edits that lens's own
+/// filter live (its table re-filters on each keystroke), Backspace deletes,
+/// Enter commits (keeps the text, stops editing), Esc reverts to what the
+/// filter was before editing began. The selection is re-clamped after each
+/// change because the visible row count can shrink to zero.
 fn handle_filter_key(app: &mut App, key: KeyEvent) {
     // Ctrl+C is a universal escape hatch — it quits even mid-edit.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.should_quit = true;
         return;
     }
+    let Some(lens) = active_filter_lens(app) else {
+        return;
+    };
     match key.code {
-        KeyCode::Enter => app.filter_editing = false,
+        KeyCode::Enter => match lens {
+            FilterLens::Micro => app.filter_editing = false,
+            FilterLens::Schema => app.schema_filter_editing = false,
+            FilterLens::Query => app.statements_filter_editing = false,
+        },
         KeyCode::Esc => {
-            app.filter = std::mem::take(&mut app.filter_saved);
-            app.filter_editing = false;
-            resort(app);
+            match lens {
+                FilterLens::Micro => {
+                    app.filter = std::mem::take(&mut app.filter_saved);
+                    app.filter_editing = false;
+                }
+                FilterLens::Schema => {
+                    app.schema_filter = std::mem::take(&mut app.schema_filter_saved);
+                    app.schema_filter_editing = false;
+                }
+                FilterLens::Query => {
+                    app.statements_filter = std::mem::take(&mut app.statements_filter_saved);
+                    app.statements_filter_editing = false;
+                }
+            }
+            resort_for(app, lens);
             clamp_selection(app);
         }
         KeyCode::Backspace => {
-            app.filter.pop();
-            resort(app);
+            match lens {
+                FilterLens::Micro => {
+                    app.filter.pop();
+                }
+                FilterLens::Schema => {
+                    app.schema_filter.pop();
+                }
+                FilterLens::Query => {
+                    app.statements_filter.pop();
+                }
+            }
+            resort_for(app, lens);
             clamp_selection(app);
         }
-        // Ignore control chords (e.g. Ctrl+C is handled by the caller path
-        // only when not editing; here we simply don't type them).
+        // Ignore control chords (e.g. Ctrl+C is handled above already).
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.filter.push(c);
-            resort(app);
+            match lens {
+                FilterLens::Micro => app.filter.push(c),
+                FilterLens::Schema => app.schema_filter.push(c),
+                FilterLens::Query => app.statements_filter.push(c),
+            }
+            resort_for(app, lens);
             clamp_selection(app);
         }
         _ => {}
@@ -1298,7 +1546,33 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) {
 /// ends (no wrap). The Macro Lens has no table; j/k default to the Micro
 /// Lens cursor there (harmless, matches the pre-S3 behavior).
 fn move_selection(app: &mut App, delta: i64) {
-    let (state, len) = match app.active_tab {
+    let (state, len) = selection_target(app);
+    move_state(state, len, delta);
+}
+
+/// Jumps the active lens's table selection to an absolute position, clamped
+/// into range: `target <= 0` goes to the first row, `target >=
+/// len.saturating_sub(1)` goes to the last (so `i64::MAX` is the idiomatic
+/// "last row" — see the `Home`/`End`/`g`/`G` arms in `handle_key`). Shares
+/// the exact same per-lens (state, len) routing as [`move_selection`], so it
+/// works on every lens that has a selectable table with no per-lens code.
+fn move_selection_to(app: &mut App, target: i64) {
+    let (state, len) = selection_target(app);
+    if len == 0 {
+        state.select(None);
+        return;
+    }
+    let idx = target.max(0) as u64;
+    let idx = (idx as usize).min(len - 1);
+    state.select(Some(idx));
+}
+
+/// The active lens's selection state + its display-order row count. Shared
+/// by [`move_selection`] and [`move_selection_to`] — every lens that gets a
+/// new fast-scroll key here (`Home`/`End`/`PageUp`/`PageDown`/`g`/`G`) falls
+/// out of this single routing table for free.
+fn selection_target(app: &mut App) -> (&mut TableState, usize) {
+    match app.active_tab {
         Tab::IndexLens => (&mut app.index_table_state, app.index_row_order.len()),
         Tab::ReplicationLens => (
             &mut app.replication_table_state,
@@ -1312,16 +1586,14 @@ fn move_selection(app: &mut App, delta: i64) {
                 .as_deref()
                 .map_or(0, |s| s.vacuum_tables.len()),
         ),
-        Tab::SchemaLens => (
-            &mut app.schema_table_state,
-            app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len()),
-        ),
+        // v0.12: navigates the FILTERED display order (`schema_row_order`),
+        // same story as the Micro Lens's `row_order` below — an active
+        // `schema_filter` must shrink what j/k/Home/End can reach.
+        Tab::SchemaLens => (&mut app.schema_table_state, app.schema_row_order.len()),
+        // v0.12: same filtered-display-order story via `statements_row_order`.
         Tab::QueryLens => (
             &mut app.statements_table_state,
-            app.snapshot
-                .statements
-                .as_deref()
-                .map_or(0, |s| s.statements.len()),
+            app.statements_row_order.len(),
         ),
         // v0.11: the idle census keeps its own cursor over its own row set.
         Tab::MicroLens if app.micro_view == MicroView::Idle => (
@@ -1331,8 +1603,7 @@ fn move_selection(app: &mut App, delta: i64) {
         // Micro Lens navigates the FILTERED display order, not the raw
         // snapshot — `table_state` indexes `row_order`.
         _ => (&mut app.table_state, app.row_order.len()),
-    };
-    move_state(state, len, delta);
+    }
 }
 
 fn move_state(state: &mut TableState, len: usize, delta: i64) {
@@ -1365,7 +1636,10 @@ fn clamp_selection(app: &mut App) {
         app.table_state.select(Some(clamped));
     }
 
-    let schema_len = app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len());
+    // v0.12: clamp against the FILTERED display order, not the raw snapshot
+    // — same reasoning as `row_order` above (`schema_filter` can shrink it
+    // to fewer, or zero, rows).
+    let schema_len = app.schema_row_order.len();
     if schema_len == 0 {
         app.schema_table_state.select(None);
         if app.active_tab == Tab::SchemaLens {
@@ -1427,11 +1701,8 @@ fn clamp_selection(app: &mut App) {
         app.replication_table_state.select(Some(clamped));
     }
 
-    let statements_len = app
-        .snapshot
-        .statements
-        .as_deref()
-        .map_or(0, |s| s.statements.len());
+    // v0.12: same filtered-display-order clamp as `schema_len` above.
+    let statements_len = app.statements_row_order.len();
     if statements_len == 0 {
         app.statements_table_state.select(None);
         if app.active_tab == Tab::QueryLens {
@@ -1504,8 +1775,21 @@ fn resort(app: &mut App) {
     app.row_order = order;
 }
 
-/// Recomputes `schema_row_order` from the current snapshot + schema sort
-/// mode (the Schema Lens twin of [`resort`]). Ties break by total size
+/// Case-insensitive substring match of `needle` (already lowercased) against
+/// the Schema Lens Tables view's own filter (`/`) fields — schema name,
+/// table name, and the fully-qualified `schema.table` (covers a term that
+/// straddles the dot, e.g. "lic.orders"). Mirrors [`row_matches`]'s shape
+/// for the Micro Lens.
+fn schema_row_matches(row: &pg_lens_core::TableStatRow, needle: &str) -> bool {
+    row.schema.to_lowercase().contains(needle)
+        || row.name.to_lowercase().contains(needle)
+        || format!("{}.{}", row.schema, row.name)
+            .to_lowercase()
+            .contains(needle)
+}
+
+/// Recomputes `schema_row_order` from the current snapshot + filter + schema
+/// sort mode (the Schema Lens twin of [`resort`]). Ties break by total size
 /// descending, then schema.name ascending, so the order is deterministic.
 fn resort_schema(app: &mut App) {
     let Some(schema) = app.snapshot.schema.as_deref() else {
@@ -1513,7 +1797,10 @@ fn resort_schema(app: &mut App) {
         return;
     };
     let rows = &schema.tables;
-    let mut order: Vec<usize> = (0..rows.len()).collect();
+    let needle = app.schema_filter.to_lowercase();
+    let mut order: Vec<usize> = (0..rows.len())
+        .filter(|&i| needle.is_empty() || schema_row_matches(&rows[i], &needle))
+        .collect();
     let by_size_then_name = |a: usize, b: usize| {
         rows[b]
             .total_bytes
@@ -1596,17 +1883,31 @@ fn resort_replication(app: &mut App) {
     app.replication_row_order = order;
 }
 
-/// Recomputes `statements_row_order` from the current snapshot + sort mode
-/// (the Query Lens twin of [`resort`]). All modes are descending — the lens
-/// answers "what is the heaviest" — with ties broken by calls descending,
-/// then query text ascending, so the order is deterministic.
+/// Case-insensitive substring match of `needle` (already lowercased) against
+/// the Query Lens's own filter (`/`) fields — the normalized query text and,
+/// cheaply, the queryid (when present). Mirrors [`row_matches`]'s shape.
+fn statements_row_matches(row: &pg_lens_core::StatementRow, needle: &str) -> bool {
+    row.query.to_lowercase().contains(needle)
+        || row
+            .query_id
+            .as_deref()
+            .is_some_and(|id| id.to_lowercase().contains(needle))
+}
+
+/// Recomputes `statements_row_order` from the current snapshot + filter +
+/// sort mode (the Query Lens twin of [`resort`]). All modes are descending —
+/// the lens answers "what is the heaviest" — with ties broken by calls
+/// descending, then query text ascending, so the order is deterministic.
 fn resort_statements(app: &mut App) {
     let Some(statements) = app.snapshot.statements.as_deref() else {
         app.statements_row_order = Vec::new();
         return;
     };
     let rows = &statements.statements;
-    let mut order: Vec<usize> = (0..rows.len()).collect();
+    let needle = app.statements_filter.to_lowercase();
+    let mut order: Vec<usize> = (0..rows.len())
+        .filter(|&i| needle.is_empty() || statements_row_matches(&rows[i], &needle))
+        .collect();
     let tiebreak = |a: usize, b: usize| {
         rows[b]
             .calls
@@ -2083,6 +2384,111 @@ mod tests {
         assert!(!app.should_quit);
     }
 
+    // --- v0.12: navigation & scroll polish ----------------------------------
+
+    #[test]
+    fn back_tab_cycles_the_six_lenses_backward() {
+        let mut app = App::new();
+        assert_eq!(app.active_tab, Tab::MacroLens);
+        update(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.active_tab, Tab::QueryLens);
+        update(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.active_tab, Tab::IndexLens);
+        update(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.active_tab, Tab::SchemaLens);
+        update(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.active_tab, Tab::ReplicationLens);
+        update(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.active_tab, Tab::MicroLens);
+        update(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.active_tab, Tab::MacroLens);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn digit_keys_jump_directly_to_the_matching_tab() {
+        let mut app = App::new();
+        for (digit, tab) in [
+            ('1', Tab::MacroLens),
+            ('2', Tab::MicroLens),
+            ('3', Tab::ReplicationLens),
+            ('4', Tab::SchemaLens),
+            ('5', Tab::IndexLens),
+            ('6', Tab::QueryLens),
+        ] {
+            update(&mut app, press(KeyCode::Char(digit)));
+            assert_eq!(app.active_tab, tab, "digit {digit}");
+        }
+    }
+
+    /// Digit jumps close the same transient overlays as `Tab`/`BackTab`.
+    #[test]
+    fn digit_jump_closes_detail_and_waits_overlays() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        update(&mut app, press(KeyCode::Char('4')));
+        assert_eq!(app.active_tab, Tab::SchemaLens);
+        assert!(!app.detail_open);
+    }
+
+    /// Digit keys must not hijack a digit typed into the filter editor.
+    #[test]
+    fn digit_keys_are_inert_while_filter_editing() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        assert!(app.filter_editing);
+        update(&mut app, press(KeyCode::Char('4')));
+        assert_eq!(app.active_tab, Tab::MicroLens, "digit must stay in the filter text");
+        assert_eq!(app.filter, "4");
+    }
+
+    /// Digit keys must not hijack a confirm-modal keystroke either (the
+    /// modal only recognizes y/n/Esc — this proves `4` cannot slip through).
+    #[test]
+    fn digit_keys_are_inert_while_the_confirm_modal_is_open() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('c')));
+        assert!(app.confirm.is_some());
+        update(&mut app, press(KeyCode::Char('4')));
+        assert_eq!(app.active_tab, Tab::MicroLens);
+        assert!(app.confirm.is_some());
+    }
+
+    #[test]
+    fn backspace_swaps_to_the_previous_tab_and_toggles_back() {
+        let mut app = App::new();
+        assert!(app.previous_tab.is_none());
+        // No history yet: harmless no-op.
+        update(&mut app, press(KeyCode::Backspace));
+        assert_eq!(app.active_tab, Tab::MacroLens);
+
+        update(&mut app, press(KeyCode::Char('5'))); // → Index Lens
+        assert_eq!(app.active_tab, Tab::IndexLens);
+        update(&mut app, press(KeyCode::Backspace)); // → back to Macro Lens
+        assert_eq!(app.active_tab, Tab::MacroLens);
+        update(&mut app, press(KeyCode::Backspace)); // toggles right back
+        assert_eq!(app.active_tab, Tab::IndexLens);
+    }
+
+    /// Backspace must stay a delete key inside the filter editor, never a
+    /// go-back — `handle_filter_key` intercepts it before the top-level
+    /// dispatch ever sees it.
+    #[test]
+    fn backspace_deletes_in_the_filter_editor_not_go_back() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "abc");
+        assert_eq!(app.filter, "abc");
+        update(&mut app, press(KeyCode::Backspace));
+        assert_eq!(app.filter, "ab");
+        assert_eq!(app.active_tab, Tab::MicroLens, "must not have navigated");
+    }
+
     fn type_str(app: &mut App, s: &str) {
         for c in s.chars() {
             update(app, press(KeyCode::Char(c)));
@@ -2183,6 +2589,216 @@ mod tests {
         assert!(app.should_quit);
     }
 
+    // --- v0.12: Schema Lens Tables-view filter ------------------------------
+
+    #[test]
+    fn slash_arms_the_schema_filter_only_on_the_tables_view() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        assert_eq!(app.schema_view, SchemaView::Tables);
+        update(&mut app, press(KeyCode::Char('/')));
+        assert!(app.schema_filter_editing);
+        // The Micro Lens's own filter must stay untouched.
+        assert!(!app.filter_editing);
+
+        // Vacuum sub-view: `/` is inert (mirrors the Micro Lens's idle
+        // census having no filter of its own).
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        app.schema_view = SchemaView::Vacuum;
+        update(&mut app, press(KeyCode::Char('/')));
+        assert!(!app.schema_filter_editing);
+    }
+
+    #[test]
+    fn slash_filters_the_schema_tables_view_live_and_narrows_the_count() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let total = app
+            .snapshot
+            .schema
+            .as_deref()
+            .expect("mock schema")
+            .tables
+            .len();
+
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "order");
+        assert!(!app.schema_row_order.is_empty());
+        assert!(app.schema_row_order.len() < total);
+        let schema = app.snapshot.schema.as_deref().expect("mock schema");
+        for &i in &app.schema_row_order {
+            let t = &schema.tables[i];
+            let hay = format!("{}.{}", t.schema, t.name).to_lowercase();
+            assert!(hay.contains("order"), "row {i} does not match: {hay}");
+        }
+
+        // Commit, then navigate: the cursor cannot walk past the filtered
+        // set (mirrors the Micro Lens's cursor-clamp contract).
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.schema_filter_editing);
+        for _ in 0..total + 5 {
+            update(&mut app, press(KeyCode::Char('j')));
+        }
+        assert!(app.schema_table_state.selected().unwrap() < app.schema_row_order.len());
+    }
+
+    #[test]
+    fn schema_filter_esc_reverts_to_the_committed_value() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "order");
+        update(&mut app, press(KeyCode::Enter));
+        let narrowed = app.schema_row_order.len();
+
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "zzz");
+        assert!(app.schema_row_order.is_empty());
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.schema_filter_editing);
+        assert_eq!(app.schema_filter, "order");
+        assert_eq!(app.schema_row_order.len(), narrowed);
+    }
+
+    // --- v0.12: Query Lens filter -------------------------------------------
+
+    #[test]
+    fn slash_arms_the_query_lens_filter() {
+        let mut app = App::new();
+        app.active_tab = Tab::QueryLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        assert!(app.statements_filter_editing);
+        assert!(!app.filter_editing);
+        assert!(!app.schema_filter_editing);
+    }
+
+    #[test]
+    fn slash_filters_the_query_lens_live_and_narrows_the_count() {
+        let mut app = App::new();
+        app.active_tab = Tab::QueryLens;
+        let total = app
+            .snapshot
+            .statements
+            .as_deref()
+            .expect("mock statements")
+            .statements
+            .len();
+
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "pgbench_accounts");
+        assert!(!app.statements_row_order.is_empty());
+        assert!(app.statements_row_order.len() < total);
+        let statements = app.snapshot.statements.as_deref().expect("mock statements");
+        for &i in &app.statements_row_order {
+            let hay = statements.statements[i].query.to_lowercase();
+            assert!(hay.contains("pgbench_accounts"), "row {i}: {hay}");
+        }
+    }
+
+    // --- v0.12: one-key clear-filter (`\`) -----------------------------------
+
+    #[test]
+    fn backslash_clears_the_committed_filter_of_the_active_lens_only() {
+        // Micro Lens.
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "bench");
+        update(&mut app, press(KeyCode::Enter));
+        assert_eq!(app.filter, "bench");
+        update(&mut app, press(KeyCode::Char('\\')));
+        assert_eq!(app.filter, "");
+        assert_eq!(app.row_order.len(), app.snapshot.activity.len());
+
+        // Schema Lens Tables view.
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "order");
+        update(&mut app, press(KeyCode::Enter));
+        assert_eq!(app.schema_filter, "order");
+        update(&mut app, press(KeyCode::Char('\\')));
+        assert_eq!(app.schema_filter, "");
+        let total = app
+            .snapshot
+            .schema
+            .as_deref()
+            .expect("mock schema")
+            .tables
+            .len();
+        assert_eq!(app.schema_row_order.len(), total);
+
+        // Query Lens.
+        let mut app = App::new();
+        app.active_tab = Tab::QueryLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "pgbench_accounts");
+        update(&mut app, press(KeyCode::Enter));
+        assert_eq!(app.statements_filter, "pgbench_accounts");
+        update(&mut app, press(KeyCode::Char('\\')));
+        assert_eq!(app.statements_filter, "");
+        let total = app
+            .snapshot
+            .statements
+            .as_deref()
+            .expect("mock statements")
+            .statements
+            .len();
+        assert_eq!(app.statements_row_order.len(), total);
+    }
+
+    #[test]
+    fn backslash_is_inert_with_no_active_filter_and_never_arms_quitting() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        assert_eq!(app.filter, "");
+        update(&mut app, press(KeyCode::Char('\\')));
+        assert_eq!(app.filter, "");
+        assert!(!app.should_quit);
+        assert!(app.esc_quit_armed_until.is_none());
+    }
+
+    /// The key correctness point of v0.12's per-lens design: typing on one
+    /// lens's filter must never leak into another's — clearing one must
+    /// never touch the others either.
+    #[test]
+    fn filters_never_cross_contaminate_across_lenses() {
+        let mut app = App::new();
+
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "micro-term");
+        update(&mut app, press(KeyCode::Enter));
+
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "schema-term");
+        update(&mut app, press(KeyCode::Enter));
+
+        app.active_tab = Tab::QueryLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "query-term");
+        update(&mut app, press(KeyCode::Enter));
+
+        // Each lens kept exactly its own term.
+        assert_eq!(app.filter, "micro-term");
+        assert_eq!(app.schema_filter, "schema-term");
+        assert_eq!(app.statements_filter, "query-term");
+
+        // Clearing the Query Lens's filter leaves the other two untouched.
+        update(&mut app, press(KeyCode::Char('\\')));
+        assert_eq!(app.statements_filter, "");
+        assert_eq!(app.filter, "micro-term");
+        assert_eq!(app.schema_filter, "schema-term");
+
+        // Switching tabs never rewrites another lens's saved term either.
+        app.active_tab = Tab::MicroLens;
+        assert_eq!(app.filter, "micro-term");
+        app.active_tab = Tab::SchemaLens;
+        assert_eq!(app.schema_filter, "schema-term");
+    }
+
     #[test]
     fn navigation_saturates_at_both_ends() {
         let mut app = App::new();
@@ -2206,6 +2822,70 @@ mod tests {
         // And back up one.
         update(&mut app, press(KeyCode::Up));
         assert_eq!(app.table_state.selected(), Some(last - 1));
+    }
+
+    /// `Home`/`g` jump to the first row, `End`/`G` to the last, from
+    /// anywhere in the middle — on the Micro Lens's activity table.
+    #[test]
+    fn home_end_and_g_shift_g_jump_to_the_first_and_last_row() {
+        let mut app = App::new();
+        let last = app.row_order.len() - 1;
+        assert!(last > 0, "mock must carry more than one activity row");
+
+        update(&mut app, press(KeyCode::End));
+        assert_eq!(app.table_state.selected(), Some(last));
+        update(&mut app, press(KeyCode::Home));
+        assert_eq!(app.table_state.selected(), Some(0));
+
+        update(&mut app, press(KeyCode::Char('G')));
+        assert_eq!(app.table_state.selected(), Some(last));
+        update(&mut app, press(KeyCode::Char('g')));
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn page_up_and_page_down_move_by_a_page_and_clamp() {
+        let mut app = App::new();
+        let last = app.row_order.len() - 1;
+
+        update(&mut app, press(KeyCode::PageDown));
+        assert_eq!(app.table_state.selected(), Some((PAGE_SIZE as usize).min(last)));
+
+        // From the top, PageUp clamps at 0 rather than underflowing.
+        let mut app = App::new();
+        update(&mut app, press(KeyCode::PageUp));
+        assert_eq!(app.table_state.selected(), Some(0));
+
+        // From the bottom, PageDown clamps at the last row.
+        update(&mut app, press(KeyCode::End));
+        update(&mut app, press(KeyCode::PageDown));
+        assert_eq!(app.table_state.selected(), Some(last));
+    }
+
+    /// The fast-scroll keys route through the SAME per-lens (state, len)
+    /// table as `j`/`k` — this proves it works on a lens other than the
+    /// Micro Lens (the Schema Lens's own cursor), not just the default arm.
+    #[test]
+    fn fast_scroll_works_on_the_schema_lens_table_too() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let last = app.schema_row_order.len() - 1;
+        assert!(last > 0, "mock must carry more than one schema table row");
+
+        update(&mut app, press(KeyCode::Char('G')));
+        assert_eq!(app.schema_table_state.selected(), Some(last));
+        update(&mut app, press(KeyCode::Char('g')));
+        assert_eq!(app.schema_table_state.selected(), Some(0));
+    }
+
+    /// `g` must not hijack typing inside the filter editor.
+    #[test]
+    fn g_and_shift_g_are_inert_while_filter_editing() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "g");
+        assert_eq!(app.filter, "g", "the letter must land in the filter text");
     }
 
     #[test]

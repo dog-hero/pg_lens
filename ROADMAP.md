@@ -89,6 +89,62 @@ Deferred candidate from the same pass (map, don't build this batch):
   existing Query Lens table/detail, mirroring the existing optional-timing
   version gate. The #1 query-tuning signal the Query Lens still lacks. **S/M.**
 
+## v0.13 — "Web catch-up & redesign" (in progress — owner-selected 2026-07-17)
+
+The Web Lens is actually near-feature-parity already (the 2026-07-17 audit found
+almost every TUI feature mirrored), but it *feels* stale: no keyboard nav, no
+database switcher, and a dated look. Close the real gaps and remodel the visual.
+Owner picks: **modern observability dashboard** direction; **DB switch + serve
+fail-loud** scope.
+
+- [x] **Web database switcher + `serve` fail-loud** — the poller's DB-switch
+  channel (`mpsc<String>`) is fully wired and frontend-agnostic but `run_serve`
+  *drops the sender* (`main.rs`, documented v0.8 deferral). Thread `db_switch_tx`
+  into `pg_lens_web::WebState`, add `POST /api/db/switch` (alongside
+  `/api/schema/refresh` — a DB switch is a read-only reconnect, safe even in
+  read-only mode, NOT an admin action), declare `databases` in `types.ts` (data
+  already streams in `/api/snapshot`), and put a database dropdown in the header.
+  Separately, **`serve` with a services file and no `--service`/`--dsn`/env must
+  fail loud** — list the available service names and refuse, instead of silently
+  connecting to the localhost default (current footgun). **M + S.**
+- [x] **Web keyboard navigation** — the web is 100% click-driven; add a
+  `keydown` dispatcher: `1`–`5` jump to the nav tabs, `/` focuses the active
+  panel's filter input, `Esc` blurs. Pure frontend, no API change (every element
+  already has an id). Fold into the redesign build. **S.**
+- [x] **Modern observability dashboard redesign** — remodel the frontend
+  (`crates/pg_lens_web/frontend/`) into a modern dashboard: responsive
+  multi-column grid, inline hand-picked SVG icons (no icon font/framework —
+  bundle stays lean, `dist/` is embedded via rust-embed and currently ~116 KB),
+  a **light/dark toggle** (second CSS-variable set; keep severity warn/bad
+  legible in both), a clearer header carrying the connection target + database
+  name + the new switcher + RO badge + pause/conn-state, and a few well-chosen
+  small charts reusing the existing uPlot dep. Keep severity colors consistent
+  with the TUI. No new runtime framework; must not bloat the embedded bundle.
+  Absorbs the DB switcher and keyboard nav into the new chrome. **L.**
+
+## v0.12 — "Navigation & filters" UX polish (in progress — owner-selected 2026-07-17)
+
+Fast-wins usability batch from the 2026-07-17 polish discovery. No new data
+sources — pure interaction/ergonomics, TUI-first with web parity where cheap.
+
+- [x] **Group A — navigation & scroll**: direct tab jump with `1`–`6`;
+  `BackTab` (Shift+Tab) backward cycle (currently unwired — `Tab::prev()`
+  missing); a "last tab" toggle (`Backspace`, browser-back style, stores
+  `previous_tab`); number prefixes in the tab bar (`1 Macro │ 2 Micro │ …`) so
+  the digit binding is self-documenting; and fast scroll on every long table —
+  `Home`/`End`/`PageUp`/`PageDown` (+ vim `g`/`G`), reusing `move_selection`'s
+  existing arbitrary-delta support. Add the new keys to the help overlay.
+- [x] **Group B — lens filters**: a textual `/` filter on the Schema Lens
+  (Tables view — by schema and table name) and the Query Lens (by query text),
+  mirroring the Micro Lens activity-filter interaction with **per-lens** filter
+  state (not a shared generic field); plus a one-key clear-filter (when a
+  committed filter is non-empty and not editing). Web parity: a search box on
+  the Schema and Queries tabs, same shape as the existing activity filter.
+  Index Lens deliberately excluded (few rows). Add the keys to the help overlay.
+
+Explicitly NOT doing (discovery correction): `s` sort-cycle on Index/Replication
+Lens — those are intentionally fixed severity-ranked order, not a gap.
+
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
 - [ ] **I/O profile** — `pg_stat_io` (PG 16+ only), backend_type × context

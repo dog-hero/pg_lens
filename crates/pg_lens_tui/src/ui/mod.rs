@@ -385,6 +385,28 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             spans.push(id);
         }
     }
+    // v0.12: `/` filters the Schema Lens's Tables view and the Query Lens —
+    // the Micro Lens already advertises its own `/` unconditionally inside
+    // its admin block above, so this only fires for the other two lenses,
+    // "where width allows" like `w`/`I` (both already-crowded bars: sort +
+    // R + refresh + d/! competing for the same budget).
+    if (app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables)
+        || app.active_tab == Tab::QueryLens
+    {
+        let [fk, fd] = style::hint("/", ": filter");
+        let fits = Line::from(spans.clone()).width()
+            + sep.width()
+            + fk.width()
+            + fd.width()
+            + sep.width()
+            + data_span.width()
+            <= area.width as usize;
+        if fits {
+            spans.push(sep.clone());
+            spans.push(fk);
+            spans.push(fd);
+        }
+    }
     // U2's `d: database` hint works from any lens, but the tight lenses
     // (Micro/Schema/Query, already carrying filter/admin/sort/R hints) can
     // run out of the 120-col budget — rather than let ratatui silently clip
@@ -465,6 +487,22 @@ mod tests {
         let screen = render(&mut app);
         for title in Tab::TITLES {
             assert!(screen.contains(title), "missing tab {title}: {screen}");
+        }
+    }
+
+    /// v0.12: the tab bar carries `1`-`6` number hints so the direct-jump
+    /// keys are self-documenting — each `Tab::TITLES` entry already starts
+    /// with its digit (see `Tab::TITLES`'s doc comment).
+    #[test]
+    fn tab_bar_shows_the_direct_jump_number_hints() {
+        let mut app = App::new();
+        let screen = render(&mut app);
+        for (digit, title) in ["1", "2", "3", "4", "5", "6"].into_iter().zip(Tab::TITLES) {
+            assert!(
+                title.starts_with(digit),
+                "Tab::TITLES entry {title:?} must start with {digit}"
+            );
+            assert!(screen.contains(title), "missing numbered tab {title}: {screen}");
         }
     }
 
@@ -854,6 +892,60 @@ mod tests {
         let screen = render(&mut app);
         assert!(screen.contains("DUP"), "{screen}");
         assert!(screen.contains("exact duplicate of"), "{screen}");
+    }
+
+    /// v0.12: the Schema Lens Tables-view title shows the filter term and a
+    /// `shown/total` count once a filter is committed — mirrors the Micro
+    /// Lens's `activity_title`.
+    #[test]
+    fn schema_lens_title_shows_the_filter_and_count() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let total = app
+            .snapshot
+            .schema
+            .as_deref()
+            .expect("mock schema")
+            .tables
+            .len();
+        let screen = render(&mut app);
+        assert!(screen.contains(&format!("({total})")), "{screen}");
+
+        press(&mut app, crossterm::event::KeyCode::Char('/'));
+        for c in "order".chars() {
+            press(&mut app, crossterm::event::KeyCode::Char(c));
+        }
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        let shown = app.schema_row_order.len();
+        assert!(shown < total);
+        let screen = render(&mut app);
+        assert!(screen.contains("filter: order"), "{screen}");
+        assert!(screen.contains(&format!("{shown}/{total}")), "{screen}");
+    }
+
+    /// v0.12: same title/count contract on the Query Lens.
+    #[test]
+    fn query_lens_title_shows_the_filter_and_count() {
+        let mut app = App::new();
+        app.active_tab = Tab::QueryLens;
+        let total = app
+            .snapshot
+            .statements
+            .as_deref()
+            .expect("mock statements")
+            .statements
+            .len();
+
+        press(&mut app, crossterm::event::KeyCode::Char('/'));
+        for c in "pgbench_accounts".chars() {
+            press(&mut app, crossterm::event::KeyCode::Char(c));
+        }
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        let shown = app.statements_row_order.len();
+        assert!(shown < total);
+        let screen = render(&mut app);
+        assert!(screen.contains("filter: pgbench_accounts"), "{screen}");
+        assert!(screen.contains(&format!("{shown}/{total}")), "{screen}");
     }
 
     #[test]
@@ -1329,8 +1421,9 @@ mod tests {
         // 36-row `render()` height (the trailing "Esc / ?: close" line
         // would clip) — a taller terminal, same width, keeps every
         // assertion below meaningful instead of silently checking clipped
-        // content.
-        let backend = TestBackend::new(120, 40);
+        // content. v0.12 added two more rows (`/`'s updated description,
+        // `\`'s new clear-filter row), so the terminal grew again.
+        let backend = TestBackend::new(120, 42);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
         let screen: String = terminal
@@ -1348,6 +1441,15 @@ mod tests {
         assert!(screen.contains("Esc / ?: close"), "{screen}");
         // The dashboard underneath is still there (overlay, not full-screen).
         assert!(screen.contains("Macro Lens"), "{screen}");
+        // v0.12: navigation & scroll polish is listed too.
+        assert!(screen.contains("jump to a lens directly"), "{screen}");
+        assert!(screen.contains("previously active lens"), "{screen}");
+        assert!(screen.contains("first / last row"), "{screen}");
+        assert!(screen.contains("move selection by a page"), "{screen}");
+        // v0.12: lens filters — the shared `/` binding's updated
+        // description plus the new one-key clear-filter.
+        assert!(screen.contains("Schema Tables/Query Lens"), "{screen}");
+        assert!(screen.contains("clear the active lens's filter"), "{screen}");
     }
 
     #[test]

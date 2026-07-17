@@ -4,6 +4,66 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.13.0] — 2026-07-17
+
+### Navigation & filters
+- **Direct tab jump (`1`–`6`)** — jump straight to any lens by number; the
+  tab bar now shows the digit prefix for each (`1 Macro │ 2 Micro │ …`) so
+  the binding is self-documenting.
+- **`Shift+Tab` backward cycle** — `Tab::prev()` was previously unwired;
+  `BackTab` now cycles lenses in reverse.
+- **`Backspace` last-tab toggle** — browser-back-style jump to the
+  previously active lens (still deletes as expected inside a filter
+  editor).
+- **Fast scroll everywhere** — `Home`/`g` and `End`/`G` jump to the first/
+  last row, `PageUp`/`PageDown` move by a page, on every selectable table
+  in the TUI.
+- **Schema and Query Lens filters (`/`)** — the textual filter, previously
+  Micro-Lens-only, now also filters the Schema Lens (Tables view, by
+  schema/table name) and the Query Lens (by query text), each with its own
+  independent filter state; `\` clears whichever lens's filter is active.
+  Web parity: `#schema-filter` / `#statements-filter` search inputs.
+- All of the above added to the `?` help overlay.
+
+### Web catch-up & redesign
+- **Modern dashboard redesign** — new layout: a left sidenav (collapsing to
+  an icon rail ≤1024px, a horizontal strip ≤720px) and a redesigned topbar
+  (brand, current database + switcher, read-only badge, pause, connection
+  state, theme toggle). Inline SVG icon sprite, no icon font or UI
+  framework added. System-UI font for chrome, monospace for data. The
+  Checkpoints card now leads with a `X.XX/min` headline and pushes detail
+  numbers below it. Bundle grew 116→132 KB (still embedded, no new
+  runtime dependency).
+- **Light/dark theme toggle** — a header toggle persisted in
+  `localStorage`; defaults to dark (unchanged behavior for existing users).
+- **Web keyboard navigation** — `1`–`5` jump to the nav sections, `/`
+  focuses the active panel's filter input, `Esc` blurs it; shortcuts are
+  suppressed while typing in a text input (except `Esc`).
+- **Web database switcher** — a header dropdown lists every database the
+  connected role can see and switches the poller to it via the new
+  `POST /api/db/switch {"database": "name"}` endpoint (token-gated the same
+  way as `/api/schema/refresh` — a database switch is a read-only
+  reconnect, so it works even under `--read-only`; the target is validated
+  against the snapshot's `databases` list, `400` on an unknown name). The
+  poller's existing db-switch channel — previously dropped in `run_serve` —
+  is now threaded into `WebState`. Degrades to just showing the current
+  database name when `databases` is null or has fewer than two entries.
+- **`serve` fail-loud on ambiguous services** — `pg_lens serve` with a
+  `services.toml` defining one or more services and no `--service`/`--dsn`/
+  env var previously fell through and silently connected to `localhost`
+  (the TUI shows an interactive picker in this situation, but `serve` has
+  no TTY to show one to). It now lists the available service names
+  (host/user, never secrets) to stderr and exits non-zero instead.
+
+### Fixed
+- **`--dsn` / `--service` conflict across the `serve` subcommand
+  boundary** — both flags are declared `global`, which let clap's
+  `conflicts_with` be silently bypassed when one flag was given before
+  `serve` and the other after; pg_lens would connect to `--dsn` and
+  quietly ignore `--service`, a wrong-server footgun. Fixed with a runtime
+  backstop, `ConnArgs::ensure_conn_flags_consistent()`, called right after
+  argument parsing regardless of flag position.
+
 ## [0.11.0] — 2026-07-17 — "Incident precursors & connection visibility"
 
 ### Added

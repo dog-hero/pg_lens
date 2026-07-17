@@ -10,7 +10,7 @@
 // - clicking a row toggles a detail row listing that table's index bloat.
 
 import type { BloatRow, SchemaSnapshot, TableStatRow } from "./types";
-import { humanAgo, humanBytes, humanCount, humanDuration } from "./format";
+import { humanAgo, humanBytes, humanCount, humanDuration } from "./format.ts";
 
 const NO_ESTIMATE = "~?";
 const NO_ESTIMATE_TITLE = "estimated (needs fresh ANALYZE)";
@@ -87,6 +87,18 @@ function lastAv(table: TableStatRow): number | null {
   return table.last_autovacuum_epoch_secs ?? table.last_vacuum_epoch_secs;
 }
 
+/** Case-insensitive substring match over schema name, table name, and the
+ * fully-qualified `schema.table` (covers a term that straddles the dot) —
+ * mirrors the TUI's `schema_row_matches` (v0.12). `needle` is already
+ * lowercased by the caller, same convention as `table.ts::rowMatches`. */
+export function schemaRowMatches(table: TableStatRow, needle: string): boolean {
+  return (
+    table.schema.toLowerCase().includes(needle) ||
+    table.name.toLowerCase().includes(needle) ||
+    `${table.schema}.${table.name}`.toLowerCase().includes(needle)
+  );
+}
+
 /** Numeric value each sortable column orders by (missing sorts last). */
 function sortValue(
   key: SortKey,
@@ -114,20 +126,42 @@ export class SchemaLens {
   private database = "";
   /** `schema.name` keys of rows whose index-bloat detail is open. */
   private readonly expanded = new Set<string>();
+  /** v0.12: case-insensitive substring filter (schema + table name),
+   * mirroring the TUI's Schema Lens `/` filter. Empty = no filter. */
+  private filter = "";
   private readonly thead: HTMLTableSectionElement;
   private readonly tbody: HTMLTableSectionElement;
+  private readonly staleness: HTMLElement;
+  private readonly warning: HTMLElement;
+  private readonly placeholder: HTMLElement;
 
+  // Plain assignment, not TS constructor-parameter-property shorthand: the
+  // shorthand form is `SyntaxError`-incompatible with Node's built-in
+  // strip-only TS loader (`node --test` imports this module directly, no
+  // bundler in between) — same reasoning `index-advisor.ts`/`table.ts`
+  // already document by NOT using the shorthand.
   constructor(
     table: HTMLTableElement,
-    private readonly staleness: HTMLElement,
-    private readonly warning: HTMLElement,
-    private readonly placeholder: HTMLElement,
+    staleness: HTMLElement,
+    warning: HTMLElement,
+    placeholder: HTMLElement,
+    filterInput?: HTMLInputElement | null,
   ) {
+    this.staleness = staleness;
+    this.warning = warning;
+    this.placeholder = placeholder;
     this.thead = table.tHead ?? table.createTHead();
     this.tbody = table.tBodies[0] ?? table.createTBody();
     this.renderHead();
     // Local 1s tick so "collected Xs ago" advances between SSE frames.
     setInterval(() => this.renderStaleness(), 1000);
+    if (filterInput) {
+      filterInput.addEventListener("input", () => {
+        this.filter = filterInput.value.trim().toLowerCase();
+        this.renderStaleness();
+        this.renderBody();
+      });
+    }
   }
 
   update(schema: SchemaSnapshot | null, database: string): void {
@@ -191,8 +225,14 @@ export class SchemaLens {
       s.table_bloat.length === 0 && s.index_bloat.length === 0
         ? "bloat: on-demand (run R in the TUI)"
         : "estimated bloat";
+    // v0.12: shown/total once a filter narrows the list — mirrors the
+    // activity table's count element, folded into this same staleness line
+    // (the Schema tab has no separate count badge next to its heading).
+    const countText = this.filter
+      ? `${s.tables.filter((t) => schemaRowMatches(t, this.filter)).length}/${s.tables.length} tables`
+      : `${s.tables.length} tables`;
     this.staleness.textContent =
-      `db: ${this.database} · ${s.tables.length} tables · ` +
+      `db: ${this.database} · ${countText} · ` +
       `collected ${humanDuration(ageSecs)} ago · ${bloatNote}`;
   }
 
@@ -209,7 +249,10 @@ export class SchemaLens {
   private sorted(schema: SchemaSnapshot): TableStatRow[] {
     const key = this.sortKey;
     const dir = this.sortAsc ? 1 : -1;
-    return [...schema.tables].sort((a, b) => {
+    const visible = this.filter
+      ? schema.tables.filter((t) => schemaRowMatches(t, this.filter))
+      : schema.tables;
+    return [...visible].sort((a, b) => {
       const va = sortValue(key, a, tableBloat(schema, a));
       const vb = sortValue(key, b, tableBloat(schema, b));
       if (typeof va === "number" && typeof vb === "number") {

@@ -99,6 +99,18 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 - **`psql` shell launch** (`!`, TUI-only) — jump straight from the session
   you're inspecting into an interactive `psql` shell on the same
   connection; see [The `psql` shell](#the-psql-shell).
+- **Direct tab jump & fast scroll** — `1`–`6` jump straight to a lens,
+  `Shift+Tab` cycles backward, `Backspace` returns to the previously active
+  lens, and `Home`/`g`, `End`/`G`, `PageUp`/`PageDown` fast-scroll every
+  selectable table.
+- **Schema and Query Lens filters** — the `/` filter, previously
+  Micro-Lens-only, now also narrows the Schema Lens Tables view (by
+  schema/table name) and the Query Lens (by query text), each with
+  independent state; `\` clears whichever lens's filter is active. TUI +
+  Web.
+- **Modern Web Lens dashboard** — a redesigned dashboard: sidenav, a
+  database switcher, a light/dark theme toggle, and full keyboard
+  navigation; see [Web Lens](#web-lens).
 - **Keyboard help overlay** — press `?` for a full reference of every
   binding, grouped by navigation / sub-views / data / admin / quit.
 - **Read-only mode** — `--read-only` / `PG_LENS_READ_ONLY` / config.toml
@@ -499,11 +511,17 @@ they ever drift, trust the overlay.
 
 | Key | Action |
 |---|---|
-| `Tab` | Cycle lenses (Macro → Micro → Replication → Schema → Indexes → Queries → Macro) |
+| `Tab` / `Shift+Tab` | Cycle lenses forward / backward (Macro → Micro → Replication → Schema → Indexes → Queries → Macro) |
+| `1`–`6` | Jump directly to a lens (numbers shown in the tab bar) |
+| `Backspace` | Jump back to the previously active lens (browser-back style) |
 | `j` / `↓` | Move selection down |
 | `k` / `↑` | Move selection up |
+| `g` / `Home` | Jump selection to the first row |
+| `G` / `End` | Jump selection to the last row |
+| `PgUp` / `PgDn` | Move selection by a page |
 | `Enter` | Open/close the selected row's detail panel |
-| `/` | Filter the activity table (Micro Lens only) — type to narrow by pid, database, user, application, client, state, wait or query text; `Enter` applies, `Esc` reverts |
+| `/` | Filter the current table — Micro Lens (pid, database, user, application, client, state, wait or query text), Schema Lens Tables view (schema/table name), or Query Lens (query text); each lens keeps its own filter state; `Enter` applies, `Esc` reverts |
+| `\` | Clear the active lens's committed filter |
 | `w` | Full waits panel (Micro Lens only) |
 | `I` | Idle-connection census (Micro Lens only) — swaps the body to a list of idle sessions ranked oldest-first; `Esc` closes it |
 | `v` | Vacuum sub-view (Schema Lens only) |
@@ -642,10 +660,28 @@ See [CLAUDE.md](CLAUDE.md) for architecture invariants and
 vitals cards, a TPS/active-sessions chart (uPlot), and a sortable, filterable
 activity table with blocked/waiting row highlighting — streamed over
 Server-Sent Events from the same poller the TUI uses. It has near-parity with
-the TUI: **pause** the live view, **refresh** the Schema Lens on demand, and
-**cancel/terminate** backends. Admin actions are only exposed when the server
-is started with `PG_LENS_AUTH_TOKEN` (the server answers `403` otherwise) — the
-unauthenticated path stays read-only.
+the TUI: **pause** the live view, **refresh** the Schema Lens on demand,
+**switch database**, and **cancel/terminate** backends. Admin actions are only
+exposed when the server is started with `PG_LENS_AUTH_TOKEN` (the server
+answers `403` otherwise) — the unauthenticated path stays read-only.
+
+The dashboard uses a modern layout: a left sidenav (collapsing to an icon
+rail ≤1024px and a horizontal strip ≤720px) and a topbar carrying the
+connection target, the current database plus a switcher, the read-only
+badge, pause, connection state, and a **light/dark theme toggle**
+(persisted in `localStorage`, defaults to dark).
+
+**Database switcher** — the topbar dropdown lists every database the
+connected role can see and switches the poller to it (`POST
+/api/db/switch`), gated the same way as schema refresh: token-required when
+a token is configured, but **not** blocked by `--read-only` — a database
+switch is a read-only reconnect, not a mutating action. It degrades to just
+showing the current database name when the role can't see `pg_database` or
+there's only one database.
+
+**Keyboard navigation** — `1`–`5` jump to the nav sections, `/` focuses the
+active panel's filter input, `Esc` blurs it; shortcuts are suppressed while
+a text input has focus (except `Esc`).
 
 <!-- TODO: screenshot of the web dashboard -->
 
@@ -659,6 +695,14 @@ pg_lens serve --listen 127.0.0.1:9000     # different port (default 8080)
 
 Open the printed address in a browser — the dashboard updates in real time
 on every poll.
+
+**Fail-loud on ambiguous services** — `serve` has no TTY to show the TUI's
+interactive service picker. If a `services.toml` defines one or more
+services and none is chosen (`--service` / `--dsn` / `PGSERVICE` /
+`PG_LENS_SERVICE` / `PG_LENS_DSN` all unset), `pg_lens serve` refuses to
+guess: it prints the available service names (host/user, never secrets) to
+stderr and exits non-zero, instead of silently connecting to `localhost`.
+Pass `--service <name>` (or `--dsn`) to disambiguate.
 
 The frontend (Vite + TypeScript, `crates/pg_lens_web/frontend/`) is
 embedded in the binary at compile time. Building with the `web` feature
@@ -709,10 +753,12 @@ vacuum health / XID-wraparound, index advisor, checkpointer panel), v0.8
 "room to breathe" (Index/Replication Lens tabs, database selector, full
 waits panel, Vacuum sub-view), v0.9 "problem transactions" (idle-in-tx
 hunter, blocking-chain graph, prepared-transaction watch, keyboard help
-overlay), v0.10 (read-only mode, remote connection config), and v0.11
+overlay), v0.10 (read-only mode, remote connection config), v0.11
 "incident precursors & connection visibility" (idle-connection census,
-lock-table pressure gauge, invalid-index flag, `psql` shell launch). See
-[ROADMAP.md](ROADMAP.md) for what's next.
+lock-table pressure gauge, invalid-index flag, `psql` shell launch), and
+v0.13 (tab-number navigation and fast scroll, Schema/Query Lens filters,
+a modern Web Lens redesign with a database switcher and keyboard
+navigation). See [ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Changelog
 

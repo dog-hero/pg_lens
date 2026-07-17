@@ -14,8 +14,8 @@
 //   (highlighted) plus queryid/user/blocks.
 
 import type { StatementRow, StatementsSnapshot } from "./types";
-import { humanCount, humanDuration, humanMs } from "./format";
-import { renderSqlInto } from "./sql";
+import { humanCount, humanDuration, humanMs } from "./format.ts";
+import { renderSqlInto } from "./sql.ts";
 
 const NO_HIT_RATIO = "—";
 
@@ -43,6 +43,16 @@ const COLUMNS: Column[] = [
   { key: "hit", label: "Hit %", numeric: true },
 ];
 
+/** Case-insensitive substring match over the normalized query text (and
+ * queryid, if present) — mirrors the TUI's `statements_row_matches`
+ * (v0.12). `needle` is already lowercased by the caller. */
+export function statementsRowMatches(row: StatementRow, needle: string): boolean {
+  return (
+    row.query.toLowerCase().includes(needle) ||
+    (row.query_id?.toLowerCase().includes(needle) ?? false)
+  );
+}
+
 /** Value each sortable column orders by (no-ratio rows sort last). */
 function sortValue(key: SortKey, row: StatementRow): number | string {
   switch (key) {
@@ -64,21 +74,42 @@ export class StatementsLens {
   private database = "";
   /** `query_id ?? query` keys of rows whose detail is open. */
   private readonly expanded = new Set<string>();
+  /** v0.12: case-insensitive substring filter (query text / queryid),
+   * mirroring the TUI's Query Lens `/` filter. Empty = no filter. */
+  private filter = "";
   private readonly thead: HTMLTableSectionElement;
   private readonly tbody: HTMLTableSectionElement;
+  private readonly staleness: HTMLElement;
+  private readonly warning: HTMLElement;
+  private readonly placeholder: HTMLElement;
+  private readonly unavailable: HTMLElement;
 
+  // Plain assignment, not TS constructor-parameter-property shorthand — see
+  // `schema.ts`'s identical constructor doc comment for why.
   constructor(
     table: HTMLTableElement,
-    private readonly staleness: HTMLElement,
-    private readonly warning: HTMLElement,
-    private readonly placeholder: HTMLElement,
-    private readonly unavailable: HTMLElement,
+    staleness: HTMLElement,
+    warning: HTMLElement,
+    placeholder: HTMLElement,
+    unavailable: HTMLElement,
+    filterInput?: HTMLInputElement | null,
   ) {
+    this.staleness = staleness;
+    this.warning = warning;
+    this.placeholder = placeholder;
+    this.unavailable = unavailable;
     this.thead = table.tHead ?? table.createTHead();
     this.tbody = table.tBodies[0] ?? table.createTBody();
     this.renderHead();
     // Local 1s tick so "collected Xs ago" advances between SSE frames.
     setInterval(() => this.renderStaleness(), 1000);
+    if (filterInput) {
+      filterInput.addEventListener("input", () => {
+        this.filter = filterInput.value.trim().toLowerCase();
+        this.renderStaleness();
+        this.renderBody();
+      });
+    }
   }
 
   update(statements: StatementsSnapshot | null, database: string): void {
@@ -167,8 +198,14 @@ export class StatementsLens {
       return;
     }
     const ageSecs = Math.max(0, (Date.now() - s.collected_at_epoch_ms) / 1000);
+    // v0.12: shown/total once a filter narrows the list — same fold-into-
+    // the-staleness-line convention as the Schema Lens (no separate count
+    // badge on this tab).
+    const countText = this.filter
+      ? `${s.statements.filter((r) => statementsRowMatches(r, this.filter)).length}/${s.statements.length} statements`
+      : `${s.statements.length} statements`;
     this.staleness.textContent =
-      `db: ${this.database} · ${s.statements.length} statements · ` +
+      `db: ${this.database} · ${countText} · ` +
       `collected ${humanDuration(ageSecs)} ago · current database only`;
   }
 
@@ -185,7 +222,10 @@ export class StatementsLens {
   private sorted(snapshot: StatementsSnapshot): StatementRow[] {
     const key = this.sortKey;
     const dir = this.sortAsc ? 1 : -1;
-    return [...snapshot.statements].sort((a, b) => {
+    const visible = this.filter
+      ? snapshot.statements.filter((r) => statementsRowMatches(r, this.filter))
+      : snapshot.statements;
+    return [...visible].sort((a, b) => {
       const va = sortValue(key, a);
       const vb = sortValue(key, b);
       if (typeof va === "number" && typeof vb === "number") {
