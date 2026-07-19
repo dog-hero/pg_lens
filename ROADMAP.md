@@ -177,20 +177,92 @@ service picker for `pg_lens serve` — TTY prompt with a numbered list when a
 services file exists and nothing was selected (auto-select with notice when
 exactly one); non-TTY keeps the v0.13 fail-loud.
 
+## v0.15 — "Charts dashboard" (active)
+
+Owner picks from the v0.8+ candidate list (pg_stat_io, DDL progress, snapshot
+export) plus the 2026-07-19 discovery pass themed "a really good charts
+dashboard". Key finding: the gap versus pganalyze/pgwatch2-style dashboards is
+almost entirely wiring, not new SQL — the fast tick already computes nearly
+every number those tools chart (connections by state, checkpoint/bgwriter
+rates, temp bytes, deadlocks, replication lag) and silently discards it
+instead of recording it in `HistoryPoint`. Dependency order: item 2 can ship
+immediately (frontend-only); item 1 unlocks items 3–5; item 6 (the Charts tab)
+consolidates everything; the owner-picked items 7–9 are independent.
+
+- [ ] **Widen `HistoryPoint` v2 — the chart unlock** — add per-tick scalars
+  the poller already holds (`#[serde(default)]`, old JSONL keeps loading):
+  `idle` / `idle_in_transaction` / `waiting` counts (from `ServerVitals`),
+  `checkpoints_per_min_timed` / `buffers_checkpoint_per_sec` /
+  `buffers_clean_per_sec` (from `CheckpointerStats`), `temp_bytes_delta` /
+  `deadlocks_delta` (new entries in the poller's `DeltaState`, mirroring the
+  existing `xact_total` delta), `longest_xact_age_secs` + `blocked_count`
+  (one-line aggregations over activity rows), `max_replica_lag_bytes`
+  (max over WAL senders, `None` on standby/no replicas). Mirror in
+  `types.ts` + `DbSnapshot::mock()`. Zero new SQL. Foundational. **M.**
+- [ ] **Chart the trends already streaming** — `cache_hit_pct` and
+  `lock_pressure_pct` have sat in `HistoryPoint` since v0.14 but are only
+  used for trend arrows, never plotted; add them as uPlot series following
+  the existing `tps`/`active_sessions` wiring in `chart.ts`. Frontend-only,
+  independent of everything else — ship first. **S.**
+- [ ] **Trend chart pack** (each an S extension once item 1 lands):
+  connections-by-state stacked area (pool exhaustion as a shape change —
+  the trend companion to v0.11's idle census); checkpoint/bgwriter activity
+  lines (pgwatch2's flagship dashboard, from data already on the fast tick);
+  temp-spill rate line + deadlock event markers (reuse the scrubber's
+  canvas-hook marker technique — deadlocks are ticks, not a line);
+  longest-xact-age + blocked-count lines (the trend companion to v0.9's
+  problem-transactions batch); replication lag over time (hide when no
+  replicas, matching the Replication Lens). **~5×S.**
+- [ ] **WAL generation rate** — the one new-SQL chart: `pg_current_wal_lsn()`
+  added to `server_info` (recovery-safe `CASE` guard, same pattern as
+  `replication.sql`), diffed in the poller like `xact_total`, exposed as
+  `wal_bytes_per_sec` in `HistoryPoint`, charted. pg_lens currently has zero
+  WAL-volume visibility. **S/M.**
+- [ ] **Dedicated "Charts" dashboard tab (web)** — new top-level web tab: a
+  responsive small-multiples grid of every chart above, all driven by the
+  `SnapshotHistory` already streamed (no new endpoint); time-range presets
+  (15m/30m/1h) re-slicing the existing 1800-point ring client-side (NOT
+  extended retention — the PRD's no-warehouse pillar stands). uPlot stays
+  the only chart lib; verify N-instances × 1800-points redraw cost keeps the
+  2s tick smooth. The headline deliverable. **L.**
+- [ ] **TUI mirror — extra Macro Lens sparklines** — 2–3 more
+  `ratatui::Sparkline` rows (cache-hit, checkpoint rate, WAL rate) from the
+  widened history, same widget as the existing tps/sessions sparklines; cap
+  there to avoid crowding — the web tab is the richer surface, consistent
+  with the v0.13 precedent. **S/M.**
+- [ ] **I/O profile (`pg_stat_io`, PG 16+)** — new version-gated query
+  (`post_160000` SQL file + QuerySet field, following the
+  `bgwriter_post_170000` gating precedent): backend_type × io_context
+  reads/writes/hits/extends/fsyncs/evictions, timing columns gated on
+  `track_io_timing` (`--` when off, never an error). Best-effort absent
+  panel on 13–15, readable by any role. Pairs with the checkpoint/WAL
+  charts. TUI + Web. **M.**
+- [ ] **DDL progress in the Micro Lens detail** —
+  `pg_stat_progress_create_index` / `_cluster` (also covers `REINDEX
+  CONCURRENTLY`/`VACUUM FULL`) / `_analyze`, unioned by pid (near-copy of
+  the `vacuum_progress.sql` best-effort pattern, `LEFT JOIN pg_class` for
+  drop-safe names, no special grants): progress bar + phase for the
+  selected PID in the detail panel. TUI + Web. **S/M.**
+- [ ] **Snapshot export / incident bookmark** — serialize the displayed
+  `DbSnapshot` (already all-`Serialize`) to
+  `~/.local/state/pg_lens/exports/*.json`. TUI: export the frozen (paused)
+  view — pause is a UI-side freeze, so label the export with the snapshot's
+  timestamp ("exported the paused view from 14:32:06"), not "now". Web:
+  settle the UX before building — either export the scrubber's pinned
+  moment (partial, HistoryPoint fields only) or the live snapshot with a
+  clear "live" label; decide, don't blend. **S.**
+
+Deferred from the same pass (architecture mismatch, not value): wait-event
+breakdown over time (stacked/heatmap) — `top_waits` aggregates dynamic
+wait-event names per snapshot, which doesn't fit the flat-scalar
+`HistoryPoint` row; needs its own discovery on historizing categorical data
+without blowing up the JSONL ring.
+
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
-- [ ] **I/O profile** — `pg_stat_io` (PG 16+ only), backend_type × context
-  reads/writes/hits with timing; best-effort absent panel on 13–15. Needs
-  `track_io_timing` grace (`--` for missing timing, never an error).
-- [ ] **DDL progress** — `pg_stat_progress_create_index` / `_cluster` /
-  `_analyze` joined into the Micro Lens detail panel (progress bar + phase
-  for the selected PID).
 - [ ] **SSL/connection security column** — `pg_stat_ssl` marker in the
   activity table ("who's connecting in plaintext"); silent-blank when the
   view is not visible — must never break the hot 2s path.
-- [ ] **Snapshot export / incident bookmark** — write the current (paused)
-  `DbSnapshot` to `~/.local/state/pg_lens/exports/*.json` (TUI keybinding)
-  and a download button (web) for postmortems.
 
 ## Backlog (deliberately deprioritized — owner decision 2026-07-15)
 
