@@ -258,6 +258,10 @@ export interface IndexRow {
 export interface SchemaSnapshot {
   collected_at_epoch_ms: number;
   tables: TableStatRow[];
+  /** v0.15: the TRUE (uncapped) table count — `tables` itself is capped at
+   * the configured `schema_table_limit` (default 200). `null` only before
+   * the first successful slow collection of a session. */
+  tables_total: number | null;
   table_bloat: BloatRow[];
   index_bloat: BloatRow[];
   /** null only before the first successful slow collection of a session. */

@@ -221,6 +221,12 @@ pub fn replication_slot_from_row(row: &Row) -> Result<ReplicationSlotRow, tokio_
     })
 }
 
+/// Maps the single row of `queries/table_stats_total.sql` onto the TRUE
+/// (uncapped) table count (v0.15).
+pub fn table_stats_total_from_row(row: &Row) -> Result<i64, tokio_postgres::Error> {
+    row.try_get("tables_total")
+}
+
 /// Maps one row of `queries/table_stats_post_130000.sql` onto
 /// [`TableStatRow`]. Counters arrive already COALESCEd to 0 by the SQL —
 /// except `idx_scan`/`idx_tup_fetch`, whose NULL ("table has no indexes")

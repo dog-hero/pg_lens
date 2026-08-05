@@ -423,8 +423,16 @@ pub struct SchemaSnapshot {
     /// When this collection ran (Unix epoch milliseconds) — the staleness
     /// indicator frontends show ("collected Xs ago").
     pub collected_at_epoch_ms: u64,
-    /// Top tables by total size (the query caps at 200 rows).
+    /// Top tables by total size (capped at the configured
+    /// `schema_table_limit`, default 200 — see `crate::queries`).
     pub tables: Vec<TableStatRow>,
+    /// v0.15: the TRUE (uncapped) `pg_stat_user_tables` row count for the
+    /// connected database — lets frontends show an honest "N of M tables"
+    /// instead of quietly presenting `tables.len()` (a truncated list) as
+    /// the total. `None` only before the first successful slow collection
+    /// of a session (same convention as `vacuum_cluster_age`).
+    #[serde(default)]
+    pub tables_total: Option<i64>,
     /// Estimated table bloat (empty until Fase S2).
     pub table_bloat: Vec<BloatRow>,
     /// Estimated btree index bloat (empty until Fase S2).
@@ -837,6 +845,12 @@ impl SchemaSnapshot {
         let indexes = build_index_rows(index_catalog);
         Self {
             collected_at_epoch_ms: epoch_ms_now(),
+            // v0.15: the mock deliberately reports MORE real tables than it
+            // fabricates rows for (7 total, 4 shown) — this is what exercises
+            // the honest "N of M tables" footer under `--mock`/the PTY e2e,
+            // never a plain "4 tables" claim that would misrepresent a
+            // truncated list as complete.
+            tables_total: Some(tables.len() as i64 + 3),
             tables,
             table_bloat,
             index_bloat,

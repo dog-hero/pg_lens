@@ -24,11 +24,15 @@
 //! ## Bounding
 //!
 //! Two independent caps, both enforced in [`SchemaGrowthTracker::update`]:
-//! - **Table count**: at most [`MAX_TRACKED_TABLES`] rings, one per oid
-//!   present in the latest schema collection. The `table_stats` SQL already
-//!   caps its result at `queries::TABLE_STATS_LIMIT` (200, top-N by size),
-//!   so this simply mirrors that cap defensively — never trusts the caller
-//!   to have capped its input.
+//! - **Table count**: at most `max_tables` rings (set at construction via
+//!   [`SchemaGrowthTracker::new`]), one per oid present in the latest schema
+//!   collection. Since v0.15 this
+//!   follows the configured `schema_table_limit` (never below
+//!   [`MAX_TRACKED_TABLES`] — the poller passes
+//!   `max(schema_table_limit, MAX_TRACKED_TABLES)`, see `crate::poller`),
+//!   rather than a number hardcoded independently of the `table_stats`
+//!   query's own row cap; the tracker never trusts the caller to have
+//!   capped its input either way.
 //! - **Ring depth**: each ring holds at most [`RING_CAP`] samples
 //!   (`VecDeque`, oldest evicted first).
 //! - **Eviction of vanished tables**: [`SchemaGrowthTracker::update`]
@@ -36,10 +40,12 @@
 //!   the fresh collection — a dropped/renamed-away/recreated table's old
 //!   ring is discarded immediately, never accumulating indefinitely.
 //!
-//! Worst-case memory: `MAX_TRACKED_TABLES (200) * RING_CAP (90) * size_of(SizeSample) (16 bytes)`
-//! ≈ 288 KB, plus `VecDeque`/`HashMap` overhead (a small constant multiple)
-//! — trivial, and it cannot grow further no matter how many tables the
-//! database has or how long the session runs.
+//! Worst-case memory: `max_tables * RING_CAP (90) * size_of(SizeSample) (16
+//! bytes)` — at the [`MAX_TRACKED_TABLES`] default (200) that's ≈288 KB; at
+//! the highest configurable `schema_table_limit` (10,000) it's ≈14.4 MB,
+//! still trivial for a monitoring tool's own footprint, and it cannot grow
+//! further no matter how many tables the database has or how long the
+//! session runs.
 //!
 //! ## Persistence: none (in-memory only)
 //!
@@ -203,14 +209,27 @@ pub fn severity(total_bytes: i64, growth_pct: Option<f32>) -> Option<Severity> {
 /// Poller-owned tracker: one [`TableGrowthRing`] per table oid, fed only by
 /// successful slow-cadence schema collections. See the module docs for the
 /// oid-keying rationale and the bounding guarantees.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SchemaGrowthTracker {
     rings: HashMap<i64, TableGrowthRing>,
+    /// v0.15: table-count cap, no longer always [`MAX_TRACKED_TABLES`] — the
+    /// poller passes `max(schema_table_limit, MAX_TRACKED_TABLES)` so the
+    /// ring follows a raised `--schema-table-limit` instead of silently
+    /// discarding growth data for every table past 200. See `crate::poller`
+    /// for the exact formula.
+    max_tables: usize,
 }
 
 impl SchemaGrowthTracker {
-    pub fn new() -> Self {
-        Self::default()
+    /// `max_tables` bounds how many per-table rings this tracker will ever
+    /// hold at once (see the module docs' "Bounding" section) — floored at 1
+    /// so a pathological `0` cannot silently disable tracking in a way that
+    /// looks like "no data" rather than "misconfigured".
+    pub fn new(max_tables: usize) -> Self {
+        Self {
+            rings: HashMap::new(),
+            max_tables: max_tables.max(1),
+        }
     }
 
     /// Feeds one fresh schema collection's table sizes into the tracker: a
@@ -218,10 +237,9 @@ impl SchemaGrowthTracker {
     /// ring whose oid is NOT present in `tables` is dropped — this is the
     /// single place eviction happens, run every slow-cadence collection.
     pub fn update(&mut self, tables: &[TableStatRow], now_epoch_ms: u64) {
-        let mut fresh: HashMap<i64, TableGrowthRing> = HashMap::with_capacity(
-            tables.len().min(MAX_TRACKED_TABLES),
-        );
-        for row in tables.iter().take(MAX_TRACKED_TABLES) {
+        let mut fresh: HashMap<i64, TableGrowthRing> =
+            HashMap::with_capacity(tables.len().min(self.max_tables));
+        for row in tables.iter().take(self.max_tables) {
             let mut ring = self.rings.remove(&row.oid).unwrap_or_default();
             ring.push(SizeSample {
                 epoch_ms: now_epoch_ms,
@@ -297,7 +315,7 @@ mod tests {
 
     #[test]
     fn ring_bounds_depth_and_evicts_oldest() {
-        let mut tracker = SchemaGrowthTracker::new();
+        let mut tracker = SchemaGrowthTracker::new(MAX_TRACKED_TABLES);
         for i in 0..(RING_CAP as u64 + 5) {
             tracker.update(&[row(1, "t", 1000 + i as i64)], i * 60_000);
         }
@@ -310,7 +328,7 @@ mod tests {
 
     #[test]
     fn update_evicts_vanished_tables() {
-        let mut tracker = SchemaGrowthTracker::new();
+        let mut tracker = SchemaGrowthTracker::new(MAX_TRACKED_TABLES);
         tracker.update(&[row(1, "a", 100), row(2, "b", 200)], 0);
         assert_eq!(tracker.tracked_count(), 2);
         // Table 2 dropped/renamed away: only table 1 appears next collection.
@@ -326,12 +344,34 @@ mod tests {
 
     #[test]
     fn update_caps_total_tracked_tables() {
-        let mut tracker = SchemaGrowthTracker::new();
+        let mut tracker = SchemaGrowthTracker::new(MAX_TRACKED_TABLES);
         let rows: Vec<TableStatRow> = (0..(MAX_TRACKED_TABLES as i64 + 20))
             .map(|oid| row(oid, "t", 1000))
             .collect();
         tracker.update(&rows, 0);
         assert_eq!(tracker.tracked_count(), MAX_TRACKED_TABLES);
+    }
+
+    /// v0.15: a raised `schema_table_limit` (`max_tables` above
+    /// [`MAX_TRACKED_TABLES`]) lets the tracker hold more rings than the old
+    /// hardcoded 200.
+    #[test]
+    fn update_follows_a_raised_max_tables_cap() {
+        let mut tracker = SchemaGrowthTracker::new(MAX_TRACKED_TABLES + 50);
+        let rows: Vec<TableStatRow> = (0..(MAX_TRACKED_TABLES as i64 + 50))
+            .map(|oid| row(oid, "t", 1000))
+            .collect();
+        tracker.update(&rows, 0);
+        assert_eq!(tracker.tracked_count(), MAX_TRACKED_TABLES + 50);
+    }
+
+    /// A pathological `max_tables = 0` must not silently disable tracking —
+    /// it floors to 1.
+    #[test]
+    fn new_floors_a_zero_max_tables_to_one() {
+        let mut tracker = SchemaGrowthTracker::new(0);
+        tracker.update(&[row(1, "a", 100), row(2, "b", 200)], 0);
+        assert_eq!(tracker.tracked_count(), 1);
     }
 
     #[test]
@@ -404,7 +444,7 @@ mod tests {
 
     #[test]
     fn apply_populates_rows_from_rings_leaving_untracked_as_none() {
-        let mut tracker = SchemaGrowthTracker::new();
+        let mut tracker = SchemaGrowthTracker::new(MAX_TRACKED_TABLES);
         tracker.update(&[row(1, "a", 100_000_000)], 0);
         tracker.update(&[row(1, "a", 150_000_000)], 1_000_000);
         let mut rows = vec![row(1, "a", 150_000_000), row(2, "b", 500)];

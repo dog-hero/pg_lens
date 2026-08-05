@@ -391,6 +391,11 @@ pub struct AppConfig {
     /// Schema Lens collection interval in seconds
     /// (`--schema-interval` / `PG_LENS_SCHEMA_INTERVAL`).
     pub schema_interval: Option<u64>,
+    /// Schema Lens `table_stats` row cap (`--schema-table-limit` /
+    /// `PG_LENS_SCHEMA_TABLE_LIMIT`), clamped to
+    /// `[SCHEMA_TABLE_LIMIT_MIN, SCHEMA_TABLE_LIMIT_MAX]` by the caller
+    /// (`crate::queries::clamp_schema_table_limit`). Default 200 when unset.
+    pub schema_table_limit: Option<u32>,
     /// Web `serve` bind address (`--listen` / `PG_LENS_LISTEN`).
     pub listen: Option<String>,
     /// Read-only mode: hard-disables every mutating/admin action (`c`/`K`
@@ -677,13 +682,15 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         writeln!(
             f,
-            "interval = 5.0\nschema_interval = 120\nlisten = \"0.0.0.0:9000\"\nread_only = true"
+            "interval = 5.0\nschema_interval = 120\nschema_table_limit = 500\n\
+             listen = \"0.0.0.0:9000\"\nread_only = true"
         )
         .unwrap();
         let (cfg, warnings) = load_app_config(&config_spec(f.path()));
         assert!(warnings.is_empty());
         assert_eq!(cfg.interval, Some(5.0));
         assert_eq!(cfg.schema_interval, Some(120));
+        assert_eq!(cfg.schema_table_limit, Some(500));
         assert_eq!(cfg.listen.as_deref(), Some("0.0.0.0:9000"));
         assert_eq!(cfg.read_only, Some(true));
     }

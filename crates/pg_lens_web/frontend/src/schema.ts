@@ -56,6 +56,25 @@ export function growthSeverity(
   return "none";
 }
 
+/** v0.15: the honest table-count clause, composing the v0.12 filter's
+ * `shown/fetched` with the true (uncapped) total — mirrors the TUI's
+ * `ui/schema_lens.rs::table_count_text`. `fetched` is `tables.length` (the
+ * possibly-truncated list this snapshot carries); `total` is
+ * `tables_total` (`null` only before the first successful collection).
+ * `shown` is the post-filter row count (`=== fetched` when unfiltered). */
+export function tableCountText(
+  shown: number,
+  fetched: number,
+  total: number | null,
+): string {
+  const filtered = shown !== fetched;
+  const truncated = total !== null && total > fetched;
+  const base = filtered ? `${shown}/${fetched}` : `${fetched}`;
+  return truncated
+    ? `${base} of ${total} tables — raise schema_table_limit or filter`
+    : `${base} tables`;
+}
+
 type SortKey =
   | "name"
   | "total_bytes"
@@ -254,12 +273,14 @@ export class SchemaLens {
       s.table_bloat.length === 0 && s.index_bloat.length === 0
         ? "bloat: on-demand (run R in the TUI)"
         : "estimated bloat";
-    // v0.12: shown/total once a filter narrows the list — mirrors the
-    // activity table's count element, folded into this same staleness line
-    // (the Schema tab has no separate count badge next to its heading).
-    const countText = this.filter
-      ? `${s.tables.filter((t) => schemaRowMatches(t, this.filter)).length}/${s.tables.length} tables`
-      : `${s.tables.length} tables`;
+    // v0.12: shown/fetched once a filter narrows the list, folded into this
+    // same staleness line (the Schema tab has no separate count badge next
+    // to its heading). v0.15: composed with the true (uncapped) total, so a
+    // truncated `tables` list never reads as complete.
+    const shown = this.filter
+      ? s.tables.filter((t) => schemaRowMatches(t, this.filter)).length
+      : s.tables.length;
+    const countText = tableCountText(shown, s.tables.length, s.tables_total);
     this.staleness.textContent =
       `db: ${this.database} · ${countText} · ` +
       `collected ${humanDuration(ageSecs)} ago · ${bloatNote}`;

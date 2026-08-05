@@ -115,6 +115,23 @@ struct ConnArgs {
     )]
     schema_interval: Option<u64>,
 
+    /// Schema Lens `table_stats` row cap: the Tables view shows the top-N
+    /// tables by size (default 200, clamped 10-10000). Raise this on a
+    /// cluster with more than 200 user tables so the honest "N of M tables"
+    /// footer stops truncating; the underlying query is restructured to
+    /// keep the expensive exact-size computation bounded to this many rows
+    /// regardless of how high it is raised (see
+    /// `queries/table_stats_post_130000.sql`). Also settable via
+    /// `PG_LENS_SCHEMA_TABLE_LIMIT` or `schema_table_limit` in config.toml.
+    /// [default: 200]
+    #[arg(
+        long,
+        value_name = "N",
+        env = "PG_LENS_SCHEMA_TABLE_LIMIT",
+        global = true
+    )]
+    schema_table_limit: Option<u32>,
+
     /// Use built-in mock data instead of a real database (dev/demo mode).
     #[arg(long, global = true)]
     mock: bool,
@@ -270,6 +287,19 @@ impl ConnArgs {
     fn schema_interval(&self, config: &settings::AppConfig) -> Duration {
         let secs = self.schema_interval.or(config.schema_interval).unwrap_or(60);
         Duration::from_secs(secs).max(pg_lens_core::poller::SCHEMA_INTERVAL_MIN)
+    }
+
+    /// `--schema-table-limit`, then env, then `config.toml`, then the
+    /// 200-row default — clamped to `[SCHEMA_TABLE_LIMIT_MIN,
+    /// SCHEMA_TABLE_LIMIT_MAX]` (same flag → env → config → default
+    /// precedence as `interval`/`schema_interval` above).
+    fn schema_table_limit(&self, config: &settings::AppConfig) -> usize {
+        let requested = self
+            .schema_table_limit
+            .or(config.schema_table_limit)
+            .map(|n| n as usize)
+            .unwrap_or(pg_lens_core::queries::SCHEMA_TABLE_LIMIT_DEFAULT);
+        pg_lens_core::queries::clamp_schema_table_limit(requested)
     }
 
     /// `--read-only`, then `PG_LENS_READ_ONLY`, then `config.toml`'s
@@ -633,6 +663,7 @@ fn picker_entries(services: Vec<ServiceSummary>) -> Vec<PickerEntry> {
 /// and `--mock` have no picker, so they simply drop it (the poller never
 /// resolves that branch of its select, per `poller::wait_db_switch`'s
 /// dropped-sender contract) — real switching is TUI-only for now.
+#[allow(clippy::too_many_arguments)] // one call site's worth of poller wiring
 fn spawn_poller(
     conn: Option<Resolved>,
     interval_rx: watch::Receiver<Duration>,
@@ -641,6 +672,7 @@ fn spawn_poller(
     admin_rx: mpsc::Receiver<AdminCommand>,
     shutdown_rx: watch::Receiver<bool>,
     db_switch_rx: mpsc::Receiver<String>,
+    schema_table_limit: usize,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, String, JoinHandle<()>) {
     match conn {
         // The mock has no DB queries to cancel on shutdown — a already-done
@@ -675,6 +707,7 @@ fn spawn_poller(
                 Some(history_path_fn),
                 shutdown_rx,
                 db_switch_rx,
+                schema_table_limit,
             );
             (snapshots, label, handle)
         }
@@ -984,6 +1017,7 @@ async fn run_serve(mut conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()
         admin_rx,
         shutdown_rx,
         db_switch_rx,
+        conn.schema_table_limit(&config),
     );
 
     let read_only = conn.read_only(&config);
@@ -1038,6 +1072,7 @@ async fn run(
 ) -> color_eyre::Result<()> {
     let interval = conn_args.interval(config);
     let schema_interval = conn_args.schema_interval(config);
+    let schema_table_limit = conn_args.schema_table_limit(config);
     let mut app = App::new();
     app.refresh_interval = interval;
     app.read_only = conn_args.read_only(config);
@@ -1106,6 +1141,7 @@ async fn run(
                 admin_rx,
                 shutdown_rx,
                 db_switch_rx,
+                schema_table_limit,
             );
             poller_handle = Some(handle);
             app.host = label;
@@ -1203,6 +1239,7 @@ async fn run(
                 admin_rx,
                 shutdown_rx,
                 db_switch_rx,
+                schema_table_limit,
             );
             poller_handle = Some(handle);
             update(&mut app, Action::HostLabel(label));
@@ -1405,6 +1442,7 @@ mod tests {
             list_services: false,
             interval: None,
             schema_interval: None,
+            schema_table_limit: None,
             mock: false,
             read_only: false,
             config_url: Some("https://example.com/from-flag.toml".to_string()),
@@ -1428,6 +1466,7 @@ mod tests {
             list_services: false,
             interval: None,
             schema_interval: None,
+            schema_table_limit: None,
             mock: false,
             read_only: false,
             config_url: None,
@@ -1452,6 +1491,7 @@ mod tests {
             list_services: false,
             interval: None,
             schema_interval: None,
+            schema_table_limit: None,
             mock: false,
             read_only: false,
             config_url: None,

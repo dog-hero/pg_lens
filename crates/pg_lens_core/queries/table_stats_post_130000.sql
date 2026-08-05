@@ -16,13 +16,44 @@
 --     repo-wide convention for time values; EXTRACT(epoch..) is numeric on
 --     PG >= 14 but float8 on 13, hence the explicit cast).
 --
--- LIMIT guards against databases with tens of thousands of tables: the top
--- 200 by total size is what the lens can usefully show.
---
 -- v0.14 added `relid` (the table's `oid`, ::int8 — tokio-postgres has no
 -- native `oid` mapping) so the poller can key the per-table size-growth
 -- ring on something that survives a rename but correctly resets on a
 -- drop+recreate (a fresh oid), unlike schema+name.
+--
+-- v0.15 (BUG fix — honest table counts + limit fix):
+--   * `$1` is the caller-supplied row cap (`schema_table_limit`, default
+--     200, configurable via `--schema-table-limit`/config.toml/env, clamped
+--     10..10000) — previously a hardcoded `LIMIT` of 200 that silently
+--     truncated the list with no way to raise it and no signal that it had.
+--     The TRUE total row count is a separate scalar query
+--     (`table_stats_total.sql`, run in the same transaction) — see that
+--     file's header for why it is not folded into this one.
+--   * PERF: naively `ORDER BY pg_total_relation_size(s.relid) DESC LIMIT
+--     $1` evaluates the (I/O-touching) size function for EVERY table in
+--     the database before the LIMIT trims the output — a 10k-table
+--     database pays 10k lseek-class calls every slow tick just to throw
+--     away all but N of them. Instead, the `ranked` CTE below picks the
+--     top-$1 CANDIDATES using `pg_class.relpages` — a plain in-memory
+--     catalog column, no I/O — and the outer query computes the exact
+--     `pg_total_relation_size`/`pg_table_size`/`pg_indexes_size` only for
+--     those $1 survivors. TRADEOFF: `relpages` is only as fresh as the
+--     table's last VACUUM/ANALYZE, so a table that grew explosively since
+--     then (e.g. a huge bulk COPY with autovacuum/autoanalyze still
+--     pending) could rank slightly low and miss the cut this tick — a
+--     stale-ranking risk, not a wrong-answer risk: the sizes reported for
+--     whichever rows DO make it through are still the live, exact
+--     pg_*_size() calls, never estimated from relpages. Accepted as the
+--     right cost/accuracy trade for "which N tables should the dashboard
+--     show" on large clusters; the growth ring and vacuum/bloat views are
+--     unaffected (bloat estimation already reads relpages directly).
+WITH ranked AS (
+    SELECT s.relid
+      FROM pg_stat_user_tables AS s
+      JOIN pg_class AS c ON c.oid = s.relid
+     ORDER BY c.relpages DESC
+     LIMIT $1
+)
 SELECT
       s.relid::int8 AS relid,
       s.schemaname::text AS schemaname,
@@ -51,5 +82,5 @@ SELECT
       coalesce(s.analyze_count, 0) AS analyze_count,
       coalesce(s.autoanalyze_count, 0) AS autoanalyze_count
  FROM pg_stat_user_tables AS s
-ORDER BY pg_total_relation_size(s.relid) DESC
-LIMIT 200;
+ JOIN ranked AS r ON r.relid = s.relid
+ORDER BY pg_total_relation_size(s.relid) DESC;

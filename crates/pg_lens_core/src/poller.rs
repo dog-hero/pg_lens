@@ -79,16 +79,23 @@ struct SchemaState {
     /// collection (`store`) — see `crate::schema_growth` for the bounding
     /// guarantees and the oid-keying rationale.
     growth: SchemaGrowthTracker,
+    /// v0.15: the configured `table_stats` row cap (`schema_table_limit`),
+    /// bound into the SQL as `$1`. Kept here (not just passed once at
+    /// construction) so [`Self::reset`] can rebuild `growth` with the same
+    /// cap after a database switch.
+    table_stats_limit: i64,
 }
 
 impl SchemaState {
-    fn new(interval: Duration, refresh_rx: watch::Receiver<u64>) -> Self {
+    fn new(interval: Duration, refresh_rx: watch::Receiver<u64>, table_stats_limit: usize) -> Self {
+        let table_stats_limit = table_stats_limit as i64;
         Self {
             interval: interval.max(SCHEMA_INTERVAL_MIN),
             refresh_rx,
             last_attempt: None,
             current: None,
-            growth: SchemaGrowthTracker::new(),
+            growth: SchemaGrowthTracker::new(growth_cap(table_stats_limit)),
+            table_stats_limit,
         }
     }
 
@@ -146,6 +153,7 @@ impl SchemaState {
         self.current = Some(Arc::new(SchemaSnapshot {
             collected_at_epoch_ms: now,
             tables: collection.tables,
+            tables_total: Some(collection.tables_total),
             table_bloat,
             index_bloat,
             vacuum_cluster_age: collection.vacuum_cluster_age,
@@ -168,7 +176,7 @@ impl SchemaState {
         // The old database's tables (and their oids) are meaningless for
         // the new database — start the ring fresh, same reasoning as
         // dropping `current`.
-        self.growth = SchemaGrowthTracker::new();
+        self.growth = SchemaGrowthTracker::new(growth_cap(self.table_stats_limit));
     }
 
     /// Stores a failed collection: the last good data (and its original
@@ -179,6 +187,7 @@ impl SchemaState {
         self.current = Some(Arc::new(SchemaSnapshot {
             collected_at_epoch_ms: previous.map_or_else(epoch_ms_now, |p| p.collected_at_epoch_ms),
             tables: previous.map(|p| p.tables.clone()).unwrap_or_default(),
+            tables_total: previous.and_then(|p| p.tables_total),
             table_bloat: previous.map(|p| p.table_bloat.clone()).unwrap_or_default(),
             index_bloat: previous.map(|p| p.index_bloat.clone()).unwrap_or_default(),
             vacuum_cluster_age: previous.and_then(|p| p.vacuum_cluster_age.clone()),
@@ -188,6 +197,17 @@ impl SchemaState {
             status: SchemaStatus::Error(msg),
         }));
     }
+}
+
+/// v0.15: the [`SchemaGrowthTracker`]'s tracked-table cap follows the
+/// configured `schema_table_limit` upward but never shrinks below
+/// [`crate::schema_growth::MAX_TRACKED_TABLES`] — a defensive floor so a
+/// low `schema_table_limit` (min 10) still gives the growth ring its usual
+/// headroom. Worst-case memory stays bounded: `limit * RING_CAP (90) *
+/// size_of(SizeSample) (16 bytes)` — e.g. the max configurable limit
+/// (10,000) is ~14.4 MB, trivial for a monitoring tool's own footprint.
+fn growth_cap(table_stats_limit: i64) -> usize {
+    (table_stats_limit.max(0) as usize).max(crate::schema_growth::MAX_TRACKED_TABLES)
 }
 
 /// Query Lens (pg_stat_statements) collection state, owned by the poller
@@ -432,6 +452,11 @@ async fn execute_admin(client: &mut Client, q: &queries::QuerySet, cmd: AdminCom
 /// into `last_admin_action` on every subsequent snapshot, and re-polls
 /// immediately. Frontends without admin actions just drop the sender.
 ///
+/// `schema_table_limit` (v0.15) is the `table_stats` query's row cap
+/// (`--schema-table-limit`/config.toml/env, default 200) — bound as `$1`
+/// into `queries::QuerySet::table_stats`, clamped by the caller via
+/// `queries::clamp_schema_table_limit` before it ever reaches here.
+///
 /// `db_switch_rx` is U2's frontend→poller database-switch channel: one
 /// dbname per request (the TUI's `d` picker). The poller ends the current
 /// session (cancelling any in-flight query, exactly like shutdown) and
@@ -462,9 +487,10 @@ pub fn spawn(
     history_path_fn: Option<HistoryPathFn>,
     shutdown_rx: watch::Receiver<bool>,
     db_switch_rx: mpsc::Receiver<String>,
+    schema_table_limit: usize,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, JoinHandle<()>) {
     let (tx, rx) = watch::channel(Arc::new(DbSnapshot::connecting()));
-    let schema = SchemaState::new(schema_interval, schema_refresh_rx);
+    let schema = SchemaState::new(schema_interval, schema_refresh_rx, schema_table_limit);
     let handle = tokio::spawn(run(
         config,
         password_source,
@@ -795,7 +821,7 @@ async fn poll_loop(
         let now = Instant::now();
         if let Some(with_bloat) = schema.due(now) {
             schema.last_attempt = Some(now);
-            match collect_schema(client, &query_set, with_bloat).await {
+            match collect_schema(client, &query_set, with_bloat, schema.table_stats_limit).await {
                 Ok(collection) => schema.store(collection),
                 Err(msg) => schema.store_error(format!("schema collection failed: {msg}")),
             }
@@ -1149,6 +1175,9 @@ type BloatEstimate = Result<(Vec<BloatRow>, Vec<BloatRow>), String>;
 
 struct SchemaCollection {
     tables: Vec<crate::models::TableStatRow>,
+    /// v0.15: the TRUE (uncapped) table count, same essential transaction
+    /// as `tables` — see `table_stats_total.sql`.
+    tables_total: i64,
     /// F2 cluster-wide wraparound headline, collected alongside `tables` in
     /// the same essential transaction (a missing row would mean an empty
     /// `pg_database`, which cannot happen).
@@ -1176,18 +1205,27 @@ async fn collect_schema(
     client: &mut Client,
     q: &queries::QuerySet,
     with_bloat: bool,
+    table_stats_limit: i64,
 ) -> Result<SchemaCollection, String> {
     // One read-only transaction for the whole collection (pooler-safe).
     let stx = begin_read(client).await.map_err(|e| e.to_string())?;
     // Table stats are the collection's backbone: their failure fails it all.
     let table_rows = stx
-        .query(q.table_stats, &[])
+        .query(q.table_stats, &[&table_stats_limit])
         .await
         .map_err(|e| e.to_string())?;
     let mut tables = Vec::with_capacity(table_rows.len());
     for row in &table_rows {
         tables.push(db::table_stat_from_row(row).map_err(|e| e.to_string())?);
     }
+    // v0.15: the TRUE (uncapped) count — same essential transaction, so it
+    // fails together with `tables` rather than silently reporting a stale
+    // total from a previous collection under a different row cap.
+    let tables_total = stx
+        .query_one(q.table_stats_total, &[])
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|row| db::table_stats_total_from_row(&row).map_err(|e| e.to_string()))?;
 
     // Vacuum health / XID wraparound (F2): cheap catalog reads, run in the
     // same essential transaction as table_stats — their failure fails the
@@ -1259,6 +1297,7 @@ async fn collect_schema(
     }
     Ok(SchemaCollection {
         tables,
+        tables_total,
         vacuum_cluster_age,
         vacuum_tables,
         indexes,
@@ -1747,6 +1786,7 @@ mod tests {
             None,
             no_shutdown(),
             db_switch_rx(),
+            queries::SCHEMA_TABLE_LIMIT_DEFAULT,
         );
 
         assert!(matches!(rx.borrow().status, PollerStatus::Connecting));
@@ -1785,6 +1825,7 @@ mod tests {
             None,
             no_shutdown(),
             db_switch_rx(),
+            queries::SCHEMA_TABLE_LIMIT_DEFAULT,
         );
 
         tokio::time::timeout(Duration::from_secs(5), rx.changed())
@@ -1829,6 +1870,7 @@ mod tests {
             None,
             no_shutdown(),
             db_switch_rx(),
+            queries::SCHEMA_TABLE_LIMIT_DEFAULT,
         );
 
         // First attempt at ~0s, second after the 1s backoff. Poll the file
@@ -1913,7 +1955,7 @@ mod tests {
     #[test]
     fn force_refresh_signal_makes_the_next_tick_due() {
         let (refresh_tx, refresh_rx) = watch::channel(0u64);
-        let mut schema = SchemaState::new(Duration::from_secs(3600), refresh_rx);
+        let mut schema = SchemaState::new(Duration::from_secs(3600), refresh_rx, queries::SCHEMA_TABLE_LIMIT_DEFAULT);
         let t0 = Instant::now();
         schema.last_attempt = Some(t0); // just collected: not due for an hour
         assert_eq!(schema.due(t0 + Duration::from_secs(2)), None);
@@ -1936,7 +1978,7 @@ mod tests {
     #[test]
     fn auto_cadence_skips_bloat_force_refresh_includes_it() {
         let (refresh_tx, refresh_rx) = watch::channel(0u64);
-        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx);
+        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx, queries::SCHEMA_TABLE_LIMIT_DEFAULT);
         let t0 = Instant::now();
         // Never collected → auto due, but table-stats only (no bloat).
         assert_eq!(schema.due(t0), Some(false));
@@ -1952,10 +1994,11 @@ mod tests {
     /// while refreshing the table stats.
     #[test]
     fn auto_tick_carries_bloat_forward() {
-        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx());
+        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx(), queries::SCHEMA_TABLE_LIMIT_DEFAULT);
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
+            tables_total: good.tables_total.unwrap_or_default(),
             vacuum_cluster_age: good.vacuum_cluster_age.clone(),
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),
@@ -1966,6 +2009,7 @@ mod tests {
         fresh.pop();
         schema.store(SchemaCollection {
             tables: fresh.clone(),
+            tables_total: good.tables_total.unwrap_or_default(),
             vacuum_cluster_age: good.vacuum_cluster_age.clone(),
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),
@@ -1987,10 +2031,11 @@ mod tests {
     /// objects, so carrying it forward under the new name would mislead.
     #[test]
     fn schema_state_reset_drops_the_last_collection() {
-        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx());
+        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx(), queries::SCHEMA_TABLE_LIMIT_DEFAULT);
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
+            tables_total: good.tables_total.unwrap_or_default(),
             vacuum_cluster_age: good.vacuum_cluster_age.clone(),
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),
@@ -2015,10 +2060,11 @@ mod tests {
     /// flips to Error. Mirrors the activity pipeline's resilience.
     #[test]
     fn schema_error_keeps_last_good_tables() {
-        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx());
+        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx(), queries::SCHEMA_TABLE_LIMIT_DEFAULT);
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
+            tables_total: good.tables_total.unwrap_or_default(),
             vacuum_cluster_age: good.vacuum_cluster_age.clone(),
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),
@@ -2043,10 +2089,11 @@ mod tests {
     /// previous bloat vectors are kept, and the status carries the error.
     #[test]
     fn bloat_failure_keeps_table_stats_and_previous_bloat() {
-        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx());
+        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx(), queries::SCHEMA_TABLE_LIMIT_DEFAULT);
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
+            tables_total: good.tables_total.unwrap_or_default(),
             vacuum_cluster_age: good.vacuum_cluster_age.clone(),
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),
@@ -2058,6 +2105,7 @@ mod tests {
         fresh_tables.pop(); // observably different from the previous set
         schema.store(SchemaCollection {
             tables: fresh_tables.clone(),
+            tables_total: good.tables_total.unwrap_or_default(),
             vacuum_cluster_age: good.vacuum_cluster_age.clone(),
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),

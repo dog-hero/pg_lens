@@ -10,7 +10,15 @@ pub struct QuerySet {
     pub activity: &'static str,
     pub blocking: &'static str,
     pub server_info: &'static str,
+    /// v0.15: takes one bind param (`$1`, the caller's `schema_table_limit`)
+    /// instead of a hardcoded `LIMIT` — see the SQL header for the
+    /// relpages-ranking restructure that keeps per-row size evaluation
+    /// bounded regardless of how high the limit is raised.
     pub table_stats: &'static str,
+    /// v0.15: the TRUE (uncapped) `pg_stat_user_tables` row count, run in
+    /// the same transaction as `table_stats` — see `table_stats_total.sql`
+    /// for why this is a separate query rather than a window function.
+    pub table_stats_total: &'static str,
     pub bloat_tables: &'static str,
     pub bloat_indexes: &'static str,
     /// Query Lens (pg_stat_statements). Only PREPARED when the extension is
@@ -80,7 +88,28 @@ pub struct QuerySet {
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
 /// const so the SQL and any future flag stay in sync (asserted by a test).
+/// Still literal in `bloat_tables.sql`/`bloat_indexes.sql` (unaffected by
+/// v0.15 — those are separate on-demand queries, not part of the reported
+/// "how many tables does this database have" count).
 pub const TABLE_STATS_LIMIT: usize = 200;
+
+/// v0.15: default value of the now-configurable `table_stats` row cap
+/// (`schema_table_limit` / `--schema-table-limit` / `PG_LENS_SCHEMA_TABLE_LIMIT`)
+/// — same number `TABLE_STATS_LIMIT` used to hardcode, kept as the default so
+/// behavior at default settings is unchanged.
+pub const SCHEMA_TABLE_LIMIT_DEFAULT: usize = TABLE_STATS_LIMIT;
+/// Floor for `schema_table_limit`: below this the Tables view would be
+/// nearly useless, and it protects against a fat-fingered `0`/`1`.
+pub const SCHEMA_TABLE_LIMIT_MIN: usize = 10;
+/// Ceiling for `schema_table_limit`: guards the relpages-ranked query (and
+/// the per-table growth ring it feeds) against an unbounded request.
+pub const SCHEMA_TABLE_LIMIT_MAX: usize = 10_000;
+
+/// Clamps a requested `schema_table_limit` into
+/// `[SCHEMA_TABLE_LIMIT_MIN, SCHEMA_TABLE_LIMIT_MAX]`.
+pub fn clamp_schema_table_limit(requested: usize) -> usize {
+    requested.clamp(SCHEMA_TABLE_LIMIT_MIN, SCHEMA_TABLE_LIMIT_MAX)
+}
 
 /// Row cap of the statements query (top N by total execution time).
 pub const STATEMENTS_LIMIT: usize = 100;
@@ -101,6 +130,9 @@ const BLOCKING_POST_140000: &str = include_str!("../queries/blocking_post_140000
 const SERVER_INFO_POST_130000: &str = include_str!("../queries/server_info_post_130000.sql");
 // n_ins_since_vacuum is PG 13+, matching pg_lens's version floor.
 const TABLE_STATS_POST_130000: &str = include_str!("../queries/table_stats_post_130000.sql");
+// v0.15: TRUE (uncapped) table count, version-independent 13+ — no
+// post_NNNNNN variant needed.
+const TABLE_STATS_TOTAL: &str = include_str!("../queries/table_stats_total.sql");
 // Estimated bloat, adapted from ioguix/pgsql-bloat-estimation
 // (BSD-2-Clause — attribution kept in the SQL headers). The originals are
 // 9.0/8.2-compatible, so one file serves the whole 13+ range (verified live
@@ -174,6 +206,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             blocking: BLOCKING_POST_140000,
             server_info: SERVER_INFO_POST_130000,
             table_stats: TABLE_STATS_POST_130000,
+            table_stats_total: TABLE_STATS_TOTAL,
             bloat_tables: BLOAT_TABLES,
             bloat_indexes: BLOAT_INDEXES,
             statements: STATEMENTS,
@@ -199,6 +232,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             blocking: BLOCKING_POST_140000,
             server_info: SERVER_INFO_POST_130000,
             table_stats: TABLE_STATS_POST_130000,
+            table_stats_total: TABLE_STATS_TOTAL,
             bloat_tables: BLOAT_TABLES,
             bloat_indexes: BLOAT_INDEXES,
             statements: STATEMENTS,
@@ -264,16 +298,35 @@ mod tests {
     }
 
     #[test]
-    fn table_stats_serves_pg13_and_up_with_the_row_cap() {
+    fn table_stats_serves_pg13_and_up_with_a_bind_param_limit() {
         for version in [130_011, 140_000, 160_003] {
             let q = for_version(version).expect("supported");
             assert!(q.table_stats.contains("pg_stat_user_tables"));
             assert!(q.table_stats.contains("n_ins_since_vacuum"), "PG13+ set");
+            // v0.15: the row cap is now a bind param, not a literal — a
+            // hardcoded `LIMIT 200` would silently defeat --schema-table-limit.
             assert!(
-                q.table_stats.contains(&format!("LIMIT {TABLE_STATS_LIMIT}")),
-                "SQL row cap must match TABLE_STATS_LIMIT"
+                q.table_stats.contains("LIMIT $1"),
+                "table_stats must take its row cap as a bind param"
             );
+            assert!(!q.table_stats.contains(&format!("LIMIT {TABLE_STATS_LIMIT}")));
+            // Perf restructure: rank by the cheap catalog column first, only
+            // then compute the expensive exact size for the survivors.
+            assert!(q.table_stats.contains("relpages"));
+            assert!(q.table_stats.to_lowercase().contains("ranked"));
+            assert!(q.table_stats_total.contains("pg_stat_user_tables"));
+            assert!(q.table_stats_total.contains("count(*)"));
+            assert!(q.table_stats_total.contains("AS tables_total"));
         }
+    }
+
+    #[test]
+    fn clamp_schema_table_limit_enforces_min_and_max() {
+        assert_eq!(clamp_schema_table_limit(0), SCHEMA_TABLE_LIMIT_MIN);
+        assert_eq!(clamp_schema_table_limit(1), SCHEMA_TABLE_LIMIT_MIN);
+        assert_eq!(clamp_schema_table_limit(200), 200);
+        assert_eq!(clamp_schema_table_limit(50_000), SCHEMA_TABLE_LIMIT_MAX);
+        assert_eq!(SCHEMA_TABLE_LIMIT_DEFAULT, 200);
     }
 
     #[test]

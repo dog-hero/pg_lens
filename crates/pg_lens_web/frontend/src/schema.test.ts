@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { growthSeverity, schemaRowMatches } from "./schema.ts";
+import { growthSeverity, schemaRowMatches, tableCountText } from "./schema.ts";
 import type { TableStatRow } from "./types.ts";
 
 /** Minimal row builder: only schema/name matter to the matcher. */
@@ -86,4 +86,29 @@ test("growthSeverity uses the absolute value (a large shrink also tints)", () =>
 
 test("growthSeverity is calm when growth is unknown", () => {
   assert.equal(growthSeverity(BIG, null), "none");
+});
+
+// v0.15: honest table counts — mirrors the TUI's `table_count_text`.
+test("tableCountText is plain when the fetched list is complete and unfiltered", () => {
+  assert.equal(tableCountText(4, 4, 4), "4 tables");
+  // Total not known yet (before the first successful collection).
+  assert.equal(tableCountText(4, 4, null), "4 tables");
+});
+
+test("tableCountText flags truncation when the total exceeds the fetched list", () => {
+  assert.equal(
+    tableCountText(200, 200, 250),
+    "200 of 250 tables — raise schema_table_limit or filter",
+  );
+});
+
+test("tableCountText composes with an active filter (shown/fetched)", () => {
+  assert.equal(tableCountText(3, 200, 200), "3/200 tables");
+});
+
+test("tableCountText composes a filter AND truncation together", () => {
+  assert.equal(
+    tableCountText(3, 200, 250),
+    "3/200 of 250 tables — raise schema_table_limit or filter",
+  );
 });

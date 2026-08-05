@@ -573,11 +573,20 @@ fn table_column_width(area_width: u16) -> usize {
     usize::from(area_width.saturating_sub(overhead))
 }
 
-/// `db: shop · 4 tables · collected 12s ago · ESTIMATED bloat` — which
-/// database (the lens is per-database), how fresh the slow collection is,
-/// and either the mandatory bloat-estimate label or how to get one: an
+/// `db: shop · 4 of 250 tables — raise schema_table_limit or filter ·
+/// collected 12s ago · ESTIMATED bloat` (truncated) or plain
+/// `db: shop · 4 tables · collected 12s ago · ESTIMATED bloat` (complete) —
+/// which database (the lens is per-database), how fresh the slow collection
+/// is, and either the mandatory bloat-estimate label or how to get one: an
 /// `idx_scan = 0`-style claim means nothing if counters were zeroed five
 /// minutes ago (PRD pillar 6).
+///
+/// v0.15: `n` used to be `schema.tables.len()` presented as if it were the
+/// database's total table count — but that list is itself capped
+/// (`schema_table_limit`, default 200), so a cluster with 500 tables showed
+/// a confidently wrong "200 tables". [`table_count_text`] compares against
+/// `schema.tables_total` (the true, uncapped count) and only claims
+/// completeness when the two actually match.
 fn draw_footer(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
     let staleness_secs =
         (pg_lens_core::history::epoch_ms_now().saturating_sub(schema.collected_at_epoch_ms))
@@ -591,12 +600,27 @@ fn draw_footer(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
         "ESTIMATED bloat (needs fresh ANALYZE) \u{b7} R: re-estimate"
     };
     let line = Line::from(format!(
-        " db: {db} \u{b7} {n} tables \u{b7} collected {staleness_secs}s ago \u{b7} {bloat_note}",
+        " db: {db} \u{b7} {count_text} \u{b7} collected {staleness_secs}s ago \u{b7} {bloat_note}",
         db = app.snapshot.vitals.database,
-        n = schema.tables.len(),
+        count_text = table_count_text(schema.tables.len(), schema.tables_total),
     ))
     .dim();
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// The footer's honest table-count clause. `shown` is the length of the
+/// (possibly truncated) `tables` list this snapshot actually carries;
+/// `total` is the true `pg_stat_user_tables` row count (`None` only before
+/// the first successful slow collection). Plain `"N tables"` when the list
+/// is complete (or the true total is not yet known); `"N of M tables —
+/// raise schema_table_limit or filter"` when it is truncated.
+fn table_count_text(shown: usize, total: Option<i64>) -> String {
+    match total {
+        Some(total) if total > shown as i64 => {
+            format!("{shown} of {total} tables \u{2014} raise schema_table_limit or filter")
+        }
+        _ => format!("{shown} tables"),
+    }
 }
 
 /// Detail panel over the lower part of the lens: full vacuum/analyze stats,
@@ -751,6 +775,42 @@ mod tests {
         assert_eq!(table_column_width(120), 38);
         assert!(table_column_width(80) < table_column_width(120));
         assert_eq!(table_column_width(10), 0);
+    }
+
+    #[test]
+    fn table_count_text_is_honest_about_truncation() {
+        // Complete: total unknown yet (first collection still pending).
+        assert_eq!(table_count_text(4, None), "4 tables");
+        // Complete: total matches what's shown.
+        assert_eq!(table_count_text(4, Some(4)), "4 tables");
+        // Truncated: total exceeds the fetched list.
+        assert_eq!(
+            table_count_text(200, Some(250)),
+            "200 of 250 tables \u{2014} raise schema_table_limit or filter"
+        );
+    }
+
+    /// The mock schema (v0.15) deliberately reports MORE real tables than it
+    /// fabricates rows for, so the default `--mock` screen exercises the
+    /// honest truncated footer, not just the plain "N tables" case.
+    #[test]
+    fn footer_shows_honest_truncated_count_under_mock() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::SchemaLens;
+        let backend = ratatui::backend::TestBackend::new(160, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("of"), "{screen}");
+        assert!(screen.contains("raise schema_table_limit"), "{screen}");
     }
 
     #[test]
