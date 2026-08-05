@@ -177,7 +177,7 @@ service picker for `pg_lens serve` — TTY prompt with a numbered list when a
 services file exists and nothing was selected (auto-select with notice when
 exactly one); non-TTY keeps the v0.13 fail-loud.
 
-## v0.15 — "Schema Lens completo" (in progress — owner-selected 2026-08-05)
+## v0.15 — "Schema Lens completo" (shipped — see Shipped section)
 
 From the 2026-08-05 Schema-Lens-focused discovery, seeded by owner reports.
 Two of the three reports were confirmed as real defects/gaps with code evidence.
@@ -246,6 +246,16 @@ exhaustion, matview badge / TOAST split / per-table cache-hit columns.
 
 ## Shipped
 
+- **v0.15.0** — "Schema Lens completo": honest `N of M tables` counts with
+  a configurable, perf-bounded `--schema-table-limit` (bug fix for a
+  silent `LIMIT 200`); on-demand table structure detail on `Enter`
+  (columns, constraints, referencing FKs, index definitions, fetched via
+  a new request/response channel, never on the poll cadence); native
+  partitioned-table collapsing into an aggregated parent row (`p` reveals
+  leaves), including a fix for PG16 double-counting an all-zero parent
+  stats row; and an `x` cross-lens jump from a selected table into a
+  Query-Lens filter for statements mentioning it, plus a new per-table
+  lock indicator — all in both TUI and Web Lens.
 - **v0.14.0** — "See the trend, not just the moment": widened the
   persisted `SnapshotHistory` with connections/cache-hit%/lock-pressure%/
   oldest-XID-age and added vitals trend arrows (↑/↓/→ vs ~5 min ago) to the
