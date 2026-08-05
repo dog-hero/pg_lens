@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use pg_lens_core::{AdminCommand, AdminKind, AdminOutcome, DbSnapshot, PollerStatus};
+use pg_lens_core::{
+    AdminCommand, AdminKind, AdminOutcome, DbSnapshot, PollerStatus, TableDetailRequest,
+};
 use ratatui::widgets::TableState;
 
 /// Default poll interval; `+`/`-` move it in [`REFRESH_STEP`] steps.
@@ -520,6 +522,19 @@ pub struct App {
     /// selection (the panel follows it), `Enter`/`Esc` close the panel,
     /// `Tab` closes it and switches lens, `q` quits as always.
     pub detail_open: bool,
+    /// v0.15: current scroll offset (in lines) of the Schema Lens table
+    /// detail overlay's `\d` sections (columns/constraints/indexes) — the
+    /// only detail overlay that scrolls independently of `j`/`k` moving the
+    /// underlying row selection (see `handle_key`'s dedicated arms). Reset
+    /// to 0 whenever a fresh [`TableDetailRequest`] is queued (opening the
+    /// overlay, or moving the selection while it is open).
+    pub table_detail_scroll: u16,
+    /// v0.15: at most one pending on-demand table-detail request, queued by
+    /// `update()` (Enter on a Schema Lens table, or moving the selection
+    /// while its detail overlay is open) and drained by the main loop into
+    /// the poller's `mpsc::Sender<TableDetailRequest>` — the exact mirror of
+    /// `pending_db_switch`.
+    pub table_detail_request: Option<TableDetailRequest>,
     /// Whether the Micro Lens's full waits panel is open (U3, `w` toggles).
     /// Overlay semantics like `detail_open` (they are mutually exclusive —
     /// opening one closes the other): `Esc` closes it WITHOUT arming the
@@ -632,6 +647,13 @@ pub struct App {
     pub schema_filter: String,
     pub schema_filter_editing: bool,
     pub schema_filter_saved: String,
+    /// v0.15's partition collapsing: `false` (default) hides
+    /// `TableStatRow::is_partition` rows from `schema_row_order` in favor of
+    /// their aggregated parent row; `p` toggles it. Tables view only (same
+    /// scope as `schema_filter`) — persists across lens switches like
+    /// `schema_sort_mode`, reset never happens automatically (an operator
+    /// who expanded it stays expanded until they toggle back).
+    pub schema_show_partitions: bool,
     /// v0.12: Query Lens filter — the same per-lens-state discipline as
     /// [`schema_filter`](App::schema_filter). Case-insensitive substring
     /// over the normalized query text (and queryid, if present). Applied in
@@ -681,6 +703,8 @@ impl App {
             statements_sort_mode: StatementsSortMode::default(),
             statements_table_state: TableState::default().with_selected(0),
             detail_open: false,
+            table_detail_scroll: 0,
+            table_detail_request: None,
             waits_open: false,
             micro_view: MicroView::default(),
             idle_table_state: TableState::default().with_selected(0),
@@ -708,6 +732,7 @@ impl App {
             schema_filter: String::new(),
             schema_filter_editing: false,
             schema_filter_saved: String::new(),
+            schema_show_partitions: false,
             statements_filter: String::new(),
             statements_filter_editing: false,
             statements_filter_saved: String::new(),
@@ -1019,6 +1044,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 || (app.active_tab == Tab::QueryLens && app.selected_statement().is_some())
             {
                 app.detail_open = true;
+                // v0.15: fires the on-demand `\d` request (Schema Lens Tables
+                // view only — a no-op on the other three lenses this arm
+                // covers, whose detail panels need no extra fetch).
+                sync_table_detail_request(app);
             }
         }
         KeyCode::Tab => {
@@ -1141,6 +1170,46 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.schema_view = app.schema_view.next();
             app.detail_open = false;
         }
+        // `p` (v0.15, mnemonic "partitions"): toggles the Schema Lens Tables
+        // view between the collapsed default (leaf partitions hidden behind
+        // their aggregated parent row) and the expanded view (every leaf
+        // shown too). Tables view only — the Vacuum sub-view has no
+        // partition concept of its own. Re-sorts/re-clamps immediately so
+        // the row count and cursor stay valid the same frame.
+        KeyCode::Char('p')
+            if app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables =>
+        {
+            app.schema_show_partitions = !app.schema_show_partitions;
+            resort_schema(app);
+            clamp_selection(app);
+        }
+        // `x` (v0.15, mnemonic "cross-reference"): jumps from the selected
+        // Schema Lens table to the Query Lens with `statements_filter`
+        // seeded to the table's bare name (substring match — imperfect,
+        // documented on `App::statements_filter`'s call site below and in
+        // the title rendering the v0.12 filter machinery already provides).
+        // Tables view only, and only with a row actually selected (mirrors
+        // the statusbar hint's own gate in `ui/mod.rs`). Works on partition
+        // parents too — `selected_table()` returns the synthesized parent
+        // row exactly like any other, and its `name` is the parent's own
+        // bare name.
+        KeyCode::Char('x')
+            if app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables =>
+        {
+            if let Some(table) = app.selected_table() {
+                let name = table.name.clone();
+                app.previous_tab = Some(app.active_tab);
+                app.detail_open = false;
+                app.waits_open = false;
+                app.active_tab = Tab::QueryLens;
+                app.statements_filter = name;
+                app.statements_filter_saved = app.statements_filter.clone();
+                app.statements_filter_editing = false;
+                resort_statements(app);
+                app.statements_table_state.select(Some(0));
+                clamp_selection(app);
+            }
+        }
         // `I` (v0.11, mnemonic "idle"): toggles the Micro Lens between the
         // Activity table and the idle connection / connection-age census
         // (see [`MicroView`]) — the SAME body-swap shape as `v`'s Vacuum
@@ -1178,6 +1247,33 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // entirely by `handle_help_key` (Esc or `?` again), reached via the
         // dedicated check above `handle_key`'s overlay chain.
         KeyCode::Char('?') => app.help_open = true,
+        // v0.15: while the Schema Lens table detail overlay is open, `j`/`k`
+        // (and the arrow keys) scroll its `\d` sections instead of moving
+        // the underlying row selection — columns + constraints + indexes
+        // routinely overflow the panel. Every OTHER detail overlay (Micro/
+        // Index/Query Lens) keeps the pre-existing "selection moves, panel
+        // follows" behavior untouched (these arms only fire on the Schema
+        // Lens's Tables view, and are checked before the generic movement
+        // arms below).
+        KeyCode::Up | KeyCode::Char('k')
+            if app.detail_open
+                && app.active_tab == Tab::SchemaLens
+                && app.schema_view == SchemaView::Tables =>
+        {
+            app.table_detail_scroll = app.table_detail_scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j')
+            if app.detail_open
+                && app.active_tab == Tab::SchemaLens
+                && app.schema_view == SchemaView::Tables =>
+        {
+            // Soft cap, not a precise content-length clamp: `ui/` (the only
+            // place that knows the overlay's real line count and visible
+            // height) clamps the RENDERED offset already, so overshooting
+            // here just means a few extra `j` presses do nothing visible —
+            // never a panic, never unbounded growth.
+            app.table_detail_scroll = (app.table_detail_scroll + 1).min(500);
+        }
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
         // v0.12: fast scroll on long tables — reuses `move_selection`'s
@@ -1559,6 +1655,29 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) {
 fn move_selection(app: &mut App, delta: i64) {
     let (state, len) = selection_target(app);
     move_state(state, len, delta);
+    sync_table_detail_request(app);
+}
+
+/// v0.15: queues a fresh [`TableDetailRequest`] for whatever table the
+/// Schema Lens's Tables-view cursor currently points at, and resets
+/// [`App::table_detail_scroll`] to 0 — called on every event that changes
+/// what the detail overlay should show while it is open (opening it via
+/// Enter, or moving the selection while it stays open, since the panel
+/// "follows" the cursor — see `App::detail_open`'s doc comment). A no-op on
+/// every other lens/overlay state.
+fn sync_table_detail_request(app: &mut App) {
+    if !app.detail_open || app.active_tab != Tab::SchemaLens || app.schema_view != SchemaView::Tables
+    {
+        return;
+    }
+    app.table_detail_scroll = 0;
+    if let Some(table) = app.selected_table() {
+        app.table_detail_request = Some(TableDetailRequest::Fetch {
+            oid: table.oid,
+            schema: table.schema.clone(),
+            name: table.name.clone(),
+        });
+    }
 }
 
 /// Jumps the active lens's table selection to an absolute position, clamped
@@ -1568,6 +1687,11 @@ fn move_selection(app: &mut App, delta: i64) {
 /// the exact same per-lens (state, len) routing as [`move_selection`], so it
 /// works on every lens that has a selectable table with no per-lens code.
 fn move_selection_to(app: &mut App, target: i64) {
+    move_selection_to_inner(app, target);
+    sync_table_detail_request(app);
+}
+
+fn move_selection_to_inner(app: &mut App, target: i64) {
     let (state, len) = selection_target(app);
     if len == 0 {
         state.select(None);
@@ -1802,6 +1926,13 @@ fn schema_row_matches(row: &pg_lens_core::TableStatRow, needle: &str) -> bool {
 /// Recomputes `schema_row_order` from the current snapshot + filter + schema
 /// sort mode (the Schema Lens twin of [`resort`]). Ties break by total size
 /// descending, then schema.name ascending, so the order is deterministic.
+///
+/// v0.15's partition collapsing composes with the filter: leaf partitions
+/// (`is_partition`) are dropped from the display order UNLESS
+/// `schema_show_partitions` is on — but the filter itself still matches
+/// against every row (parents AND, when expanded, leaves), never just the
+/// visible subset, so toggling `p` after filtering does not need a
+/// re-search.
 fn resort_schema(app: &mut App) {
     let Some(schema) = app.snapshot.schema.as_deref() else {
         app.schema_row_order = Vec::new();
@@ -1809,7 +1940,9 @@ fn resort_schema(app: &mut App) {
     };
     let rows = &schema.tables;
     let needle = app.schema_filter.to_lowercase();
+    let show_partitions = app.schema_show_partitions;
     let mut order: Vec<usize> = (0..rows.len())
+        .filter(|&i| show_partitions || !rows[i].is_partition)
         .filter(|&i| needle.is_empty() || schema_row_matches(&rows[i], &needle))
         .collect();
     let by_size_then_name = |a: usize, b: usize| {
@@ -2283,6 +2416,95 @@ mod tests {
         assert_eq!(app.schema_table_state.selected(), Some(1));
     }
 
+    // --- v0.15: on-demand `\d` table detail (Enter on the Tables view) ----
+
+    /// Enter on a Schema Lens table opens the overlay AND queues a
+    /// `TableDetailRequest::Fetch` for the selected table, resetting the
+    /// scroll offset.
+    #[test]
+    fn enter_on_a_schema_table_queues_a_detail_fetch_request() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        app.table_detail_scroll = 7;
+        let selected = app.selected_table().expect("mock has tables").clone();
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        assert_eq!(app.table_detail_scroll, 0);
+        match app.table_detail_request.take().expect("request queued") {
+            pg_lens_core::TableDetailRequest::Fetch { oid, schema, name } => {
+                assert_eq!(oid, selected.oid);
+                assert_eq!(schema, selected.schema);
+                assert_eq!(name, selected.name);
+            }
+            other => panic!("expected Fetch, got {other:?}"),
+        }
+    }
+
+    /// Moving the selection while the detail overlay is open (e.g. via
+    /// `End`, since plain `j`/`k` are claimed by the overlay's own scroll —
+    /// see `jk_scroll_the_detail_overlay_instead_of_moving_selection`)
+    /// re-queues a fresh request for the newly selected table (the panel
+    /// "follows" the cursor) and resets the scroll offset again.
+    #[test]
+    fn moving_selection_with_detail_open_requeues_the_request() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Enter));
+        app.table_detail_request.take(); // drain the initial Enter request
+        app.table_detail_scroll = 3;
+        update(&mut app, press(KeyCode::End));
+        assert_eq!(app.table_detail_scroll, 0);
+        assert!(app.table_detail_request.is_some());
+    }
+
+    /// `j`/`k` while the overlay is open scroll the panel, NOT the
+    /// underlying row selection — columns/constraints/indexes routinely
+    /// overflow the visible area.
+    #[test]
+    fn jk_scroll_the_detail_overlay_instead_of_moving_selection() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Enter));
+        let selection_before = app.schema_table_state.selected();
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_eq!(app.table_detail_scroll, 1);
+        assert_eq!(
+            app.schema_table_state.selected(),
+            selection_before,
+            "row selection must not move while the detail overlay is open"
+        );
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_eq!(app.table_detail_scroll, 2);
+        update(&mut app, press(KeyCode::Char('k')));
+        assert_eq!(app.table_detail_scroll, 1);
+    }
+
+    /// The scroll offset never underflows past 0.
+    #[test]
+    fn detail_scroll_clamps_at_zero() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Enter));
+        assert_eq!(app.table_detail_scroll, 0);
+        update(&mut app, press(KeyCode::Char('k')));
+        assert_eq!(app.table_detail_scroll, 0, "must not underflow");
+    }
+
+    /// Every other detail overlay (e.g. the Micro Lens's activity detail)
+    /// keeps the pre-existing "j/k moves selection, panel follows" contract
+    /// untouched — the dedicated scroll arms only fire on the Schema Lens's
+    /// Tables view.
+    #[test]
+    fn jk_still_moves_selection_on_other_lens_detail_overlays() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.detail_open);
+        let before = app.table_state.selected();
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_ne!(app.table_state.selected(), before, "selection should move");
+    }
+
     // --- v0.11: idle connection / connection-age census (`I`) -------------
 
     #[test]
@@ -2499,6 +2721,113 @@ mod tests {
         assert_eq!(app.active_tab, Tab::MacroLens);
         update(&mut app, press(KeyCode::Backspace)); // toggles right back
         assert_eq!(app.active_tab, Tab::IndexLens);
+    }
+
+    // v0.15's cross-lens jump (`x`): Schema Lens table → Query Lens, seeding
+    // `statements_filter` to the table's bare name.
+
+    #[test]
+    fn x_jumps_to_query_lens_seeded_with_the_selected_table_name() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        app.schema_table_state.select(Some(0));
+        let table_name = app.selected_table().expect("mock has tables").name.clone();
+
+        update(&mut app, press(KeyCode::Char('x')));
+
+        assert_eq!(app.active_tab, Tab::QueryLens);
+        assert_eq!(app.previous_tab, Some(Tab::SchemaLens));
+        assert_eq!(app.statements_filter, table_name);
+        assert_eq!(app.statements_filter_saved, table_name);
+        assert!(!app.statements_filter_editing);
+        assert_eq!(app.statements_table_state.selected(), Some(0));
+        // The title rendering (v0.12) makes the seeded filter visible; the
+        // filter machinery itself narrows the row order to matches.
+        assert!(
+            app.statements_row_order
+                .iter()
+                .all(|&i| app.snapshot.statements.as_ref().unwrap().statements[i]
+                    .query
+                    .to_lowercase()
+                    .contains(&table_name.to_lowercase()))
+        );
+    }
+
+    #[test]
+    fn x_backspace_returns_to_schema_lens() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        app.schema_table_state.select(Some(0));
+        update(&mut app, press(KeyCode::Char('x')));
+        assert_eq!(app.active_tab, Tab::QueryLens);
+
+        update(&mut app, press(KeyCode::Backspace));
+        assert_eq!(app.active_tab, Tab::SchemaLens);
+    }
+
+    #[test]
+    fn x_never_touches_the_schema_lens_filter() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "public");
+        update(&mut app, press(KeyCode::Enter));
+        assert_eq!(app.schema_filter, "public");
+        app.schema_table_state.select(Some(0));
+
+        update(&mut app, press(KeyCode::Char('x')));
+
+        assert_eq!(app.active_tab, Tab::QueryLens);
+        assert_eq!(app.schema_filter, "public", "Schema Lens filter untouched");
+    }
+
+    /// Works on partition parents too — `selected_table()` returns the
+    /// synthesized parent row exactly like any other table, and `x` seeds
+    /// its own bare name.
+    #[test]
+    fn x_works_on_a_partition_parent_row() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let schema = app.snapshot.schema.clone().expect("mock has schema");
+        let idx = app
+            .schema_row_order
+            .iter()
+            .position(|&i| schema.tables[i].partition_count.is_some())
+            .expect("mock has a partition parent row");
+        app.schema_table_state.select(Some(idx));
+        let parent_name = app.selected_table().expect("selected").name.clone();
+
+        update(&mut app, press(KeyCode::Char('x')));
+
+        assert_eq!(app.active_tab, Tab::QueryLens);
+        assert_eq!(app.statements_filter, parent_name);
+    }
+
+    /// Inert off the Tables view (e.g. the Vacuum sub-view) and with no row
+    /// selected — the gate mirrors `handle_key`'s own `if` condition.
+    #[test]
+    fn x_is_inert_off_the_tables_view_and_with_no_selection() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        app.schema_view = SchemaView::Vacuum;
+        app.schema_table_state.select(Some(0));
+        update(&mut app, press(KeyCode::Char('x')));
+        assert_eq!(app.active_tab, Tab::SchemaLens, "Vacuum sub-view: no jump");
+
+        app.schema_view = SchemaView::Tables;
+        app.schema_table_state.select(None);
+        update(&mut app, press(KeyCode::Char('x')));
+        assert_eq!(app.active_tab, Tab::SchemaLens, "no selection: no jump");
+    }
+
+    /// `x` is scoped to the Schema Lens — pressing it elsewhere (e.g. the
+    /// Micro Lens) must not be misread as some other lens's binding.
+    #[test]
+    fn x_is_inert_on_other_lenses() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('x')));
+        assert_eq!(app.active_tab, Tab::MicroLens);
     }
 
     /// Backspace must stay a delete key inside the filter editor, never a
@@ -2747,14 +3076,12 @@ mod tests {
         assert_eq!(app.schema_filter, "order");
         update(&mut app, press(KeyCode::Char('\\')));
         assert_eq!(app.schema_filter, "");
-        let total = app
-            .snapshot
-            .schema
-            .as_deref()
-            .expect("mock schema")
-            .tables
-            .len();
-        assert_eq!(app.schema_row_order.len(), total);
+        let schema = app.snapshot.schema.as_deref().expect("mock schema");
+        // v0.15: leaf partitions stay collapsed by default (`p` not
+        // pressed), so the cleared filter's row order is every table
+        // EXCEPT the mock's 3 hidden leaves, not the raw table count.
+        let hidden_leaves = schema.tables.iter().filter(|t| t.is_partition).count();
+        assert_eq!(app.schema_row_order.len(), schema.tables.len() - hidden_leaves);
 
         // Query Lens.
         let mut app = App::new();
@@ -3073,11 +3400,103 @@ mod tests {
         assert_eq!(app.schema_sort_mode, SchemaSortMode::TotalSize);
         assert_eq!(app.sort_mode, SortMode::Duration);
 
-        // Every mode shows every table exactly once.
+        // Every mode shows every NON-LEAF table exactly once (v0.15: leaf
+        // partitions stay collapsed by default).
         let mut seen = app.schema_row_order.clone();
         seen.sort_unstable();
-        let table_count = app.snapshot.schema.as_deref().expect("schema").tables.len();
-        assert_eq!(seen, (0..table_count).collect::<Vec<_>>());
+        let schema = app.snapshot.schema.as_deref().expect("schema");
+        let mut expected: Vec<usize> = (0..schema.tables.len())
+            .filter(|&i| !schema.tables[i].is_partition)
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(seen, expected);
+    }
+
+    /// v0.15's partition collapsing: leaves hidden by default, `p` reveals
+    /// them, `p` again re-collapses — and the parent's aggregate row is
+    /// ALWAYS visible either way (it is not itself a leaf).
+    #[test]
+    fn partition_leaves_are_collapsed_by_default_and_p_toggles_them() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+
+        let schema = app.snapshot.schema.as_deref().expect("mock schema");
+        let leaf_count = schema.tables.iter().filter(|t| t.is_partition).count();
+        assert!(leaf_count > 0, "mock must fixture at least one leaf");
+        let parent_oid = schema
+            .tables
+            .iter()
+            .find(|t| t.partition_count.is_some())
+            .expect("mock must fixture a partition parent")
+            .oid;
+
+        // Collapsed by default: no leaf is reachable via the display order.
+        assert!(!app.schema_show_partitions);
+        let visible_leaves = |app: &App| {
+            let schema = app.snapshot.schema.as_deref().expect("schema");
+            app.schema_row_order
+                .iter()
+                .filter(|&&i| schema.tables[i].is_partition)
+                .count()
+        };
+        assert_eq!(visible_leaves(&app), 0);
+        // The parent itself IS visible (it is not a leaf).
+        assert!(
+            app.schema_row_order.iter().any(|&i| schema.tables[i].oid == parent_oid),
+            "the parent's aggregate row must stay visible while collapsed"
+        );
+
+        update(&mut app, press(KeyCode::Char('p')));
+        assert!(app.schema_show_partitions);
+        assert_eq!(visible_leaves(&app), leaf_count);
+
+        update(&mut app, press(KeyCode::Char('p')));
+        assert!(!app.schema_show_partitions);
+        assert_eq!(visible_leaves(&app), 0);
+    }
+
+    /// `p` is inert outside the Schema Lens Tables view (Vacuum sub-view,
+    /// or any other lens) — same "scoped to the right sub-view" contract
+    /// `/` and `s` already follow.
+    #[test]
+    fn p_is_inert_outside_schema_tables_view() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('p')));
+        assert!(!app.schema_show_partitions);
+
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Char('v')));
+        assert_eq!(app.schema_view, SchemaView::Vacuum);
+        update(&mut app, press(KeyCode::Char('p')));
+        assert!(!app.schema_show_partitions, "Vacuum sub-view has no partitions toggle");
+    }
+
+    /// v0.15: filtering by name matches the parent AND, once expanded, its
+    /// leaves — never just the currently visible subset.
+    #[test]
+    fn schema_filter_matches_parent_and_leaves_when_expanded() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        update(&mut app, press(KeyCode::Char('/')));
+        type_str(&mut app, "events_by_month");
+        update(&mut app, press(KeyCode::Enter));
+
+        let schema = app.snapshot.schema.as_deref().expect("schema").clone();
+        // Collapsed: only the parent row matches (leaves are filtered out
+        // regardless of whether their name matches).
+        assert_eq!(app.schema_row_order.len(), 1);
+        assert_eq!(schema.tables[app.schema_row_order[0]].partition_count, Some(3));
+
+        // Expand: every leaf whose name matches the same needle joins the
+        // parent in the display order.
+        update(&mut app, press(KeyCode::Char('p')));
+        let matched_leaves = app
+            .schema_row_order
+            .iter()
+            .filter(|&&i| schema.tables[i].is_partition)
+            .count();
+        assert!(matched_leaves > 0, "expanded view must surface matching leaves too");
     }
 
     #[test]

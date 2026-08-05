@@ -59,6 +59,31 @@ export async function requestDbSwitch(token: string | null, database: string): P
   }
 }
 
+/**
+ * POST /api/schema/detail — web parity for the TUI's Enter-on-a-table `\d`
+ * overlay (v0.15). Like `requestDbSwitch`, this is a read against catalog
+ * views (not a mutating action), so it works under read-only mode; gated
+ * by the token alone. The response rides the normal snapshot/SSE stream as
+ * `DbSnapshot.table_detail` — this call only queues the request.
+ */
+export async function requestTableDetail(
+  token: string | null,
+  oid: number,
+  schema: string,
+  name: string,
+): Promise<boolean> {
+  try {
+    const res = await fetch("/api/schema/detail", {
+      method: "POST",
+      headers: { ...authHeaders(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ oid, schema, name }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export type AdminKind = "cancel" | "terminate";
 
 export interface AdminResult {

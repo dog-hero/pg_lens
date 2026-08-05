@@ -310,6 +310,11 @@ mod tests {
             autoanalyze_count: 0,
             growth_1h_bytes: None,
             growth_1h_pct: None,
+            is_partition: false,
+            parent_oid: None,
+            partition_count: None,
+            lock_count: None,
+            lock_waiters: None,
         }
     }
 
@@ -440,6 +445,31 @@ mod tests {
         let d = growth(&ring, 1000, GROWTH_LOOKBACK_MS).expect("2 samples");
         assert_eq!(d.bytes, 500_000);
         assert_eq!(d.pct, None);
+    }
+
+    /// v0.15's partition collapsing: the poller feeds `SchemaGrowthTracker`
+    /// the SAME `tables` vector that already carries the synthesized
+    /// partition-parent aggregate row (see `poller::collect_schema`) — the
+    /// tracker keys purely on `oid`, so a parent's row (`partition_count =
+    /// Some(_)`, a real, stable `pg_class.oid`) gets its own ring and Δ1h
+    /// exactly like any plain table, with NO special-casing needed here.
+    #[test]
+    fn parent_aggregate_row_gets_its_own_growth_ring() {
+        let parent_oid = 16_420;
+        let parent = |total_bytes: i64| TableStatRow {
+            partition_count: Some(3),
+            ..row(parent_oid, "events_by_month", total_bytes)
+        };
+        let mut tracker = SchemaGrowthTracker::new(MAX_TRACKED_TABLES);
+        // Two "schema refresh with inserts" collections, one leaf row
+        // present too (untouched — its own ring is independent).
+        tracker.update(&[parent(400_000_000), row(1, "leaf_a", 100_000_000)], 0);
+        tracker.update(&[parent(440_000_000), row(1, "leaf_a", 100_500_000)], 1_000_000);
+
+        let mut rows = vec![parent(440_000_000), row(1, "leaf_a", 100_500_000)];
+        tracker.apply(&mut rows, 1_000_000, GROWTH_LOOKBACK_MS);
+        assert_eq!(rows[0].growth_1h_bytes, Some(40_000_000), "parent aggregate delta");
+        assert_eq!(rows[0].partition_count, Some(3), "field untouched by growth");
     }
 
     #[test]

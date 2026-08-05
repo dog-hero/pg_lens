@@ -34,7 +34,8 @@ use crate::models::{
     AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats, DatabaseRow,
     DbSnapshot, IdleSessionRow, IndexRow, LockCapacity, PollerStatus, PreparedXactRow,
     ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow,
-    StatementsSnapshot, StatementsStatus, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
+    StatementsSnapshot, StatementsStatus, TableDetail, TableDetailRequest, VacuumClusterAge,
+    VacuumProgressRow, VacuumTableRow,
 };
 use crate::schema_growth::{GROWTH_LOOKBACK_MS, SchemaGrowthTracker};
 use crate::services::{self, PasswordSource};
@@ -267,6 +268,31 @@ impl StatementsState {
     }
 }
 
+/// On-demand table detail state (v0.15, the `\d`-style overlay), owned by
+/// the poller task like [`SchemaState`]/[`StatementsState`] — but with NO
+/// cadence of its own at all: it only changes in response to a
+/// [`TableDetailRequest`] arriving on the immediate-wake channel (see
+/// [`PollWake`]), never on a timer. Survives reconnects like the schema and
+/// statements state (the last-fetched detail stays on screen across a
+/// connection blip).
+struct TableDetailState {
+    current: Option<Arc<TableDetail>>,
+}
+
+impl TableDetailState {
+    fn new() -> Self {
+        Self { current: None }
+    }
+
+    fn store(&mut self, detail: TableDetail) {
+        self.current = Some(Arc::new(detail));
+    }
+
+    fn clear(&mut self) {
+        self.current = None;
+    }
+}
+
 /// The pure elapsed check behind [`SchemaState::due`], factored out so the
 /// slow-cadence scheduling is unit-testable without a database.
 fn cadence_elapsed(last_attempt: Option<Instant>, now: Instant, interval: Duration) -> bool {
@@ -294,26 +320,44 @@ async fn wait_interval(interval_rx: &mut watch::Receiver<Duration>) {
     }
 }
 
-/// Sleeps like [`wait_interval`], but ALSO wakes when an [`AdminCommand`]
-/// arrives — the command is returned so the caller executes it and re-polls
-/// immediately (a cancelled/terminated row should leave the screen fast).
-/// This is the shape the feature spec calls the "poller select restructure":
-/// the admin channel is one more branch of the tick sleep, not a new task —
+/// What woke [`wait_interval_or_control`] before the tick sleep elapsed.
+enum PollWake {
+    Admin(AdminCommand),
+    /// v0.15's on-demand table detail request/clear.
+    Detail(TableDetailRequest),
+}
+
+/// Sleeps like [`wait_interval`], but ALSO wakes when an [`AdminCommand`] OR
+/// a [`TableDetailRequest`] arrives — either is returned immediately so the
+/// caller can act on it and re-poll right away (a cancelled/terminated row,
+/// or a freshly requested table detail, should reach the screen fast). This
+/// is the shape the feature spec calls the "poller select restructure": each
+/// control channel is one more branch of the tick sleep, not a new task —
 /// the poller stays the only owner of the DB client.
 ///
-/// A closed admin channel (a frontend without admin keys dropped the sender,
-/// or never had one) degrades to the plain sleep — no busy loop.
-async fn wait_interval_or_admin(
+/// A closed channel (a frontend without admin keys / table-detail requests
+/// dropped its sender, or never had one) degrades that branch to the plain
+/// sleep — no busy loop, same contract [`wait_interval_or_admin`] used to
+/// have for `admin_rx` alone.
+async fn wait_interval_or_control(
     interval_rx: &mut watch::Receiver<Duration>,
     admin_rx: &mut mpsc::Receiver<AdminCommand>,
-) -> Option<AdminCommand> {
+    detail_rx: &mut mpsc::Receiver<TableDetailRequest>,
+) -> Option<PollWake> {
     tokio::select! {
         _ = wait_interval(interval_rx) => None,
         cmd = admin_rx.recv() => match cmd {
-            Some(cmd) => Some(cmd),
+            Some(cmd) => Some(PollWake::Admin(cmd)),
             None => {
                 // Sender dropped: `recv` resolves `None` forever; finish a
                 // full sleep so this select cannot busy-loop.
+                wait_interval(interval_rx).await;
+                None
+            }
+        },
+        req = detail_rx.recv() => match req {
+            Some(req) => Some(PollWake::Detail(req)),
+            None => {
                 wait_interval(interval_rx).await;
                 None
             }
@@ -476,6 +520,11 @@ async fn execute_admin(client: &mut Client, q: &queries::QuerySet, cmd: AdminCom
 /// # Panics
 ///
 /// Must be called from within a tokio runtime (it calls `tokio::spawn`).
+/// `detail_rx` is v0.15's on-demand table-detail channel: one
+/// [`TableDetailRequest`] per Enter/close on the `\d`-style overlay (TUI) or
+/// `POST /api/schema/detail` (web). Wakes the tick sleep immediately, same
+/// priority as `admin_rx` (see [`wait_interval_or_control`]); frontends
+/// without the overlay just drop the sender.
 #[allow(clippy::too_many_arguments)] // one call site (spawn_poller)
 pub fn spawn(
     config: tokio_postgres::Config,
@@ -488,6 +537,7 @@ pub fn spawn(
     shutdown_rx: watch::Receiver<bool>,
     db_switch_rx: mpsc::Receiver<String>,
     schema_table_limit: usize,
+    detail_rx: mpsc::Receiver<TableDetailRequest>,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, JoinHandle<()>) {
     let (tx, rx) = watch::channel(Arc::new(DbSnapshot::connecting()));
     let schema = SchemaState::new(schema_interval, schema_refresh_rx, schema_table_limit);
@@ -501,6 +551,7 @@ pub fn spawn(
         history_path_fn,
         shutdown_rx,
         db_switch_rx,
+        detail_rx,
     ));
     (rx, handle)
 }
@@ -517,6 +568,7 @@ async fn run(
     history_path_fn: Option<HistoryPathFn>,
     mut shutdown_rx: watch::Receiver<bool>,
     mut db_switch_rx: mpsc::Receiver<String>,
+    mut detail_rx: mpsc::Receiver<TableDetailRequest>,
 ) {
     let mut backoff = BACKOFF_INITIAL;
     // Survives reconnects so the sparklines don't reset on a blip.
@@ -542,6 +594,11 @@ async fn run(
     // Statements share the schema's slow cadence and, like it, outlive a
     // connection blip (the last collection stays on screen).
     let mut statements = StatementsState::new();
+    // v0.15's on-demand table detail: no cadence of its own, survives
+    // reconnects like `schema`/`statements`, reset on a database switch
+    // below (same reasoning — a different database's oid means different
+    // catalog rows entirely).
+    let mut table_detail = TableDetailState::new();
     let mut last_admin: Option<AdminActionResult> = None;
     loop {
         // Shutdown requested (the app is quitting): stop before reconnecting.
@@ -557,6 +614,7 @@ async fn run(
             &mut history,
             &mut schema,
             &mut statements,
+            &mut table_detail,
             &mut admin_rx,
             &mut last_admin,
             &mut polled_ok,
@@ -564,6 +622,7 @@ async fn run(
             &mut appends_since_compact,
             &mut shutdown_rx,
             &mut db_switch_rx,
+            &mut detail_rx,
         )
         .await;
         match end {
@@ -582,6 +641,7 @@ async fn run(
                 appends_since_compact = 0;
                 schema.reset();
                 statements = StatementsState::new();
+                table_detail = TableDetailState::new();
                 last_admin = None;
                 store = history_path_fn
                     .as_ref()
@@ -640,6 +700,7 @@ async fn session(
     history: &mut SnapshotHistory,
     schema: &mut SchemaState,
     statements: &mut StatementsState,
+    table_detail: &mut TableDetailState,
     admin_rx: &mut mpsc::Receiver<AdminCommand>,
     last_admin: &mut Option<AdminActionResult>,
     polled_ok: &mut bool,
@@ -647,6 +708,7 @@ async fn session(
     appends_since_compact: &mut usize,
     shutdown_rx: &mut watch::Receiver<bool>,
     db_switch_rx: &mut mpsc::Receiver<String>,
+    detail_rx: &mut mpsc::Receiver<TableDetailRequest>,
 ) -> SessionEnd {
     // The base config is never mutated: the resolved password goes into a
     // per-attempt clone (and is dropped with it).
@@ -691,11 +753,13 @@ async fn session(
             history,
             schema,
             statements,
+            table_detail,
             admin_rx,
             last_admin,
             polled_ok,
             store,
             appends_since_compact,
+            detail_rx,
         ) => end,
     };
     conn_handle.abort();
@@ -710,11 +774,13 @@ async fn poll_loop(
     history: &mut SnapshotHistory,
     schema: &mut SchemaState,
     statements: &mut StatementsState,
+    table_detail: &mut TableDetailState,
     admin_rx: &mut mpsc::Receiver<AdminCommand>,
     last_admin: &mut Option<AdminActionResult>,
     polled_ok: &mut bool,
     store: Option<&HistoryStore>,
     appends_since_compact: &mut usize,
+    detail_rx: &mut mpsc::Receiver<TableDetailRequest>,
 ) -> SessionEnd {
     // Identify our session (application_name). Best-effort and session-level:
     // it never blocks the dashboard, and behind a pooler it simply won't
@@ -783,14 +849,18 @@ async fn poll_loop(
             .as_deref()
             .and_then(|s| s.vacuum_cluster_age.as_ref())
             .map(|v| v.max_age_xids);
-        let mut snapshot =
+        let (mut snapshot, relation_locks) =
             match poll_once(client, &query_set, &mut deltas, history, oldest_xid_age).await {
                 Ok(s) => s,
                 Err(msg) => return SessionEnd::Error(format!("poll failed: {msg}")),
             };
-        // Ticks between collections reuse the last one at Arc-clone cost.
-        snapshot.schema = schema.current.clone();
+        // Ticks between collections reuse the last one at Arc-clone cost —
+        // except the per-table lock indicator (v0.15), which is FAST-tick
+        // data: `fold_relation_locks` rebuilds a fresh `Arc` every tick so
+        // lock_count/lock_waiters never lag behind the slow schema cadence.
+        snapshot.schema = fold_relation_locks(schema.current.clone(), relation_locks.as_deref());
         snapshot.statements = statements.current.clone();
+        snapshot.table_detail = table_detail.current.clone();
         // The most recent admin result rides in every envelope from then
         // on; frontends dedupe on its `at_epoch_ms`.
         snapshot.last_admin_action = last_admin.clone();
@@ -838,12 +908,21 @@ async fn poll_loop(
                 Err(reason) => statements.store_unavailable(reason.clone()),
             }
         }
-        // The tick sleep doubles as the admin-command listener: a command
-        // wakes it, executes inside its own transaction, and skips the rest
-        // of the sleep so the next poll (and the snapshot carrying the
-        // result) happens immediately.
-        if let Some(cmd) = wait_interval_or_admin(interval_rx, admin_rx).await {
-            *last_admin = Some(execute_admin(client, &query_set, cmd).await);
+        // The tick sleep doubles as the admin-command AND table-detail-
+        // request listener: either wakes it and skips the rest of the sleep
+        // so the next poll (carrying the admin result or the fresh detail)
+        // happens immediately.
+        match wait_interval_or_control(interval_rx, admin_rx, detail_rx).await {
+            Some(PollWake::Admin(cmd)) => {
+                *last_admin = Some(execute_admin(client, &query_set, cmd).await);
+            }
+            Some(PollWake::Detail(TableDetailRequest::Fetch { oid, schema: s, name })) => {
+                table_detail.store(collect_table_detail(client, &query_set, oid, s, name).await);
+            }
+            Some(PollWake::Detail(TableDetailRequest::Clear)) => {
+                table_detail.clear();
+            }
+            None => {}
         }
     }
 }
@@ -993,7 +1072,7 @@ async fn poll_once(
     deltas: &mut Option<DeltaState>,
     history: &mut SnapshotHistory,
     oldest_xid_age: Option<i64>,
-) -> Result<DbSnapshot, String> {
+) -> Result<(DbSnapshot, Option<Vec<db::RelationLockRow>>), String> {
     // Essential queries: four futures pipelined inside ONE read-only
     // transaction — a single consistent snapshot, and pooler-safe (prepare +
     // execute stay on the same backend). Their failure is a real fault, so it
@@ -1067,6 +1146,12 @@ async fn poll_once(
     // best-effort — a separate, capped query from `activity`, so it must
     // never fail the poll even on a restricted role.
     let idle_sessions = collect_idle_sessions(client, q).await;
+
+    // Per-table lock indicator (v0.15) is likewise best-effort — a cheap
+    // grouped aggregate, folded onto the (separately, slow-cadence-collected)
+    // schema table rows by the caller (`fold_relation_locks`), since this
+    // function has no access to that cached collection.
+    let relation_locks = collect_relation_locks(client, q).await;
 
     let now = Instant::now();
     let xact_total = info.xact_commit + info.xact_rollback;
@@ -1144,25 +1229,29 @@ async fn poll_once(
         deadlocks: info.deadlocks,
     };
 
-    Ok(DbSnapshot {
-        vitals,
-        activity,
-        locks,
-        history: history.clone(),
-        // All three stamped by the caller from poller-owned state.
-        schema: None,
-        statements: None,
-        last_admin_action: None,
-        replication,
-        replication_slots,
-        vacuum_progress,
-        checkpointer: Some(checkpointer_stats),
-        databases,
-        prepared_xacts,
-        lock_capacity,
-        idle_sessions,
-        status: PollerStatus::Ok,
-    })
+    Ok((
+        DbSnapshot {
+            vitals,
+            activity,
+            locks,
+            history: history.clone(),
+            // All four stamped by the caller from poller-owned state.
+            schema: None,
+            statements: None,
+            table_detail: None,
+            last_admin_action: None,
+            replication,
+            replication_slots,
+            vacuum_progress,
+            checkpointer: Some(checkpointer_stats),
+            databases,
+            prepared_xacts,
+            lock_capacity,
+            idle_sessions,
+            status: PollerStatus::Ok,
+        },
+        relation_locks,
+    ))
 }
 
 /// One slow-cadence collection: table stats plus the two estimated-bloat
@@ -1217,6 +1306,19 @@ async fn collect_schema(
     let mut tables = Vec::with_capacity(table_rows.len());
     for row in &table_rows {
         tables.push(db::table_stat_from_row(row).map_err(|e| e.to_string())?);
+    }
+    // v0.15's partition collapsing: aggregated parent rows, same essential
+    // transaction and row cap as `tables` (fail-together — a role that can
+    // read pg_stat_user_tables/pg_class can read pg_partition_tree too).
+    // Appended onto `tables` so every downstream consumer (the growth ring,
+    // the frontends' row order) treats a parent exactly like a normal row —
+    // only `partition_count.is_some()`/`is_partition` distinguish it.
+    let parent_rows = stx
+        .query(q.partition_parents, &[&table_stats_limit])
+        .await
+        .map_err(|e| e.to_string())?;
+    for row in &parent_rows {
+        tables.push(db::partition_parent_from_row(row).map_err(|e| e.to_string())?);
     }
     // v0.15: the TRUE (uncapped) count — same essential transaction, so it
     // fails together with `tables` rather than silently reporting a stale
@@ -1330,6 +1432,74 @@ async fn collect_statements(
     }
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(out)
+}
+
+/// Runs the on-demand `\d`-style table detail collection (v0.15) for one
+/// table's oid — columns, constraints (own + referencing), and index
+/// definitions, all inside one read-only transaction. UNLIKE every other
+/// best-effort collector in this module (which return `None`/an absent
+/// panel on failure), this ALWAYS returns a [`TableDetail`]: the overlay it
+/// feeds needs *something* to render even on failure (a dropped table, a
+/// missing privilege), so the error rides inside the struct as
+/// `TableDetail::error` instead — a rendered "detail unavailable: <reason>"
+/// line, never a dead poll and never a vanished overlay.
+async fn collect_table_detail(
+    client: &mut Client,
+    q: &queries::QuerySet,
+    oid: i64,
+    schema: String,
+    name: String,
+) -> TableDetail {
+    let now = epoch_ms_now();
+    let fetch = async {
+        let tx = begin_read(client).await.map_err(|e| e.to_string())?;
+        let params: [&(dyn tokio_postgres::types::ToSql + Sync); 1] = [&oid];
+        let (column_rows, constraint_rows, index_rows) = tokio::try_join!(
+            tx.query(q.table_detail_columns, &params),
+            tx.query(q.table_detail_constraints, &params),
+            tx.query(q.table_detail_indexdefs, &params),
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+
+        let mut columns = Vec::with_capacity(column_rows.len());
+        for row in &column_rows {
+            columns.push(db::table_detail_column_from_row(row).map_err(|e| e.to_string())?);
+        }
+        let mut constraints = Vec::with_capacity(constraint_rows.len());
+        for row in &constraint_rows {
+            constraints.push(db::table_detail_constraint_from_row(row).map_err(|e| e.to_string())?);
+        }
+        let mut indexes = Vec::with_capacity(index_rows.len());
+        for row in &index_rows {
+            indexes.push(db::table_detail_index_from_row(row).map_err(|e| e.to_string())?);
+        }
+        Ok::<_, String>((columns, constraints, indexes))
+    }
+    .await;
+
+    match fetch {
+        Ok((columns, constraints, indexes)) => TableDetail {
+            oid,
+            schema,
+            name,
+            collected_at_epoch_ms: now,
+            columns,
+            constraints,
+            indexes,
+            error: None,
+        },
+        Err(msg) => TableDetail {
+            oid,
+            schema,
+            name,
+            collected_at_epoch_ms: now,
+            columns: Vec::new(),
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            error: Some(format!("table detail collection failed: {msg}")),
+        },
+    }
 }
 
 /// Best-effort replication view for the server's current role, PLUS its
@@ -1467,6 +1637,65 @@ async fn collect_lock_capacity(client: &mut Client, q: &queries::QuerySet) -> Op
     Some(crate::lock_capacity::compute(raw))
 }
 
+/// Best-effort per-table lock indicator (v0.15,
+/// `queries/locks_by_relation.sql`), refreshed every fast tick — locks come
+/// and go far faster than the Schema Lens's slow cadence, so this rides the
+/// fast tick like `lock_capacity`/`databases`, and is folded onto the
+/// (separately, slow-cadence-collected) table rows by [`fold_relation_locks`]
+/// at snapshot assembly time. Returns `None` on ANY query or parse
+/// failure — same contract as [`collect_lock_capacity`]; it must never fail
+/// the poll. `Some(vec![])` means the collection succeeded and found no
+/// relation locks at all.
+async fn collect_relation_locks(
+    client: &mut Client,
+    q: &queries::QuerySet,
+) -> Option<Vec<db::RelationLockRow>> {
+    let tx = begin_read(client).await.ok()?;
+    let rows = tx.query(q.locks_by_relation, &[]).await.ok()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        out.push(db::relation_lock_from_row(row).ok()?);
+    }
+    tx.commit().await.ok()?;
+    Some(out)
+}
+
+/// Folds this tick's [`collect_relation_locks`] result onto every table row
+/// of `schema` (v0.15's per-table lock indicator), keyed by `oid` ==
+/// `rel_oid`. `schema` itself is the poller's cached slow-cadence
+/// [`SchemaSnapshot`] (unchanged since its last collection); this rebuilds a
+/// fresh `Arc` every fast tick so the lock columns never lag by up to a full
+/// schema cadence, while every OTHER field stays byte-identical to the
+/// cached collection.
+///
+/// `locks` is `None` when this tick's best-effort collection failed — every
+/// row's `lock_count`/`lock_waiters` folds to `None` in that case, same as a
+/// table absent from a successful join (see [`crate::models::TableStatRow::lock_count`]'s
+/// doc comment): a fresh join with nothing to report, never a stale
+/// carried-over number from a previous tick.
+fn fold_relation_locks(
+    schema: Option<Arc<SchemaSnapshot>>,
+    locks: Option<&[db::RelationLockRow]>,
+) -> Option<Arc<SchemaSnapshot>> {
+    let schema = schema?;
+    let by_oid: Option<std::collections::HashMap<i64, (i64, i64)>> =
+        locks.map(|rows| rows.iter().map(|r| (r.rel_oid, (r.locks, r.waiting))).collect());
+    let mut fresh = (*schema).clone();
+    for table in &mut fresh.tables {
+        match by_oid.as_ref().and_then(|m| m.get(&table.oid)) {
+            Some(&(count, waiting)) => {
+                table.lock_count = Some(count);
+                table.lock_waiters = Some(waiting);
+            }
+            None => {
+                table.lock_count = None;
+                table.lock_waiters = None;
+            }
+        }
+    }
+    Some(Arc::new(fresh))
+}
+
 /// Best-effort idle connection / connection-age census (v0.11,
 /// `queries/idle_sessions.sql`), refreshed every fast tick. Returns `None`
 /// on ANY query or parse failure — same contract as
@@ -1564,6 +1793,7 @@ pub fn spawn_mock(
     mut interval_rx: watch::Receiver<Duration>,
     mut schema_refresh_rx: watch::Receiver<u64>,
     mut admin_rx: mpsc::Receiver<AdminCommand>,
+    mut detail_rx: mpsc::Receiver<TableDetailRequest>,
 ) -> watch::Receiver<Arc<DbSnapshot>> {
     // The mock poller owns the ring exactly like the real one.
     let mut history = SnapshotHistory::default();
@@ -1574,6 +1804,10 @@ pub fn spawn_mock(
     // cadence is observable (same Arc between slow ticks).
     let mut schema = first.schema.clone();
     let mut statements = first.statements.clone();
+    // v0.15: `DbSnapshot::mock()` always carries the `order_items` fixture
+    // (see `TableDetail::mock`), so the very first frame already demos the
+    // `\d` overlay without waiting for a simulated request round-trip.
+    let mut table_detail = first.table_detail.clone();
     let (tx, rx) = watch::channel(Arc::new(first));
 
     tokio::spawn(async move {
@@ -1582,14 +1816,33 @@ pub fn spawn_mock(
         let mut terminated: std::collections::HashSet<i32> = std::collections::HashSet::new();
         let mut last_admin: Option<AdminActionResult> = None;
         loop {
-            // Same select shape as the real poller: an admin command wakes
-            // the sleep, is applied, and the re-publish happens immediately.
-            if let Some(cmd) = wait_interval_or_admin(&mut interval_rx, &mut admin_rx).await {
-                match cmd {
-                    AdminCommand::CancelBackend(pid) => cancelled.insert(pid),
-                    AdminCommand::TerminateBackend(pid) => terminated.insert(pid),
-                };
-                last_admin = Some(admin_result(cmd, Ok(true)));
+            // Same select shape as the real poller: an admin command or a
+            // table-detail request wakes the sleep and is applied before the
+            // re-publish happens immediately.
+            match wait_interval_or_control(&mut interval_rx, &mut admin_rx, &mut detail_rx).await {
+                Some(PollWake::Admin(cmd)) => {
+                    match cmd {
+                        AdminCommand::CancelBackend(pid) => cancelled.insert(pid),
+                        AdminCommand::TerminateBackend(pid) => terminated.insert(pid),
+                    };
+                    last_admin = Some(admin_result(cmd, Ok(true)));
+                }
+                // The mock only has a catalog fixture for `order_items`
+                // (`TableDetail::mock().oid`); any other requested oid gets
+                // the calm "no fixture" shape instead of silently reusing
+                // `order_items`'s data — see `TableDetail::mock_unavailable`.
+                Some(PollWake::Detail(TableDetailRequest::Fetch { oid, schema: s, name })) => {
+                    let mock = TableDetail::mock();
+                    table_detail = Some(Arc::new(if oid == mock.oid {
+                        mock
+                    } else {
+                        TableDetail::mock_unavailable(oid, s, name)
+                    }));
+                }
+                Some(PollWake::Detail(TableDetailRequest::Clear)) => {
+                    table_detail = None;
+                }
+                None => {}
             }
             ticks += 1;
             let mut snapshot = DbSnapshot::mock();
@@ -1607,6 +1860,7 @@ pub fn spawn_mock(
                 snapshot.schema = schema.clone(); // reuse, like real ticks
                 snapshot.statements = statements.clone();
             }
+            snapshot.table_detail = table_detail.clone();
             if tx.send(Arc::new(snapshot)).is_err() {
                 // All receivers dropped: nobody is watching, stop polling.
                 break;
@@ -1682,8 +1936,16 @@ mod tests {
         rx
     }
 
+    /// A table-detail-request channel whose sender stays alive (leaked) —
+    /// the shape every non-detail test wants: open but silent (v0.15).
+    fn detail_rx() -> mpsc::Receiver<TableDetailRequest> {
+        let (tx, rx) = mpsc::channel(4);
+        std::mem::forget(tx);
+        rx
+    }
+
     fn spawn_mock_default(ms: u64) -> watch::Receiver<Arc<DbSnapshot>> {
-        spawn_mock(interval_rx(ms), refresh_rx(), admin_rx())
+        spawn_mock(interval_rx(ms), refresh_rx(), admin_rx(), detail_rx())
     }
 
     /// The poller must publish at least two snapshots that differ from each
@@ -1738,7 +2000,7 @@ mod tests {
     #[tokio::test]
     async fn mock_poller_survives_dropped_interval_sender() {
         let (interval_tx, interval_rx) = watch::channel(Duration::from_millis(10));
-        let mut rx = spawn_mock(interval_rx, refresh_rx(), admin_rx());
+        let mut rx = spawn_mock(interval_rx, refresh_rx(), admin_rx(), detail_rx());
         drop(interval_tx);
 
         for _ in 0..2 {
@@ -1754,7 +2016,7 @@ mod tests {
     #[tokio::test]
     async fn interval_change_wakes_the_poller() {
         let (interval_tx, interval_rx) = watch::channel(Duration::from_secs(3600));
-        let mut rx = spawn_mock(interval_rx, refresh_rx(), admin_rx());
+        let mut rx = spawn_mock(interval_rx, refresh_rx(), admin_rx(), detail_rx());
         rx.borrow_and_update();
 
         // With a one-hour interval nothing would arrive in 2s — unless the
@@ -1787,6 +2049,7 @@ mod tests {
             no_shutdown(),
             db_switch_rx(),
             queries::SCHEMA_TABLE_LIMIT_DEFAULT,
+            detail_rx(),
         );
 
         assert!(matches!(rx.borrow().status, PollerStatus::Connecting));
@@ -1826,6 +2089,7 @@ mod tests {
             no_shutdown(),
             db_switch_rx(),
             queries::SCHEMA_TABLE_LIMIT_DEFAULT,
+            detail_rx(),
         );
 
         tokio::time::timeout(Duration::from_secs(5), rx.changed())
@@ -1871,6 +2135,7 @@ mod tests {
             no_shutdown(),
             db_switch_rx(),
             queries::SCHEMA_TABLE_LIMIT_DEFAULT,
+            detail_rx(),
         );
 
         // First attempt at ~0s, second after the 1s backoff. Poll the file
@@ -2169,7 +2434,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_mock_force_refresh_rebuilds_schema_immediately() {
         let (refresh_tx, refresh_rx) = watch::channel(0u64);
-        let mut rx = spawn_mock(interval_rx(10), refresh_rx, admin_rx());
+        let mut rx = spawn_mock(interval_rx(10), refresh_rx, admin_rx(), detail_rx());
         let initial = rx.borrow().schema.clone().expect("mock carries schema");
 
         refresh_tx.send(1).expect("poller alive");
@@ -2269,7 +2534,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_mock_force_refresh_rebuilds_statements_with_the_schema() {
         let (refresh_tx, refresh_rx) = watch::channel(0u64);
-        let mut rx = spawn_mock(interval_rx(10), refresh_rx, admin_rx());
+        let mut rx = spawn_mock(interval_rx(10), refresh_rx, admin_rx(), detail_rx());
         let initial = rx.borrow().statements.clone().expect("statements");
 
         refresh_tx.send(1).expect("poller alive");
@@ -2319,7 +2584,7 @@ mod tests {
     async fn mock_terminate_wakes_publishes_result_and_removes_the_row() {
         let (admin_tx, admin_rx) = mpsc::channel(8);
         let (interval_tx, interval_rx) = watch::channel(Duration::from_secs(3600));
-        let mut rx = spawn_mock(interval_rx, refresh_rx(), admin_rx);
+        let mut rx = spawn_mock(interval_rx, refresh_rx(), admin_rx, detail_rx());
         let initial = rx.borrow_and_update().clone();
         assert!(initial.activity.iter().any(|r| r.pid == 4312), "mock pid");
         assert!(initial.last_admin_action.is_none());
@@ -2349,7 +2614,7 @@ mod tests {
     #[tokio::test]
     async fn mock_cancel_idles_the_query_but_keeps_the_session() {
         let (admin_tx, admin_rx) = mpsc::channel(8);
-        let mut rx = spawn_mock(interval_rx(10), refresh_rx(), admin_rx);
+        let mut rx = spawn_mock(interval_rx(10), refresh_rx(), admin_rx, detail_rx());
         rx.borrow_and_update();
 
         admin_tx
@@ -2393,7 +2658,7 @@ mod tests {
     #[tokio::test]
     async fn mock_poller_survives_dropped_admin_sender() {
         let (admin_tx, admin_rx) = mpsc::channel::<AdminCommand>(8);
-        let mut rx = spawn_mock(interval_rx(10), refresh_rx(), admin_rx);
+        let mut rx = spawn_mock(interval_rx(10), refresh_rx(), admin_rx, detail_rx());
         drop(admin_tx);
 
         for _ in 0..2 {
@@ -2524,5 +2789,60 @@ mod tests {
         // The reset tick itself has no NEW checkpoint since its own
         // baseline yet, so the ratio is absent too.
         assert!(stats1.requested_ratio_session.is_none());
+    }
+
+    // v0.15's per-table lock indicator: `fold_relation_locks` unit tests.
+
+    #[test]
+    fn fold_relation_locks_none_schema_stays_none() {
+        assert!(fold_relation_locks(None, Some(&[])).is_none());
+    }
+
+    #[test]
+    fn fold_relation_locks_matches_by_oid_and_leaves_others_none() {
+        let schema = Some(Arc::new(SchemaSnapshot::mock()));
+        let target_oid = schema.as_ref().unwrap().tables[0].oid;
+        let locks = vec![db::RelationLockRow {
+            rel_oid: target_oid,
+            locks: 3,
+            waiting: 1,
+        }];
+        let folded = fold_relation_locks(schema, Some(&locks)).expect("schema present");
+        let matched = folded.tables.iter().find(|t| t.oid == target_oid).unwrap();
+        assert_eq!(matched.lock_count, Some(3));
+        assert_eq!(matched.lock_waiters, Some(1));
+        // Every other row was not in this tick's join: None, not carried
+        // over from whatever the mock fixture's own lock fields were.
+        for other in folded.tables.iter().filter(|t| t.oid != target_oid) {
+            assert_eq!(other.lock_count, None, "unlocked table folds to None");
+            assert_eq!(other.lock_waiters, None);
+        }
+    }
+
+    #[test]
+    fn fold_relation_locks_failed_collection_clears_every_row() {
+        let schema = Some(Arc::new(SchemaSnapshot::mock()));
+        // The mock fixture ships rows with Some(_) lock fields already (its
+        // own demo data) — a failed collection this tick must still wipe
+        // them to None, never leave a stale reading on screen.
+        assert!(
+            schema
+                .as_ref()
+                .unwrap()
+                .tables
+                .iter()
+                .any(|t| t.lock_count.is_some()),
+            "fixture assumption: mock has at least one pre-set lock reading"
+        );
+        let folded = fold_relation_locks(schema, None).expect("schema present");
+        assert!(folded.tables.iter().all(|t| t.lock_count.is_none()));
+        assert!(folded.tables.iter().all(|t| t.lock_waiters.is_none()));
+    }
+
+    #[test]
+    fn fold_relation_locks_successful_empty_join_clears_every_row() {
+        let schema = Some(Arc::new(SchemaSnapshot::mock()));
+        let folded = fold_relation_locks(schema, Some(&[])).expect("schema present");
+        assert!(folded.tables.iter().all(|t| t.lock_count.is_none()));
     }
 }

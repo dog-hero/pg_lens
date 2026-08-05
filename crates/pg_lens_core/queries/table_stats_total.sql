@@ -16,4 +16,15 @@
 -- Cheap: `pg_stat_user_tables` is an in-memory catalog/stats view, and
 -- `count(*)` over it touches no table data or indexes — safe to run every
 -- slow tick alongside table_stats.
-SELECT count(*)::int8 AS tables_total FROM pg_stat_user_tables;
+--
+-- v0.15: excludes partitioned-table PARENTS (`relkind = 'p'`) — verified
+-- live against PG16 that `pg_stat_user_tables` carries an all-zero row for
+-- the parent itself (see `table_stats_post_130000.sql`'s header), which
+-- `table_stats` also excludes; counting it here but not there would make
+-- "N of M tables" report a total one higher than could ever be reached
+-- (the parent is represented by its own AGGREGATED row from
+-- `partition_parents.sql` instead, not a `table_stats` row).
+SELECT count(*)::int8 AS tables_total
+  FROM pg_stat_user_tables AS s
+  JOIN pg_class AS c ON c.oid = s.relid
+ WHERE c.relkind <> 'p';

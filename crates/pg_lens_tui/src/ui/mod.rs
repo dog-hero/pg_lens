@@ -407,6 +407,28 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             spans.push(fd);
         }
     }
+    // v0.15: `x` cross-references the selected Schema Lens table into the
+    // Query Lens (seeds `statements_filter`) — Tables view only, and only
+    // with a row actually selected (mirrors `handle_key`'s own gate), same
+    // "where width allows" budget discipline as the `/` filter hint above.
+    if app.active_tab == Tab::SchemaLens
+        && app.schema_view == SchemaView::Tables
+        && app.selected_table().is_some()
+    {
+        let [xk, xd] = style::hint("x", ": queries");
+        let fits = Line::from(spans.clone()).width()
+            + sep.width()
+            + xk.width()
+            + xd.width()
+            + sep.width()
+            + data_span.width()
+            <= area.width as usize;
+        if fits {
+            spans.push(sep.clone());
+            spans.push(xk);
+            spans.push(xd);
+        }
+    }
     // U2's `d: database` hint works from any lens, but the tight lenses
     // (Micro/Schema/Query, already carrying filter/admin/sort/R hints) can
     // run out of the 120-col budget — rather than let ratatui silently clip
@@ -617,8 +639,91 @@ mod tests {
         assert!(screen.contains("db: shop"), "footer names the database");
         // Mock schema carries bloat, so the footer shows the ESTIMATED label
         // and the on-demand re-estimate hint.
+        eprintln!("{screen}");
         assert!(screen.contains("ESTIMATED"), "estimate label is mandatory");
         assert!(screen.contains("R: refresh + bloat"), "schema R hint: {screen}");
+    }
+
+    /// v0.15's per-table lock indicator: the mock fixture ships one
+    /// granted-only table (`pgbench_accounts`, `L:2` dim) and one with a
+    /// real waiter (`order_items`, `L:3!` red) — both markers render inline
+    /// in the Table cell, and neither shows on a table with no lock data
+    /// this tick (e.g. `pgbench_branches`, `lock_count: None`).
+    #[test]
+    fn schema_lens_renders_the_lock_indicator_markers() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let screen = render(&mut app);
+        assert!(screen.contains("L:2"), "granted-only marker: {screen}");
+        assert!(screen.contains("L:3!"), "waiter marker: {screen}");
+    }
+
+    /// The Schema Lens table detail panel spells out the lock reading in
+    /// full — both the "held, waiting — blocked right now" red case and the
+    /// "no lock data this tick" calm case (a table whose fold this tick
+    /// found nothing, e.g. because best-effort collection failed or it
+    /// genuinely holds none).
+    #[test]
+    fn schema_detail_shows_the_locks_line() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let idx = app
+            .schema_row_order
+            .iter()
+            .position(|&i| app.snapshot.schema.as_ref().unwrap().tables[i].name == "order_items")
+            .expect("mock has order_items");
+        app.schema_table_state.select(Some(idx));
+        app.detail_open = true;
+        let backend = TestBackend::new(160, 60);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("locks:"), "{screen}");
+        assert!(screen.contains("3 held, 1 waiting"), "{screen}");
+        assert!(screen.contains("blocked right now"), "{screen}");
+    }
+
+    /// v0.15: the Schema Lens statusbar advertises the `x` cross-lens jump
+    /// hint only with a Tables-view row actually selected — same "where
+    /// width allows" convention as `d`/`!`.
+    #[test]
+    fn statusbar_advertises_the_x_hint_on_schema_tables_with_a_selection() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        app.schema_table_state.select(Some(0));
+        // The Schema Lens statusbar already carries v/sort/R/+-/!/d hints;
+        // 160 cols leaves only ~2 chars of slack (just enough for the
+        // shortest hint, `!: psql`) — a noticeably wider terminal is needed
+        // before `x: queries` (and `/: filter`, `d: database`) actually fit.
+        let backend = TestBackend::new(220, 36);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("x: queries"), "{screen}");
+    }
+
+    /// On the standard 120-col width the Schema Lens statusbar is already
+    /// near capacity (v: vacuum, sort, R, refresh) — same "silently hidden,
+    /// never truncated" contract as the `!` psql hint above.
+    #[test]
+    fn statusbar_hides_the_x_hint_on_a_tight_120_col_terminal() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        app.schema_table_state.select(Some(0));
+        let screen = render(&mut app);
+        assert!(!screen.contains("x: queries"), "{screen}");
     }
 
     /// F2: the "Vacuum / wraparound" section renders under the tables list —
@@ -833,6 +938,83 @@ mod tests {
         assert!(screen.contains("mod since analyze"));
         assert!(screen.contains("order_items_pkey"), "index bloat listed: {screen}");
         assert!(screen.contains("35.0%"), "index bloat pct shown");
+    }
+
+    /// v0.15's partition collapsing: the Tables view shows the aggregated
+    /// parent row with a `parts: N` marker and hides its leaves by default;
+    /// the footer carries a terse `+N parts (p)` hint.
+    #[test]
+    fn schema_lens_shows_the_partition_parent_marker_and_hides_leaves() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let screen = render(&mut app);
+        assert!(screen.contains("events_by_month"), "{screen}");
+        assert!(screen.contains("[parts: 3]"), "parent marker: {screen}");
+        assert!(!screen.contains("events_by_month_2026_06"), "leaf must stay hidden: {screen}");
+        assert!(screen.contains("+3 parts (p)"), "footer hint: {screen}");
+    }
+
+    /// `p` expands the view: every leaf appears (prefixed to read as
+    /// subordinate to its parent), and the footer hint flips.
+    #[test]
+    fn p_expands_the_tables_view_to_show_partition_leaves() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        press(&mut app, crossterm::event::KeyCode::Char('p'));
+        let screen = render(&mut app);
+        assert!(screen.contains("events_by_month_2026_06"), "{screen}");
+        assert!(screen.contains("events_by_month_2026_07"), "{screen}");
+        assert!(screen.contains("events_by_month_2026_08"), "{screen}");
+        assert!(screen.contains("parts shown (p)"), "footer hint: {screen}");
+    }
+
+    /// Enter on the partition parent opens the detail overlay's drill-down
+    /// section listing its leaves (name, size, live/dead) — composed with
+    /// the pre-existing `\d`-style sections, not replacing them.
+    #[test]
+    fn schema_detail_drills_into_partition_leaves() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let schema = app.snapshot.schema.as_deref().expect("mock schema");
+        let idx = app
+            .schema_row_order
+            .iter()
+            .position(|&i| schema.tables[i].name == "events_by_month")
+            .expect("mock has the partition parent");
+        app.schema_table_state.select(Some(idx));
+        app.detail_open = true;
+
+        let backend = ratatui::backend::TestBackend::new(160, 60);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| crate::ui::draw(&mut app, frame)).expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("partitions (3):"), "{screen}");
+        assert!(screen.contains("events_by_month_2026_06"), "{screen}");
+        assert!(screen.contains("events_by_month_2026_07"), "{screen}");
+        assert!(screen.contains("events_by_month_2026_08"), "{screen}");
+    }
+
+    /// A plain (non-partitioned) table's detail has no drill-down section.
+    #[test]
+    fn schema_detail_has_no_partitions_section_for_a_plain_table() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let schema = app.snapshot.schema.as_deref().expect("mock schema");
+        let idx = app
+            .schema_row_order
+            .iter()
+            .position(|&i| schema.tables[i].name == "order_items")
+            .expect("mock has order_items");
+        app.schema_table_state.select(Some(idx));
+        app.detail_open = true;
+        let screen = render(&mut app);
+        assert!(!screen.contains("partitions ("), "{screen}");
     }
 
     /// U1: the Index Lens is its own tab now (no more `i` toggle) — it
@@ -1450,8 +1632,9 @@ mod tests {
         // would clip) — a taller terminal, same width, keeps every
         // assertion below meaningful instead of silently checking clipped
         // content. v0.12 added two more rows (`/`'s updated description,
-        // `\`'s new clear-filter row), so the terminal grew again.
-        let backend = TestBackend::new(120, 42);
+        // `\`'s new clear-filter row), so the terminal grew again. v0.15
+        // added the `x` cross-lens-jump row, one more.
+        let backend = TestBackend::new(120, 43);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
         let screen: String = terminal
@@ -1472,6 +1655,8 @@ mod tests {
         // v0.12: navigation & scroll polish is listed too.
         assert!(screen.contains("jump to a lens directly"), "{screen}");
         assert!(screen.contains("previously active lens"), "{screen}");
+        // v0.15: the cross-lens jump binding is listed.
+        assert!(screen.contains("jump to Query Lens filtered"), "{screen}");
         assert!(screen.contains("first / last row"), "{screen}");
         assert!(screen.contains("move selection by a page"), "{screen}");
         // v0.12: lens filters — the shared `/` binding's updated

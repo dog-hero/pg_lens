@@ -19,6 +19,12 @@ pub struct QuerySet {
     /// the same transaction as `table_stats` — see `table_stats_total.sql`
     /// for why this is a separate query rather than a window function.
     pub table_stats_total: &'static str,
+    /// v0.15's partition collapsing: aggregated stats for native
+    /// partitioned-table PARENTS (`relkind = 'p'`), one row per parent,
+    /// summed over their leaf partitions via `pg_partition_tree`. Same
+    /// `$1` bind param (`schema_table_limit`) and slow cadence as
+    /// `table_stats` — see `queries/partition_parents.sql`.
+    pub partition_parents: &'static str,
     pub bloat_tables: &'static str,
     pub bloat_indexes: &'static str,
     /// Query Lens (pg_stat_statements). Only PREPARED when the extension is
@@ -77,6 +83,12 @@ pub struct QuerySet {
     /// best-effort like `databases`/`prepared_xacts` — a cheap single-row
     /// aggregate + scalar settings read, never allowed to fail the poll.
     pub lock_capacity: &'static str,
+    /// Per-table lock indicator (v0.15): `pg_locks` grouped by relation.
+    /// Runs on the fast tick, best-effort like `lock_capacity` — a cheap
+    /// grouped aggregate over a world-readable view, but never allowed to
+    /// fail the poll. See `poller::collect_relation_locks`/
+    /// `poller::fold_relation_locks`.
+    pub locks_by_relation: &'static str,
     /// Idle connection / connection-age census (v0.11): `pg_stat_activity`
     /// rows with `state = 'idle'`, oldest `state_change` first, capped at
     /// `IDLE_SESSIONS_LIMIT` rows — a separate query from `activity` (Option
@@ -84,6 +96,18 @@ pub struct QuerySet {
     /// payload/consumers stay untouched. Runs on the fast tick, best-effort
     /// like `databases`/`prepared_xacts`.
     pub idle_sessions: &'static str,
+    /// `\d`-style column list (v0.15's on-demand table detail), one bind
+    /// param (`$1`, the table's oid). Runs ONLY when a frontend requests a
+    /// table's detail (never on the fast tick or the schema cadence) — see
+    /// `poller::collect_table_detail`.
+    pub table_detail_columns: &'static str,
+    /// Constraints (PK/FK/UNIQUE/CHECK/EXCLUDE) of the table PLUS foreign
+    /// keys on other tables that reference it, same on-demand cadence as
+    /// `table_detail_columns`.
+    pub table_detail_constraints: &'static str,
+    /// Full `CREATE INDEX` definitions of the table's own indexes, same
+    /// on-demand cadence as `table_detail_columns`.
+    pub table_detail_indexdefs: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -133,6 +157,9 @@ const TABLE_STATS_POST_130000: &str = include_str!("../queries/table_stats_post_
 // v0.15: TRUE (uncapped) table count, version-independent 13+ — no
 // post_NNNNNN variant needed.
 const TABLE_STATS_TOTAL: &str = include_str!("../queries/table_stats_total.sql");
+// v0.15: partition-parent aggregation, version-independent 13+
+// (`pg_partition_tree` shipped in PG12) — no post_NNNNNN variant needed.
+const PARTITION_PARENTS: &str = include_str!("../queries/partition_parents.sql");
 // Estimated bloat, adapted from ioguix/pgsql-bloat-estimation
 // (BSD-2-Clause — attribution kept in the SQL headers). The originals are
 // 9.0/8.2-compatible, so one file serves the whole 13+ range (verified live
@@ -188,9 +215,18 @@ const PREPARED_XACTS: &str = include_str!("../queries/prepared_xacts.sql");
 // Lock-table pressure gauge (v0.11). pg_locks + current_setting() are
 // stable across the whole supported range — no post_NNNNNN variant needed.
 const LOCK_CAPACITY: &str = include_str!("../queries/lock_capacity.sql");
+// Per-table lock indicator (v0.15). pg_locks is stable across the whole
+// supported range — no post_NNNNNN variant needed.
+const LOCKS_BY_RELATION: &str = include_str!("../queries/locks_by_relation.sql");
 // Idle connection / connection-age census (v0.11). state_change is stable
 // across the whole supported range — no post_NNNNNN variant needed.
 const IDLE_SESSIONS: &str = include_str!("../queries/idle_sessions.sql");
+// On-demand table detail (v0.15, the `\d`-style overlay). Stable catalog
+// shape 13+ (pg_attribute/pg_attrdef/pg_constraint/pg_index have not changed
+// in a way that matters here) — no post_NNNNNN variants needed.
+const TABLE_DETAIL_COLUMNS: &str = include_str!("../queries/table_detail_columns.sql");
+const TABLE_DETAIL_CONSTRAINTS: &str = include_str!("../queries/table_detail_constraints.sql");
+const TABLE_DETAIL_INDEXDEFS: &str = include_str!("../queries/table_detail_indexdefs.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -207,6 +243,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             server_info: SERVER_INFO_POST_130000,
             table_stats: TABLE_STATS_POST_130000,
             table_stats_total: TABLE_STATS_TOTAL,
+            partition_parents: PARTITION_PARENTS,
             bloat_tables: BLOAT_TABLES,
             bloat_indexes: BLOAT_INDEXES,
             statements: STATEMENTS,
@@ -224,7 +261,11 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             databases: DATABASES,
             prepared_xacts: PREPARED_XACTS,
             lock_capacity: LOCK_CAPACITY,
+            locks_by_relation: LOCKS_BY_RELATION,
             idle_sessions: IDLE_SESSIONS,
+            table_detail_columns: TABLE_DETAIL_COLUMNS,
+            table_detail_constraints: TABLE_DETAIL_CONSTRAINTS,
+            table_detail_indexdefs: TABLE_DETAIL_INDEXDEFS,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -233,6 +274,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             server_info: SERVER_INFO_POST_130000,
             table_stats: TABLE_STATS_POST_130000,
             table_stats_total: TABLE_STATS_TOTAL,
+            partition_parents: PARTITION_PARENTS,
             bloat_tables: BLOAT_TABLES,
             bloat_indexes: BLOAT_INDEXES,
             statements: STATEMENTS,
@@ -250,7 +292,11 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             databases: DATABASES,
             prepared_xacts: PREPARED_XACTS,
             lock_capacity: LOCK_CAPACITY,
+            locks_by_relation: LOCKS_BY_RELATION,
             idle_sessions: IDLE_SESSIONS,
+            table_detail_columns: TABLE_DETAIL_COLUMNS,
+            table_detail_constraints: TABLE_DETAIL_CONSTRAINTS,
+            table_detail_indexdefs: TABLE_DETAIL_INDEXDEFS,
         })
     } else {
         Err(format!(
@@ -317,6 +363,20 @@ mod tests {
             assert!(q.table_stats_total.contains("pg_stat_user_tables"));
             assert!(q.table_stats_total.contains("count(*)"));
             assert!(q.table_stats_total.contains("AS tables_total"));
+            // v0.15: partition-aware columns on table_stats + the parents
+            // aggregation query.
+            assert!(q.table_stats.contains("is_partition"));
+            assert!(q.table_stats.contains("parent_oid"));
+            assert!(q.partition_parents.contains("pg_partition_tree"));
+            assert!(q.partition_parents.contains("AS partition_count"));
+            assert!(q.partition_parents.contains("LIMIT $1"));
+            // A partitioned-table PARENT (relkind='p') must never appear in
+            // table_stats/table_stats_total — verified live against PG16
+            // that pg_stat_user_tables DOES carry an all-zero row for it,
+            // which would otherwise double-report the parent alongside the
+            // properly aggregated row partition_parents.sql produces.
+            assert!(q.table_stats.contains("relkind <> 'p'"));
+            assert!(q.table_stats_total.contains("relkind <> 'p'"));
         }
     }
 
@@ -514,6 +574,19 @@ mod tests {
     }
 
     #[test]
+    fn locks_by_relation_query_serves_pg13_and_up_with_conventions() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.locks_by_relation.contains("pg_catalog.pg_locks"));
+            assert!(q.locks_by_relation.contains("relation IS NOT NULL"));
+            assert!(q.locks_by_relation.contains("current_database()"));
+            assert!(q.locks_by_relation.contains("AS rel_oid"));
+            assert!(q.locks_by_relation.contains("AS locks"));
+            assert!(q.locks_by_relation.contains("AS waiting"));
+        }
+    }
+
+    #[test]
     fn idle_sessions_query_serves_pg13_and_up_with_conventions() {
         for version in [130_011, 140_000, 160_003] {
             let q = for_version(version).expect("supported");
@@ -529,6 +602,29 @@ mod tests {
             // Never crosses idle-in-transaction sessions — those are the
             // v0.9 xact-age hunter's territory, not this census's.
             assert!(!q.idle_sessions.to_lowercase().contains("idle in transaction"));
+        }
+    }
+
+    #[test]
+    fn table_detail_queries_serve_pg13_and_up_with_a_bind_param_oid() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.table_detail_columns.contains("pg_attribute"));
+            assert!(q.table_detail_columns.contains("pg_attrdef"));
+            // The bind param itself is never cast to `::oid` — tokio-postgres's
+            // client-side type check rejects an `i64` binding against a
+            // wire-inferred `oid` param (verified against a live PG16); the
+            // COLUMN is cast to `::int8` instead, keeping the param `int8`.
+            assert!(q.table_detail_columns.contains("attrelid::int8 = $1"));
+            assert!(q.table_detail_columns.contains("NOT a.attisdropped"));
+            assert!(q.table_detail_columns.contains("attidentity::text"));
+            assert!(q.table_detail_columns.contains("attgenerated::text"));
+            assert!(q.table_detail_constraints.contains("pg_constraint"));
+            assert!(q.table_detail_constraints.contains("pg_get_constraintdef"));
+            assert!(q.table_detail_constraints.contains("confrelid::int8 = $1"));
+            assert!(q.table_detail_constraints.contains("conrelid::int8 = $1"));
+            assert!(q.table_detail_indexdefs.contains("pg_get_indexdef"));
+            assert!(q.table_detail_indexdefs.contains("indrelid::int8 = $1"));
         }
     }
 

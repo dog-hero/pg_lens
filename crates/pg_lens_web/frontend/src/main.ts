@@ -8,6 +8,7 @@ import {
   requestAdmin,
   requestDbSwitch,
   requestSchemaRefresh,
+  requestTableDetail,
   type AdminKind,
 } from "./actions";
 import { populateDbSwitcher } from "./db_switcher";
@@ -210,6 +211,13 @@ const schemaLens = new SchemaLens(
   el<HTMLParagraphElement>("schema-warning"),
   el<HTMLParagraphElement>("schema-placeholder"),
   document.getElementById("schema-filter") as HTMLInputElement | null,
+  (oid, schema, name) => {
+    // v0.15: fire-and-forget — the response rides the normal snapshot/SSE
+    // stream as `DbSnapshot.table_detail`, picked up by the next
+    // `schemaLens.update()` call (see below).
+    void requestTableDetail(activeToken, oid, schema, name);
+  },
+  document.getElementById("schema-partitions-toggle") as HTMLInputElement | null,
 );
 const indexAdvisor = new IndexAdvisor(
   el<HTMLTableElement>("indexes"),
@@ -392,7 +400,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   // "quiet unless something's wrong" contract as the waits strip.
   renderOldestXact(xactHeadline, xactHeadlineAge, xactHeadlineMeta, xactHeadlineState, snapshot.activity);
   table.update(snapshot.activity, snapshot.locks);
-  schemaLens.update(snapshot.schema, snapshot.vitals.database);
+  schemaLens.update(snapshot.schema, snapshot.vitals.database, snapshot.table_detail);
   indexAdvisor.update(snapshot.schema, snapshot.vitals.database);
   vacuumPanel.update(snapshot.schema, snapshot.vacuum_progress, snapshot.prepared_xacts);
   statementsLens.update(snapshot.statements, snapshot.vitals.database);

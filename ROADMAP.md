@@ -177,6 +177,46 @@ service picker for `pg_lens serve` — TTY prompt with a numbered list when a
 services file exists and nothing was selected (auto-select with notice when
 exactly one); non-TTY keeps the v0.13 fail-loud.
 
+## v0.15 — "Schema Lens completo" (in progress — owner-selected 2026-08-05)
+
+From the 2026-08-05 Schema-Lens-focused discovery, seeded by owner reports.
+Two of the three reports were confirmed as real defects/gaps with code evidence.
+
+- [x] **Honest table counts + limit fix (BUG)** — `table_stats` SQL has a
+  silent `LIMIT 200` (by size desc): table 201+ never appears and the footer
+  shows the truncated count as if it were the total. Also a perf trap: the
+  `ORDER BY pg_total_relation_size(...)` evaluates size for EVERY table in the
+  cluster even though only 200 survive. Fix: footer shows `N of M tables`
+  (real total via a cheap `count(*)`), make the limit configurable
+  (config.toml + flag), and restructure the query so per-row size evaluation
+  is bounded (subquery-limit by a cheap ordering first, or document the cost).
+  TUI + Web. **S/M.**
+- [x] **Table structure detail (on-demand)** — Enter on a table today shows
+  sizes/tuples/vacuum/bloat/indexes only. Add the table's STRUCTURE — the
+  kind of information psql's `\d` covers (columns with name/type/nullable/
+  default; constraints PK/FK/UNIQUE/CHECK via `pg_get_constraintdef`;
+  referencing FKs "what references this table"; index definitions) — but
+  rendered in pg_lens's own detail-panel style, NOT a psql-output clone.
+  Fetched ON-DEMAND when the detail opens (new request/response channel
+  following the `AdminCommand` immediate-wake pattern; never on the poll
+  cadence). Scrollable detail overlay. TUI + Web. **M/L.**
+- [x] **Partition collapsing + drill-down** — native partitioned tables:
+  parents (`relkind='p'`) have no `pg_stat_user_tables` row and every leaf
+  partition floods the list. Collapse to the PARENT by default with
+  aggregated stats (sum sizes/rows/dead via `pg_partition_tree`, partition
+  count column); Enter on a parent drills into its partitions. Growth ring
+  re-keys to the parent oid for aggregated Δ1h. TUI + Web. **L.**
+- [x] **Cross-lens jump to Query Lens + table lock indicator** — a key on the
+  selected table (suggest `x`) jumps to the Query Lens with
+  `statements_filter` seeded to the table name (substring match — imperfect,
+  documented); plus a lock-count indicator per table joining the
+  already-polled `pg_locks` data (no new SQL) so a locked table is visible
+  without tab-switching. TUI + Web where cheap. **M.**
+
+Deferred from the same pass: Index Lens jump (needs new filter state —
+reopens a v0.12 decision; after the Query jump proves the pattern), sequence
+exhaustion, matview badge / TOAST split / per-table cache-hit columns.
+
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
 - [ ] **I/O profile** — `pg_stat_io` (PG 16+ only), backend_type × context

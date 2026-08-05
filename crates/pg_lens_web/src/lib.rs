@@ -36,7 +36,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::stream::Stream;
-use pg_lens_core::{AdminCommand, DbSnapshot};
+use pg_lens_core::{AdminCommand, DbSnapshot, TableDetailRequest};
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch};
@@ -63,6 +63,13 @@ struct WebState {
     /// [`read_only`] — only by the token, like `schema_refresh` (see
     /// [`db_switch_handler`]).
     db_switch: mpsc::Sender<String>,
+    /// v0.15 web parity for the TUI's Enter-on-a-table `\d` overlay: sending
+    /// a request here asks the poller to fetch that table's on-demand
+    /// detail (columns/constraints/indexes) and stamp it into the next
+    /// snapshot's `table_detail`. Like `db_switch`, this is a read (not a
+    /// mutating action), so it is NOT gated by [`read_only`] — only by the
+    /// token, same precedent as [`schema_refresh_handler`].
+    detail: mpsc::Sender<TableDetailRequest>,
     /// Read-only mode (`--read-only` / `PG_LENS_READ_ONLY` / config.toml,
     /// resolved by the CLI and handed in here). The REAL gate: [`admin`]
     /// refuses every admin request when this is true, BEFORE it even checks
@@ -132,11 +139,13 @@ where
 /// `read_only` (`--read-only` / `PG_LENS_READ_ONLY` / config.toml) is a
 /// stronger gate than the token: when true, [`admin`] refuses every request
 /// regardless of whether a valid token was presented.
+#[allow(clippy::too_many_arguments)] // one call site's worth of poller wiring
 pub fn router(
     snapshots: watch::Receiver<Arc<DbSnapshot>>,
     schema_refresh: watch::Sender<u64>,
     admin: mpsc::Sender<AdminCommand>,
     db_switch: mpsc::Sender<String>,
+    detail: mpsc::Sender<TableDetailRequest>,
     auth_token: Option<String>,
     read_only: bool,
 ) -> Router {
@@ -146,6 +155,7 @@ pub fn router(
         schema_refresh,
         admin,
         db_switch,
+        detail,
         read_only,
     };
     let api = Router::new()
@@ -161,6 +171,8 @@ pub fn router(
         .route("/admin/terminate/{pid}", post(admin_terminate))
         // v0.13: web parity for the TUI's `d` database picker.
         .route("/db/switch", post(db_switch_handler))
+        // v0.15: web parity for the TUI's Enter-on-a-table `\d` overlay.
+        .route("/schema/detail", post(schema_detail_handler))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
         .nest("/api", api)
@@ -329,6 +341,42 @@ async fn db_switch_handler(
     }
 }
 
+/// Body of `POST /api/schema/detail`.
+#[derive(Deserialize)]
+struct SchemaDetailRequest {
+    oid: i64,
+    schema: String,
+    name: String,
+}
+
+/// `POST /api/schema/detail` — v0.15 web parity for the TUI's Enter-on-a-
+/// table `\d` overlay: queues an on-demand [`TableDetailRequest::Fetch`] for
+/// the poller (sole DB-client owner), which stamps the result into
+/// `DbSnapshot::table_detail` on its next tick — the frontend picks it up
+/// off the normal snapshot/SSE stream, no separate response here. Gated by
+/// [`require_auth`] like every other `/api` route, but **deliberately NOT
+/// gated by `read_only`** — this is a read against catalog views, the same
+/// precedent as [`db_switch_handler`], not a mutating admin action.
+async fn schema_detail_handler(
+    State(state): State<WebState>,
+    Json(body): Json<SchemaDetailRequest>,
+) -> Response {
+    let request = TableDetailRequest::Fetch {
+        oid: body.oid,
+        schema: body.schema,
+        name: body.name,
+    };
+    match state.detail.try_send(request) {
+        Ok(()) => (StatusCode::ACCEPTED, "table detail requested").into_response(),
+        // Full or closed: the poller is busy or gone — never block the request.
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "poller unavailable; try again",
+        )
+            .into_response(),
+    }
+}
+
 /// `GET /api/config` — small, non-secret feature flags the frontend needs to
 /// decide what to render (currently just `read_only`). Defense in depth
 /// only: the frontend uses this to grey out its own buttons, but the actual
@@ -438,6 +486,7 @@ mod tests {
         schema_refresh: watch::Receiver<u64>,
         admin_rx: mpsc::Receiver<AdminCommand>,
         db_switch_rx: mpsc::Receiver<String>,
+        detail_rx: mpsc::Receiver<TableDetailRequest>,
         router: Router,
     }
 
@@ -450,11 +499,13 @@ mod tests {
         let (schema_tx, schema_rx) = watch::channel(0u64);
         let (admin_tx, admin_rx) = mpsc::channel(8);
         let (db_switch_tx, db_switch_rx) = mpsc::channel(4);
+        let (detail_tx, detail_rx) = mpsc::channel(4);
         let router = router(
             snap_rx,
             schema_tx,
             admin_tx,
             db_switch_tx,
+            detail_tx,
             token.map(str::to_string),
             read_only,
         );
@@ -463,6 +514,7 @@ mod tests {
             schema_refresh: schema_rx,
             admin_rx,
             db_switch_rx,
+            detail_rx,
             router,
         }
     }
@@ -859,6 +911,76 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert_eq!(h.db_switch_rx.try_recv().expect("forwarded"), "warehouse".to_string());
+    }
+
+    // --- v0.15: POST /api/schema/detail ---------------------------------------
+
+    /// A well-formed request is forwarded to the poller's detail channel.
+    #[tokio::test]
+    async fn schema_detail_forwards_the_request() {
+        let mut h = mock_harness(None);
+        let response = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/schema/detail",
+            None,
+            r#"{"oid":16405,"schema":"public","name":"order_items"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let forwarded = h.detail_rx.try_recv().expect("forwarded");
+        assert_eq!(
+            forwarded,
+            TableDetailRequest::Fetch {
+                oid: 16_405,
+                schema: "public".to_string(),
+                name: "order_items".to_string(),
+            }
+        );
+    }
+
+    /// Token-gated like `db_switch`/`schema_refresh` (not `admin`).
+    #[tokio::test]
+    async fn schema_detail_is_token_gated_when_a_token_is_set() {
+        let mut h = mock_harness(Some("sekret"));
+        let denied = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/schema/detail",
+            None,
+            r#"{"oid":1,"schema":"public","name":"t"}"#,
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert!(h.detail_rx.try_recv().is_err());
+
+        let allowed = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/schema/detail",
+            Some("sekret"),
+            r#"{"oid":1,"schema":"public","name":"t"}"#,
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::ACCEPTED);
+        assert!(h.detail_rx.try_recv().is_ok());
+    }
+
+    /// Unlike `admin`, a table-detail request is a read against catalog
+    /// views: it must NOT be blocked by read-only mode.
+    #[tokio::test]
+    async fn schema_detail_is_not_blocked_by_read_only_mode() {
+        let mut h = mock_harness_with(None, true);
+        let response = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/schema/detail",
+            None,
+            r#"{"oid":1,"schema":"public","name":"t"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert!(h.detail_rx.try_recv().is_ok());
     }
 
     #[test]

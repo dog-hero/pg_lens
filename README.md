@@ -38,10 +38,22 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
   (0.5s–10s).
 - **Schema Lens (data layer)** — per-table `pg_stat_user_tables` counters
   and on-disk sizes, refreshed on a separate slow cadence (default 60s,
-  `--schema-interval`) so they never tax the fast tick. **Estimated bloat
-  is on-demand** — its queries are heavy, so they run only when you press
-  `R` in the Schema Lens (never automatically, so connecting is instant).
-  Bloat estimation uses queries adapted from
+  `--schema-interval`) so they never tax the fast tick. The Tables view
+  shows an honest `N of M tables` count (a `count(*)` alongside the
+  size-ranked row query — never a silently truncated list masquerading as
+  the total), and the row cap is configurable with `--schema-table-limit`
+  (default 200, clamp 10–10000) for clusters with more than 200 user
+  tables. Native partitioned tables collapse to one parent row with
+  aggregated size/rows/dead-tuple stats and a `[parts: N]` marker; `p`
+  toggles the individual leaf partitions. Pressing `Enter` on a table also
+  shows its full STRUCTURE (columns, constraints, referencing FKs, index
+  definitions — psql's `\d`, in pg_lens's own detail-panel style), fetched
+  on demand. Tables with locks held against them show an `L:N`/`L:N!`
+  badge, and `x` jumps to the Query Lens filtered to statements mentioning
+  the selected table. **Estimated bloat is on-demand** — its queries are
+  heavy, so they run only when you press `R` in the Schema Lens (never
+  automatically, so connecting is instant). Bloat estimation uses queries
+  adapted from
   [ioguix/pgsql-bloat-estimation](https://github.com/ioguix/pgsql-bloat-estimation)
   (BSD-2-Clause, attribution kept in the SQL headers). Methodology note:
   these are *statistics-based estimates*, not measurements — they rely on a
@@ -183,9 +195,9 @@ prefer `curl` — browser downloads get the quarantine attribute and
 Gatekeeper will refuse to run the unsigned binary:
 
 ```sh
-# macOS (Apple Silicon) — replace v0.14.0 with the latest tag from the releases page
-curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.14.0/pg_lens-v0.14.0-aarch64-apple-darwin.tar.gz | tar xz
-./pg_lens-v0.14.0-aarch64-apple-darwin/pg_lens --mock
+# macOS (Apple Silicon) — replace v0.15.0 with the latest tag from the releases page
+curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.15.0/pg_lens-v0.15.0-aarch64-apple-darwin.tar.gz | tar xz
+./pg_lens-v0.15.0-aarch64-apple-darwin/pg_lens --mock
 ```
 
 If you already downloaded it with a browser and macOS says the app
@@ -275,13 +287,13 @@ forbids `_` in package names); it installs `/usr/bin/pg_lens` plus docs
 and has no dependencies.
 
 ```sh
-# Debian / Ubuntu (pick amd64 or arm64) — replace 0.14.0 with the latest release
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.14.0/pg-lens_0.14.0_amd64.deb
-sudo dpkg -i pg-lens_0.14.0_amd64.deb
+# Debian / Ubuntu (pick amd64 or arm64) — replace 0.15.0 with the latest release
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.15.0/pg-lens_0.15.0_amd64.deb
+sudo dpkg -i pg-lens_0.15.0_amd64.deb
 
 # RHEL / Fedora / SUSE (x86_64 or aarch64)
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.14.0/pg-lens-0.14.0-1.x86_64.rpm
-sudo rpm -i pg-lens-0.14.0-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.14.0-1.x86_64.rpm
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.15.0/pg-lens-0.15.0-1.x86_64.rpm
+sudo rpm -i pg-lens-0.15.0-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.15.0-1.x86_64.rpm
 ```
 
 ### Cargo (crates.io)
@@ -340,6 +352,7 @@ pg_lens --mock          # built-in mock data (dev/demo mode)
 | `--services-file <path>` | Services file location. Default: `$XDG_CONFIG_HOME/pg_lens/services.toml` (or `~/.config/pg_lens/services.toml`). Also read from `PG_LENS_SERVICES_FILE` |
 | `--list-services` | Print the defined services (names + host/user, never secrets) and exit |
 | `--interval <secs>` | Poll interval in seconds (minimum 0.5). Default: 2 |
+| `--schema-table-limit <N>` | Schema Lens `table_stats` row cap — the Tables view shows the top-N tables by size (clamped 10–10000). Raise it on a cluster with more than 200 user tables so the honest "N of M tables" footer stops truncating; the query stays bounded to this many expensive per-table size computations however high it's raised. Also `PG_LENS_SCHEMA_TABLE_LIMIT` env or `schema_table_limit` in config.toml. Default: 200 |
 | `--mock` | Use built-in mock data instead of a real database |
 | `--read-only` | Hard-disable admin actions (`c`/`K` in the TUI, `/api/admin/*` in the web server) — enforced server-side, not just hidden. Also `PG_LENS_READ_ONLY` env (any value other than empty/`0`/`false`/`no`/`off`, case-insensitive) or `read_only = true` in [config.toml](#config-file). See [Read-only mode](#read-only-mode) |
 | `--config-url <URL>` | Load a shared `services.toml` from a remote source: `github:OWNER/REPO/PATH[@REF]` or a plain `https://`/`http://` URL. Also `PG_LENS_CONFIG_URL` env or `remote_config` in config.toml. See [Remote connection config](#remote-connection-config) |
@@ -503,6 +516,7 @@ services file. Every key is optional:
 ```toml
 interval = 2.0          # poll interval, seconds (--interval)
 schema_interval = 60    # Schema Lens cadence, seconds (--schema-interval)
+schema_table_limit = 200   # Schema Lens table_stats row cap, 10-10000 (--schema-table-limit)
 listen = "127.0.0.1:8080"  # serve bind address (--listen)
 read_only = false       # hard-disable admin actions (--read-only)
 remote_config = "github:my-org/infra/pg_lens/services.toml@main"  # --config-url
@@ -545,12 +559,14 @@ they ever drift, trust the overlay.
 | `g` / `Home` | Jump selection to the first row |
 | `G` / `End` | Jump selection to the last row |
 | `PgUp` / `PgDn` | Move selection by a page |
-| `Enter` | Open/close the selected row's detail panel |
+| `Enter` | Open/close the selected row's detail panel — on the Schema Lens Tables view this also fetches and shows the table's structure (columns, constraints, referencing FKs, index definitions), fetched on demand; `j`/`k` scroll *inside* an open detail overlay once it's taller than the screen |
 | `/` | Filter the current table — Micro Lens (pid, database, user, application, client, state, wait or query text), Schema Lens Tables view (schema/table name), or Query Lens (query text); each lens keeps its own filter state; `Enter` applies, `Esc` reverts |
 | `\` | Clear the active lens's committed filter |
 | `w` | Full waits panel (Micro Lens only) |
 | `I` | Idle-connection census (Micro Lens only) — swaps the body to a list of idle sessions ranked oldest-first; `Esc` closes it |
 | `v` | Vacuum sub-view (Schema Lens only) |
+| `p` | Show/hide leaf partitions of a collapsed partitioned table (Schema Lens Tables view only) |
+| `x` | Jump to the Query Lens filtered (substring match) to statements mentioning the selected table (Schema Lens Tables view only); `Backspace` returns, `\` clears the seeded filter |
 | `d` | Database picker (any lens) — reconnects the poller to the chosen database |
 | `!` | Open a `psql` shell on the same connection (any lens) — see [The `psql` shell](#the-psql-shell) |
 | `?` | Keyboard help overlay — lists every binding |
@@ -799,10 +815,13 @@ overlay), v0.10 (read-only mode, remote connection config), v0.11
 lock-table pressure gauge, invalid-index flag, `psql` shell launch), v0.13
 (tab-number navigation and fast scroll, Schema/Query Lens filters, a
 modern Web Lens redesign with a database switcher and keyboard
-navigation), and v0.14 "see the trend, not just the moment" (vitals trend
+navigation), v0.14 "see the trend, not just the moment" (vitals trend
 arrows, a web history time-scrubber, Schema Lens `Δ1h` size growth, Query
-Lens temp-spill/I/O profile, an interactive `serve` service picker). See
-[ROADMAP.md](ROADMAP.md) for what's next.
+Lens temp-spill/I/O profile, an interactive `serve` service picker), and
+v0.15 "Schema Lens completo" (honest `N of M` table counts with a
+configurable `--schema-table-limit`, on-demand table structure detail,
+partition collapsing with drill-down, a per-table lock indicator, and a
+Query Lens cross-lens jump). See [ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Changelog
 

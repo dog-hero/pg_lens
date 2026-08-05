@@ -449,12 +449,45 @@ fn draw_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: R
                 Some(schema_growth::Severity::Warn) => Style::new().fg(Color::Yellow),
                 None => Style::new(),
             };
+            // v0.15's partition collapsing: a synthesized parent row gets a
+            // trailing `[parts: N]` marker; a leaf (only visible when
+            // expanded via `p`) gets a dim "\u{21b3} " prefix so it reads as
+            // subordinate to its parent even out of drill-down context.
+            let name_text = match table.partition_count {
+                Some(n) => format!("{}.{} [parts: {n}]", table.schema, table.name),
+                None if table.is_partition => format!("\u{21b3} {}.{}", table.schema, table.name),
+                None => format!("{}.{}", table.schema, table.name),
+            };
+            let name_style = if table.is_partition {
+                style.add_modifier(Modifier::DIM)
+            } else {
+                style
+            };
+            // v0.15's per-table lock indicator: a compact `L:N`/`L:N!`
+            // marker trailing the table name — a narrow dedicated column
+            // would blow the fixed-width budget (`table_column_width`'s test
+            // pins exact numbers), so it rides inside the already-flexible
+            // Table cell instead, appended AFTER truncation so it is never
+            // clipped. Red `!` when any waiter (someone blocked right now);
+            // dim when granted-only; nothing at all when `None` (no lock
+            // data this tick, or genuinely zero locks — see
+            // `TableStatRow::lock_count`'s doc comment).
+            let mut name_spans = vec![Span::styled(
+                format::truncate_with_ellipsis(&name_text, table_width),
+                name_style,
+            )];
+            if let Some(count) = table.lock_count {
+                let waiting = table.lock_waiters.unwrap_or(0);
+                let (lock_style, lock_text) = if waiting > 0 {
+                    (Style::new().fg(Color::Red).bold(), format!(" L:{count}!"))
+                } else {
+                    (Style::new().dim(), format!(" L:{count}"))
+                };
+                name_spans.push(Span::styled(lock_text, lock_style));
+            }
             Row::new([
                 Cell::from(marker.to_string()),
-                Cell::from(format::truncate_with_ellipsis(
-                    &format!("{}.{}", table.schema, table.name),
-                    table_width,
-                )),
+                Cell::from(Line::from(name_spans)),
                 Cell::from(format::human_bytes(table.total_bytes)),
                 Cell::from(growth_text).style(growth_style),
                 Cell::from(format::human_count(table.n_live_tup)),
@@ -599,13 +632,33 @@ fn draw_footer(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
     } else {
         "ESTIMATED bloat (needs fresh ANALYZE) \u{b7} R: re-estimate"
     };
+    let partitions_note = partitions_hint(schema, app.schema_show_partitions);
     let line = Line::from(format!(
-        " db: {db} \u{b7} {count_text} \u{b7} collected {staleness_secs}s ago \u{b7} {bloat_note}",
+        " db: {db} \u{b7} {count_text}{partitions_note} \u{b7} collected {staleness_secs}s ago \u{b7} {bloat_note}",
         db = app.snapshot.vitals.database,
         count_text = table_count_text(schema.tables.len(), schema.tables_total),
     ))
     .dim();
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// v0.15's partition-collapsing hint, appended to the footer — kept terse
+/// (the `?` help overlay carries the full "show/hide" wording) since the
+/// footer line is already tight at typical terminal widths: `" \u{b7} +N
+/// parts (p)"` when leaves are collapsed and there is at least one to show,
+/// `" \u{b7} parts shown (p)"` when the toggle is on, or `""` when the
+/// database has no native partitioned tables at all (never advertise an
+/// inert key).
+fn partitions_hint(schema: &SchemaSnapshot, show_partitions: bool) -> String {
+    let leaf_count = schema.tables.iter().filter(|t| t.is_partition).count();
+    if leaf_count == 0 {
+        return String::new();
+    }
+    if show_partitions {
+        " \u{b7} parts shown (p)".to_string()
+    } else {
+        format!(" \u{b7} +{leaf_count} parts (p)")
+    }
 }
 
 /// The footer's honest table-count clause. `shown` is the length of the
@@ -685,6 +738,7 @@ fn draw_detail(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
             "estimated table bloat: ",
             bloat_summary(find_table_bloat(schema, table)),
         ),
+        locks_detail_line(table),
         Line::from("indexes (estimated btree bloat):").style(style::label_style()),
     ];
 
@@ -704,11 +758,204 @@ fn draw_detail(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
         lines.push(Line::from("  (no btree index bloat estimates for this table)").dim());
     }
 
+    // v0.15's partition collapsing: a parent's drill-down section — every
+    // leaf grouped by `parent_oid`, sourced entirely from the already-
+    // collected `schema.tables` (no extra fetch needed, unlike the `\d`
+    // sections below). Only rendered for a synthesized parent row.
+    if table.partition_count.is_some() {
+        lines.push(Line::default());
+        draw_partitions_section(&mut lines, schema, table);
+    }
+
+    // v0.15: the on-demand `\d`-style sections (columns, constraints incl.
+    // "referenced by", index definitions) — appended below the always-known
+    // stats above, which render instantly (see the module doc comment for
+    // the "instant overlay, sections arrive 1-2 ticks later" contract). A
+    // partitioned parent's own catalog row still has columns/constraints/
+    // indexes (they define the partitioned table itself), so this section
+    // is meaningful for parents too, not just plain tables.
+    lines.push(Line::default());
+    draw_table_detail_sections(&mut lines, app, table);
+
+    let title = format!("{title} \u{b7} j/k: scroll");
     let panel = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
+        .scroll((app.table_detail_scroll, 0))
         .block(Block::bordered().title(title));
     frame.render_widget(Clear, panel_area);
     frame.render_widget(panel, panel_area);
+}
+
+/// v0.15's drill-down: lists every leaf partition of `parent` (matched by
+/// `parent_oid`), sorted by name for a stable, deterministic order — name,
+/// size, live/dead tuples. Sourced entirely from `schema.tables`, which
+/// already carries every leaf the slow collection fetched this cycle (no
+/// separate request, unlike the `\d` sections). A leaf that fell out of
+/// `table_stats`'s own row cap (an unlikely but possible edge on a huge
+/// partition set) simply does not appear here — same "graceful, not a
+/// panic" contract as `find_table_for_vacuum_row`.
+fn draw_partitions_section(
+    lines: &mut Vec<Line<'static>>,
+    schema: &SchemaSnapshot,
+    parent: &pg_lens_core::TableStatRow,
+) {
+    let n = parent.partition_count.unwrap_or(0);
+    lines.push(Line::from(format!("partitions ({n}):")).style(style::label_style()));
+    let mut leaves: Vec<_> = schema
+        .tables
+        .iter()
+        .filter(|t| t.parent_oid == Some(parent.oid))
+        .collect();
+    if leaves.is_empty() {
+        lines.push(Line::from("  (no leaves in the current collection)").dim());
+        return;
+    }
+    leaves.sort_by(|a, b| a.name.cmp(&b.name));
+    for leaf in leaves {
+        lines.push(Line::from(format!(
+            "  {}.{} \u{2014} {} \u{b7} live {} \u{b7} dead {}",
+            leaf.schema,
+            leaf.name,
+            format::human_bytes(leaf.total_bytes),
+            format::human_count(leaf.n_live_tup),
+            format::human_count(leaf.n_dead_tup),
+        )));
+    }
+}
+
+/// Appends the `\d`-style sections onto the detail overlay's line buffer:
+/// "loading definition…" while the request is in flight or hasn't landed
+/// yet, an inline error line on a best-effort failure, or the three
+/// sections (columns, constraints + referenced-by, indexes) on success.
+/// Matched against the SELECTED table's oid — a detail for a differently
+/// selected/previous table (still catching up after a fresh request) must
+/// never be shown under the wrong table's name.
+fn draw_table_detail_sections(
+    lines: &mut Vec<Line<'static>>,
+    app: &App,
+    table: &pg_lens_core::TableStatRow,
+) {
+    let detail = app
+        .snapshot
+        .table_detail
+        .as_deref()
+        .filter(|d| d.oid == table.oid);
+    let Some(detail) = detail else {
+        lines.push(Line::from(" loading definition\u{2026}").dim());
+        return;
+    };
+    if let Some(err) = &detail.error {
+        lines.push(Line::from(format!(" detail unavailable: {err}")).style(
+            Style::new().fg(Color::Yellow),
+        ));
+        return;
+    }
+
+    lines.push(Line::from("columns:").style(style::label_style()));
+    if detail.columns.is_empty() {
+        lines.push(Line::from("  (no columns)").dim());
+    }
+    for col in &detail.columns {
+        let null = if col.not_null { "not null" } else { "null" };
+        let default = column_default_text(col);
+        lines.push(Line::from(format!(
+            "  {} {} {null}{default}",
+            col.name, col.data_type
+        )));
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from("constraints:").style(style::label_style()));
+    let own: Vec<_> = detail
+        .constraints
+        .iter()
+        .filter(|c| c.referencing_table.is_none())
+        .collect();
+    if own.is_empty() {
+        lines.push(Line::from("  (no constraints)").dim());
+    }
+    for c in own {
+        lines.push(Line::from(format!("  {} {}: {}", c.kind, c.name, c.definition)));
+    }
+    let referencing: Vec<_> = detail
+        .constraints
+        .iter()
+        .filter(|c| c.referencing_table.is_some())
+        .collect();
+    if !referencing.is_empty() {
+        lines.push(Line::from("referenced by:").style(style::label_style()));
+        for c in referencing {
+            lines.push(Line::from(format!(
+                "  {}.{}: {}",
+                c.referencing_table.as_deref().unwrap_or("?"),
+                c.name,
+                c.definition
+            )));
+        }
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from("indexes:").style(style::label_style()));
+    if detail.indexes.is_empty() {
+        lines.push(Line::from("  (no indexes)").dim());
+    }
+    for idx in &detail.indexes {
+        lines.push(Line::from(format!("  {}", idx.definition)));
+    }
+}
+
+/// v0.15's per-table lock indicator, spelled out in the detail panel (the
+/// Tables-view row only has room for the compact `L:N`/`L:N!` marker — see
+/// `draw_table`). Same severity convention: red bold when any waiter, dim
+/// when granted-only, dim "no lock data" when this tick's best-effort
+/// collection found nothing for this table (either genuinely zero locks, or
+/// a failed collection — see `TableStatRow::lock_count`'s doc comment for
+/// why the two are indistinguishable by design).
+fn locks_detail_line(table: &pg_lens_core::TableStatRow) -> Line<'static> {
+    match table.lock_count {
+        Some(count) => {
+            let waiting = table.lock_waiters.unwrap_or(0);
+            if waiting > 0 {
+                Line::from(vec![
+                    Span::styled("locks:   ", style::label_style()),
+                    Span::styled(
+                        format!("{count} held, {waiting} waiting \u{2014} blocked right now"),
+                        Style::new().fg(Color::Red).bold(),
+                    ),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("locks:   ", style::label_style()),
+                    Span::styled(format!("{count} held (granted)"), Style::new().dim()),
+                ])
+            }
+        }
+        None => Line::from(vec![
+            Span::styled("locks:   ", style::label_style()),
+            Span::styled("none this tick", Style::new().dim()),
+        ]),
+    }
+}
+
+/// The trailing `" default ..."` / `" generated ..."` clause of a column
+/// line (v0.15) — leading space included, empty string when the column has
+/// neither a default nor an identity/generation marker. Three cases, in
+/// priority order (a column is never more than one of these):
+///   * `identity` set — `" generated always as identity"` /
+///     `" generated by default as identity"` (no `pg_attrdef` row exists
+///     for these, so `default` is always `None` alongside it);
+///   * `generated_stored` — `" generated always as (<expr>) stored"`,
+///     `default` holding the STORED generation expression;
+///   * a plain `default` — `" default <expr>"`.
+fn column_default_text(col: &pg_lens_core::TableDetailColumn) -> String {
+    if let Some(identity) = &col.identity {
+        return format!(" {identity}");
+    }
+    match &col.default {
+        Some(expr) if col.generated_stored => format!(" generated always as ({expr}) stored"),
+        Some(expr) => format!(" default {expr}"),
+        None => String::new(),
+    }
 }
 
 /// `54.0% (96.6 MB, fillfactor 100)` — or `~?` when not applicable/missing.
@@ -811,6 +1058,138 @@ mod tests {
             .collect();
         assert!(screen.contains("of"), "{screen}");
         assert!(screen.contains("raise schema_table_limit"), "{screen}");
+    }
+
+    /// End-to-end render check (v0.15): the detail overlay shows the mock
+    /// `order_items` `\d` sections (columns, constraints, referenced-by,
+    /// indexes) once `App::new()`'s mock snapshot's `table_detail` matches
+    /// the selected table — `DbSnapshot::mock()` seeds both already, so no
+    /// simulated request round-trip is needed here.
+    #[test]
+    fn detail_overlay_renders_the_mock_table_structure_sections() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::SchemaLens;
+        // `order_items` is the largest mock table (bloat fixture), so it is
+        // already selected by the default size-desc sort — but pin it
+        // explicitly so this test does not silently break if the sort
+        // default or mock data changes order.
+        let idx = app
+            .schema_row_order
+            .iter()
+            .position(|&i| {
+                app.snapshot.schema.as_ref().unwrap().tables[i].name == "order_items"
+            })
+            .expect("mock has order_items");
+        app.schema_table_state.select(Some(idx));
+        app.detail_open = true;
+
+        // Tall enough that every `\d` section (columns/constraints/
+        // referenced-by/indexes) fits without scrolling — this test checks
+        // content, not the scroll mechanism (see the dedicated `app::tests`
+        // scroll tests for that).
+        let backend = ratatui::backend::TestBackend::new(160, 60);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("columns"), "{screen}");
+        assert!(screen.contains("qty"), "{screen}");
+        // v0.15 identity-column fix: `id` is a `GENERATED ALWAYS AS
+        // IDENTITY` column in the mock fixture — no bare `nextval(...)`
+        // default text, the friendly identity label instead.
+        assert!(screen.contains("generated always as identity"), "{screen}");
+        // `total_price` demos the STORED generated-column case.
+        assert!(
+            screen.contains("generated always as ((qty * price)) stored"),
+            "{screen}"
+        );
+        assert!(screen.contains("constraints"), "{screen}");
+        assert!(screen.contains("order_items_pkey"), "{screen}");
+        assert!(screen.contains("referenced by"), "{screen}");
+        assert!(screen.contains("order_item_notes"), "{screen}");
+        assert!(screen.contains("indexes"), "{screen}");
+        assert!(!screen.contains("loading definition"), "{screen}");
+    }
+
+    /// A table with no `table_detail` yet (the request hasn't landed) shows
+    /// the calm "loading definition…" line instead of an empty/blank
+    /// section.
+    #[test]
+    fn detail_overlay_shows_loading_before_the_response_lands() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::SchemaLens;
+        // Clear the mock's pre-seeded detail to simulate the gap between
+        // opening the overlay and the poller's response landing.
+        let mut snapshot = (*app.snapshot).clone();
+        snapshot.table_detail = None;
+        app.snapshot = std::sync::Arc::new(snapshot);
+        app.schema_table_state.select(Some(0));
+        app.detail_open = true;
+
+        let backend = ratatui::backend::TestBackend::new(160, 45);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("loading definition"), "{screen}");
+    }
+
+    fn column(
+        default: Option<&str>,
+        identity: Option<&str>,
+        generated_stored: bool,
+    ) -> pg_lens_core::TableDetailColumn {
+        pg_lens_core::TableDetailColumn {
+            name: "c".to_string(),
+            data_type: "bigint".to_string(),
+            not_null: true,
+            default: default.map(str::to_string),
+            identity: identity.map(str::to_string),
+            generated_stored,
+        }
+    }
+
+    #[test]
+    fn column_default_text_covers_plain_identity_and_stored_generated() {
+        assert_eq!(column_default_text(&column(None, None, false)), "");
+        assert_eq!(
+            column_default_text(&column(Some("1"), None, false)),
+            " default 1"
+        );
+        assert_eq!(
+            column_default_text(&column(
+                None,
+                Some("generated always as identity"),
+                false
+            )),
+            " generated always as identity"
+        );
+        assert_eq!(
+            column_default_text(&column(
+                None,
+                Some("generated by default as identity"),
+                false
+            )),
+            " generated by default as identity"
+        );
+        assert_eq!(
+            column_default_text(&column(Some("(qty * price)"), None, true)),
+            " generated always as ((qty * price)) stored"
+        );
     }
 
     #[test]

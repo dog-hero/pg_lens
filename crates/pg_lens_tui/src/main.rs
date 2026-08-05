@@ -34,7 +34,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use pg_lens_core::AdminCommand;
+use pg_lens_core::{AdminCommand, TableDetailRequest};
 
 use crate::app::{Action, App, PickerEntry, PickerState, update};
 
@@ -673,14 +673,18 @@ fn spawn_poller(
     shutdown_rx: watch::Receiver<bool>,
     db_switch_rx: mpsc::Receiver<String>,
     schema_table_limit: usize,
+    detail_rx: mpsc::Receiver<TableDetailRequest>,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, String, JoinHandle<()>) {
     match conn {
         // The mock has no DB queries to cancel on shutdown — a already-done
         // handle keeps the caller's await uniform. `db_switch_rx` is simply
         // dropped here: mock mode never simulates a real reconnect (see
-        // `app::handle_db_picker_key`'s "mock mode" toast).
+        // `app::handle_db_picker_key`'s "mock mode" toast). `detail_rx` IS
+        // wired into the mock poller (unlike `db_switch_rx`) — Enter on the
+        // Schema Lens's `order_items` fixture demos the `\d` overlay under
+        // `--mock` too (see `poller::spawn_mock`).
         None => (
-            pg_lens_core::poller::spawn_mock(interval_rx, schema_refresh_rx, admin_rx),
+            pg_lens_core::poller::spawn_mock(interval_rx, schema_refresh_rx, admin_rx, detail_rx),
             "mock".to_string(),
             tokio::spawn(async {}),
         ),
@@ -708,6 +712,7 @@ fn spawn_poller(
                 shutdown_rx,
                 db_switch_rx,
                 schema_table_limit,
+                detail_rx,
             );
             (snapshots, label, handle)
         }
@@ -1009,6 +1014,9 @@ async fn run_serve(mut conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()
     // resets its per-database state exactly as it does for the TUI. Kept
     // alive (not dropped) so the router's `wait_db_switch` branch can resolve.
     let (db_switch_tx, db_switch_rx) = mpsc::channel::<String>(4);
+    // v0.15 web parity: `POST /api/schema/detail` (the web twin of the TUI's
+    // Enter on a Schema Lens table) sends here.
+    let (detail_tx, detail_rx) = mpsc::channel::<TableDetailRequest>(4);
     let (snapshots, label, poller_handle) = spawn_poller(
         resolved,
         interval_rx,
@@ -1018,6 +1026,7 @@ async fn run_serve(mut conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()
         shutdown_rx,
         db_switch_rx,
         conn.schema_table_limit(&config),
+        detail_rx,
     );
 
     let read_only = conn.read_only(&config);
@@ -1026,6 +1035,7 @@ async fn run_serve(mut conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()
         schema_refresh_tx,
         admin_tx,
         db_switch_tx,
+        detail_tx,
         token,
         read_only,
     );
@@ -1108,6 +1118,12 @@ async fn run(
     // databases in-session). `--mock` never sends here (see
     // `app::handle_db_picker_key`'s toast).
     let (db_switch_tx, db_switch_rx) = mpsc::channel::<String>(4);
+    // v0.15's on-demand table detail (`\d` overlay): Enter on a Schema Lens
+    // table queues at most one pending request in `app.table_detail_request`
+    // (mirroring `pending_db_switch`); the loop below forwards it here, and
+    // the poller (sole DB-client owner) fetches it and stamps the result
+    // into `DbSnapshot::table_detail` on the next tick.
+    let (detail_tx, detail_rx) = mpsc::channel::<TableDetailRequest>(4);
     // Shutdown signal: on quit we set this, and wait for the poller to cancel
     // its in-flight query (so a heavy bloat estimate does not keep running
     // server-side) before the runtime tears down.
@@ -1125,6 +1141,7 @@ async fn run(
         mpsc::Receiver<AdminCommand>,
         watch::Receiver<bool>,
         mpsc::Receiver<String>,
+        mpsc::Receiver<TableDetailRequest>,
     )> = None;
     match startup {
         Startup::Connect(conn) => {
@@ -1142,6 +1159,7 @@ async fn run(
                 shutdown_rx,
                 db_switch_rx,
                 schema_table_limit,
+                detail_rx,
             );
             poller_handle = Some(handle);
             app.host = label;
@@ -1154,7 +1172,14 @@ async fn run(
         }
         Startup::Picker(entries) => {
             app.picker = Some(PickerState::new(entries));
-            parked_rx = Some((interval_rx, schema_refresh_rx, admin_rx, shutdown_rx, db_switch_rx));
+            parked_rx = Some((
+                interval_rx,
+                schema_refresh_rx,
+                admin_rx,
+                shutdown_rx,
+                db_switch_rx,
+                detail_rx,
+            ));
         }
     }
 
@@ -1206,6 +1231,13 @@ async fn run(
             // just means the poller is gone — the loop is about to end).
             app.pending_db_switch = Some(name);
         }
+        // v0.15: Enter on a Schema Lens table queues at most one pending
+        // detail request (mirroring `pending_db_switch` immediately above).
+        if let Some(req) = app.table_detail_request.take()
+            && detail_tx.try_send(req.clone()).is_err()
+        {
+            app.table_detail_request = Some(req);
+        }
 
         // Lazy poller spawn (picker mode): the first pass after Enter sees
         // `app.picked` plus the parked receivers and starts the exact same
@@ -1216,7 +1248,7 @@ async fn run(
         // Connection failures are NOT errors here: they surface as
         // `PollerStatus::Error` on the splash, retrying with backoff.
         if let Some(entry) = app.picked.clone()
-            && let Some((interval_rx, schema_refresh_rx, admin_rx, shutdown_rx, db_switch_rx)) =
+            && let Some((interval_rx, schema_refresh_rx, admin_rx, shutdown_rx, db_switch_rx, detail_rx)) =
                 parked_rx.take()
         {
             // Re-resolve with the chosen service (or none, for the default
@@ -1240,6 +1272,7 @@ async fn run(
                 shutdown_rx,
                 db_switch_rx,
                 schema_table_limit,
+                detail_rx,
             );
             poller_handle = Some(handle);
             update(&mut app, Action::HostLabel(label));

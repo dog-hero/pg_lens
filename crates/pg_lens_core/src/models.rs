@@ -204,6 +204,49 @@ pub struct TableStatRow {
     /// OR when the oldest sample was `0` bytes (percentage undefined).
     #[serde(default)]
     pub growth_1h_pct: Option<f32>,
+
+    /// v0.15's partition collapsing: `true` when this row is a LEAF of a
+    /// native partitioned table (`pg_class.relispartition`) — frontends
+    /// hide these by default (collapsed view) in favor of the aggregated
+    /// parent row (`partition_count.is_some()`), showing them only on an
+    /// explicit toggle. `false` for a plain table AND for a partitioned
+    /// PARENT's own synthesized row (the parent itself is not a leaf).
+    #[serde(default)]
+    pub is_partition: bool,
+    /// v0.15: the IMMEDIATE parent's oid (`pg_inherits.inhparent`) when
+    /// `is_partition` is true — lets frontends group leaves under their
+    /// parent for the drill-down section without a second query. `None` for
+    /// a non-partition table or a parent's own row.
+    #[serde(default)]
+    pub parent_oid: Option<i64>,
+    /// v0.15: `Some(N)` only on a SYNTHESIZED partition-parent row (one leaf
+    /// count, aggregated over `pg_partition_tree` — see
+    /// `queries/partition_parents.sql`); `None` for every ordinary table row
+    /// (including leaves). This is the field that marks "this row IS a
+    /// partition-parent aggregate" — frontends render the `parts: N` marker
+    /// and drill-down section only when it is `Some`.
+    #[serde(default)]
+    pub partition_count: Option<i64>,
+
+    /// v0.15's per-table lock indicator: this table's row count in
+    /// `pg_locks` at the time of the MOST RECENT fast tick (`queries/
+    /// locks_by_relation.sql`) — folded onto this row at SNAPSHOT ASSEMBLY
+    /// time (`poller::fold_relation_locks`), not at the slow schema
+    /// collection, so a table's lock count never lags behind by up to a
+    /// full schema cadence. `None` before the first fold of a session, OR
+    /// when that tick's best-effort lock collection failed (never a stale
+    /// carried-over number — every fold fully replaces both fields from a
+    /// fresh join, so a table with no current locks reads `None`, not the
+    /// last tick's stale count).
+    #[serde(default)]
+    pub lock_count: Option<i64>,
+    /// v0.15: of `lock_count`, how many are NOT granted (a real waiter) —
+    /// same fold/freshness contract as `lock_count`. Drives severity: any
+    /// waiter is a red "!" indicator (someone is blocked right now);
+    /// granted-only locks are informational (dim). `None` under the same
+    /// conditions as `lock_count`.
+    #[serde(default)]
+    pub lock_waiters: Option<i64>,
 }
 
 /// One estimated-bloat row (table or btree index), shaped after the output
@@ -492,6 +535,13 @@ impl SchemaSnapshot {
                 // Flat: pgbench_accounts is the steady-state table.
                 growth_1h_bytes: Some(2_097_152),
                 growth_1h_pct: Some(0.3),
+            is_partition: false,
+            parent_oid: None,
+            partition_count: None,
+            // v0.15: granted-only locks (no waiter) — the dim/info tier,
+            // demoed alongside `order_items`'s red waiter tier below.
+            lock_count: Some(2),
+            lock_waiters: Some(0),
             },
             // The bloated-looking one: dead tuples rival live ones and
             // autovacuum has not caught up. Also the mock's "big grower".
@@ -525,6 +575,14 @@ impl SchemaSnapshot {
                 // Big grower: +42% in the last hour, above the red tier.
                 growth_1h_bytes: Some(65_011_712),
                 growth_1h_pct: Some(42.3),
+            is_partition: false,
+            parent_oid: None,
+            partition_count: None,
+            // v0.15: a real waiter — the red tier (`--mock` demos both
+            // severities so the TUI/web render can be built/tested against
+            // it without a live blocking session).
+            lock_count: Some(3),
+            lock_waiters: Some(1),
             },
             // Shrinker: a recent VACUUM FULL / TRUNCATE-and-reload dropped
             // its size — negative growth is valid and shown, not clamped.
@@ -557,6 +615,11 @@ impl SchemaSnapshot {
                 autoanalyze_count: 204,
                 growth_1h_bytes: Some(-3_244_032),
                 growth_1h_pct: Some(-25.8),
+            is_partition: false,
+            parent_oid: None,
+            partition_count: None,
+            lock_count: None,
+            lock_waiters: None,
             },
             // A table with no indexes at all: idx_scan is NULL, exercising
             // the Option path end to end (SQL → model → JSON → UI). Also
@@ -592,6 +655,158 @@ impl SchemaSnapshot {
                 autoanalyze_count: 3,
                 growth_1h_bytes: None,
                 growth_1h_pct: None,
+            is_partition: false,
+            parent_oid: None,
+            partition_count: None,
+            lock_count: None,
+            lock_waiters: None,
+            },
+            // v0.15: a native partitioned table's PARENT (`events_by_month`)
+            // + its 3 leaves — demos collapse (leaves hidden by default),
+            // expand (`p` in the TUI), and drill-down (Enter on the parent
+            // lists these leaves) all from one mock fixture. The parent row
+            // is what `partition_parents.sql` would synthesize: no vacuum/
+            // analyze bookkeeping of its own (honest `None`/`0`), size/
+            // tuple fields SUMMED over the 3 leaves below.
+            TableStatRow {
+                oid: 16_420,
+                schema: "public".to_string(),
+                name: "events_by_month".to_string(),
+                total_bytes: 402_653_184,
+                table_bytes: 361_838_592,
+                index_bytes: 40_814_592,
+                seq_scan: 210 + churn.max(0),
+                seq_tup_read: 8_400_000,
+                idx_scan: None,
+                idx_tup_fetch: None,
+                n_tup_ins: 3_100_000 + churn.max(0),
+                n_tup_upd: 0,
+                n_tup_del: 12_000,
+                n_tup_hot_upd: 0,
+                n_live_tup: 3_088_000,
+                n_dead_tup: 12_000,
+                n_mod_since_analyze: 0,
+                n_ins_since_vacuum: 0,
+                last_vacuum_epoch_secs: None,
+                last_autovacuum_epoch_secs: None,
+                last_analyze_epoch_secs: None,
+                last_autoanalyze_epoch_secs: None,
+                vacuum_count: 0,
+                autovacuum_count: 0,
+                analyze_count: 0,
+                autoanalyze_count: 0,
+                growth_1h_bytes: Some(4_194_304),
+                growth_1h_pct: Some(1.05),
+                is_partition: false,
+                parent_oid: None,
+                partition_count: Some(3),
+                lock_count: None,
+                lock_waiters: None,
+            },
+            TableStatRow {
+                oid: 16_421,
+                schema: "public".to_string(),
+                name: "events_by_month_2026_06".to_string(),
+                total_bytes: 130_023_424,
+                table_bytes: 116_916_224,
+                index_bytes: 13_107_200,
+                seq_scan: 70,
+                seq_tup_read: 2_800_000,
+                idx_scan: Some(4_012),
+                idx_tup_fetch: Some(4_012),
+                n_tup_ins: 1_000_000,
+                n_tup_upd: 0,
+                n_tup_del: 4_000,
+                n_tup_hot_upd: 0,
+                n_live_tup: 996_000,
+                n_dead_tup: 4_000,
+                n_mod_since_analyze: 0,
+                n_ins_since_vacuum: 0,
+                last_vacuum_epoch_secs: None,
+                last_autovacuum_epoch_secs: Some(1_752_000_000.0),
+                last_analyze_epoch_secs: None,
+                last_autoanalyze_epoch_secs: Some(1_752_000_100.0),
+                vacuum_count: 0,
+                autovacuum_count: 3,
+                analyze_count: 0,
+                autoanalyze_count: 3,
+                growth_1h_bytes: Some(1_048_576),
+                growth_1h_pct: Some(0.8),
+                is_partition: true,
+                parent_oid: Some(16_420),
+                partition_count: None,
+                lock_count: None,
+                lock_waiters: None,
+            },
+            TableStatRow {
+                oid: 16_422,
+                schema: "public".to_string(),
+                name: "events_by_month_2026_07".to_string(),
+                total_bytes: 134_217_728,
+                table_bytes: 120_586_240,
+                index_bytes: 13_631_488,
+                seq_scan: 70,
+                seq_tup_read: 2_800_000,
+                idx_scan: Some(3_988),
+                idx_tup_fetch: Some(3_988),
+                n_tup_ins: 1_050_000,
+                n_tup_upd: 0,
+                n_tup_del: 4_000,
+                n_tup_hot_upd: 0,
+                n_live_tup: 1_046_000,
+                n_dead_tup: 4_000,
+                n_mod_since_analyze: 0,
+                n_ins_since_vacuum: 0,
+                last_vacuum_epoch_secs: None,
+                last_autovacuum_epoch_secs: Some(1_752_050_000.0),
+                last_analyze_epoch_secs: None,
+                last_autoanalyze_epoch_secs: Some(1_752_050_100.0),
+                vacuum_count: 0,
+                autovacuum_count: 2,
+                analyze_count: 0,
+                autoanalyze_count: 2,
+                growth_1h_bytes: Some(2_097_152),
+                growth_1h_pct: Some(1.6),
+                is_partition: true,
+                parent_oid: Some(16_420),
+                partition_count: None,
+                lock_count: None,
+                lock_waiters: None,
+            },
+            TableStatRow {
+                oid: 16_423,
+                schema: "public".to_string(),
+                name: "events_by_month_2026_08".to_string(),
+                total_bytes: 138_412_032,
+                table_bytes: 124_336_128,
+                index_bytes: 14_075_904,
+                seq_scan: 70,
+                seq_tup_read: 2_800_000,
+                idx_scan: Some(3_501),
+                idx_tup_fetch: Some(3_501),
+                n_tup_ins: 1_050_000,
+                n_tup_upd: 0,
+                n_tup_del: 4_000,
+                n_tup_hot_upd: 0,
+                n_live_tup: 1_046_000,
+                n_dead_tup: 4_000,
+                n_mod_since_analyze: 0,
+                n_ins_since_vacuum: 0,
+                last_vacuum_epoch_secs: None,
+                last_autovacuum_epoch_secs: Some(1_752_100_000.0),
+                last_analyze_epoch_secs: None,
+                last_autoanalyze_epoch_secs: Some(1_752_100_100.0),
+                vacuum_count: 0,
+                autovacuum_count: 1,
+                analyze_count: 0,
+                autoanalyze_count: 1,
+                growth_1h_bytes: Some(1_048_576),
+                growth_1h_pct: Some(0.76),
+                is_partition: true,
+                parent_oid: Some(16_420),
+                partition_count: None,
+                lock_count: None,
+                lock_waiters: None,
             },
         ];
         let table_bloat = vec![
@@ -845,12 +1060,16 @@ impl SchemaSnapshot {
         let indexes = build_index_rows(index_catalog);
         Self {
             collected_at_epoch_ms: epoch_ms_now(),
-            // v0.15: the mock deliberately reports MORE real tables than it
-            // fabricates rows for (7 total, 4 shown) — this is what exercises
+            // v0.15: the mock deliberately reports MORE real (PHYSICAL)
+            // tables than it fabricates rows for — this is what exercises
             // the honest "N of M tables" footer under `--mock`/the PTY e2e,
-            // never a plain "4 tables" claim that would misrepresent a
-            // truncated list as complete.
-            tables_total: Some(tables.len() as i64 + 3),
+            // never a plain claim that would misrepresent a truncated list
+            // as complete. `tables_total` counts physical
+            // `pg_stat_user_tables` rows: `tables.len()` MINUS the one
+            // synthesized partition-parent row (which has no physical row
+            // of its own — see `partition_parents.sql`) PLUS 3 more
+            // physical tables the mock doesn't bother fabricating rows for.
+            tables_total: Some(tables.len() as i64 - 1 + 3),
             tables,
             table_bloat,
             index_bloat,
@@ -1091,6 +1310,258 @@ impl StatementsSnapshot {
     }
 }
 
+/// One column of the `\d`-style on-demand table detail (v0.15,
+/// `queries/table_detail_columns.sql`): name, type, nullability, default —
+/// psql's own `\d` shape, minus the parts that need no extra query
+/// (comment, storage) which pg_lens does not surface.
+#[derive(Clone, Debug, Serialize)]
+pub struct TableDetailColumn {
+    pub name: String,
+    /// `format_type(atttypid, atttypmod)` — e.g. `character varying(255)`.
+    pub data_type: String,
+    pub not_null: bool,
+    /// `pg_get_expr(adbin, adrelid)` — `None` when the column has no
+    /// default AND is not a `GENERATED ... AS IDENTITY` column (those have
+    /// no `pg_attrdef` row either — see `identity` instead). `Some` for a
+    /// plain default (`nextval(...)`, a literal, ...) OR for a `GENERATED
+    /// ... AS (...) STORED` column's generation expression, distinguished
+    /// by `generated_stored`.
+    pub default: Option<String>,
+    /// Friendly label from `pg_attribute.attidentity` (`db::identity_label`)
+    /// — `Some("generated always as identity")` / `Some("generated by
+    /// default as identity")`, `None` for a non-identity column. Never both
+    /// `Some` alongside a `default`: identity columns carry no
+    /// `pg_attrdef` row.
+    pub identity: Option<String>,
+    /// `pg_attribute.attgenerated == 's'` — `default` holds a `GENERATED
+    /// ... AS (...) STORED` expression, not a plain default; the render
+    /// layer prefixes it accordingly instead of the bare `default `.
+    pub generated_stored: bool,
+}
+
+/// One constraint row of the on-demand table detail (v0.15,
+/// `queries/table_detail_constraints.sql`): either one of the table's OWN
+/// constraints (`referencing_table: None`), or a foreign key on ANOTHER
+/// table that points back at this one (`referencing_table: Some(other)`) —
+/// psql's "Referenced by" section. `definition` is `pg_get_constraintdef`'s
+/// verbatim output, never reconstructed from parts.
+#[derive(Clone, Debug, Serialize)]
+pub struct TableDetailConstraint {
+    pub name: String,
+    /// Friendly label (`PRIMARY KEY`/`FOREIGN KEY`/`UNIQUE`/`CHECK`/
+    /// `EXCLUDE`/`OTHER`) — see `db::constraint_kind_label`; never the raw
+    /// single-character `pg_constraint.contype`.
+    pub kind: String,
+    pub definition: String,
+    /// `Some(other_table)` for a "referenced by" row; `None` for the
+    /// table's own constraints.
+    pub referencing_table: Option<String>,
+}
+
+/// One index definition of the on-demand table detail (v0.15,
+/// `queries/table_detail_indexdefs.sql`) — `pg_get_indexdef`'s verbatim
+/// output, fetched fresh rather than reused from the (slow-cadence,
+/// cluster-wide-capped) Index Lens collection, for coherence with the rest
+/// of this on-demand fetch.
+#[derive(Clone, Debug, Serialize)]
+pub struct TableDetailIndex {
+    pub name: String,
+    pub definition: String,
+}
+
+/// The full `\d`-style on-demand table detail (v0.15): columns, constraints
+/// (own + referencing), and index definitions of ONE table, fetched only
+/// when a frontend opens the detail overlay on it — never on the poll
+/// cadence (see `TableDetailRequest` and `poller::collect_table_detail`).
+///
+/// Response-path decision: this rides inside [`DbSnapshot`] (option "b" of
+/// the feature spec) rather than a side `watch` channel — the web frontend
+/// only ever streams `DbSnapshot`s over SSE, and a side channel would need
+/// its own endpoint/stream wiring for no real benefit: one table's catalog
+/// info is trivial to carry on every envelope at `Arc`-clone cost, exactly
+/// like `schema`/`statements`. The poller caches the last requested detail
+/// and keeps stamping it onto every snapshot until a different table is
+/// requested or a `TableDetailRequest::Clear` arrives.
+#[derive(Clone, Debug, Serialize)]
+pub struct TableDetail {
+    pub oid: i64,
+    pub schema: String,
+    pub name: String,
+    /// When this fetch completed (Unix epoch ms) — `None` in the brief
+    /// window between the request being queued and the poller's next wake
+    /// (the TUI shows "loading definition…" during that gap, keyed off
+    /// `DbSnapshot::table_detail` being absent/stale for the requested oid).
+    pub collected_at_epoch_ms: u64,
+    pub columns: Vec<TableDetailColumn>,
+    pub constraints: Vec<TableDetailConstraint>,
+    pub indexes: Vec<TableDetailIndex>,
+    /// Best-effort failure reason (table dropped mid-request, missing
+    /// privilege, ...) — `None` on success. Never fails the poll: see
+    /// `poller::collect_table_detail`.
+    pub error: Option<String>,
+}
+
+impl TableDetail {
+    /// Plausible fake data for `--mock`: `order_items` (the same table
+    /// [`SchemaSnapshot::mock`] flags as bloated) with a full `\d` shape —
+    /// a PK, a FK to `orders`, a UNIQUE constraint, a CHECK constraint, one
+    /// referencing FK from a fictitious `order_item_notes` table, and two
+    /// index definitions — so `--mock`/the PTY e2e exercise every section
+    /// at once.
+    pub fn mock() -> Self {
+        Self {
+            oid: 16_405,
+            schema: "public".to_string(),
+            name: "order_items".to_string(),
+            collected_at_epoch_ms: epoch_ms_now(),
+            columns: vec![
+                // `id` is a `GENERATED ALWAYS AS IDENTITY` column (real-world
+                // modern-Postgres style PK) — NO `pg_attrdef` row/`default`,
+                // the identity kind carries the information instead. See
+                // this struct's field docs and `db::identity_label`.
+                TableDetailColumn {
+                    name: "id".to_string(),
+                    data_type: "bigint".to_string(),
+                    not_null: true,
+                    default: None,
+                    identity: Some("generated always as identity".to_string()),
+                    generated_stored: false,
+                },
+                TableDetailColumn {
+                    name: "order_id".to_string(),
+                    data_type: "bigint".to_string(),
+                    not_null: true,
+                    default: None,
+                    identity: None,
+                    generated_stored: false,
+                },
+                TableDetailColumn {
+                    name: "product_id".to_string(),
+                    data_type: "bigint".to_string(),
+                    not_null: true,
+                    default: None,
+                    identity: None,
+                    generated_stored: false,
+                },
+                TableDetailColumn {
+                    name: "qty".to_string(),
+                    data_type: "integer".to_string(),
+                    not_null: true,
+                    default: Some("1".to_string()),
+                    identity: None,
+                    generated_stored: false,
+                },
+                TableDetailColumn {
+                    name: "price".to_string(),
+                    data_type: "numeric(12,2)".to_string(),
+                    not_null: true,
+                    default: None,
+                    identity: None,
+                    generated_stored: false,
+                },
+                TableDetailColumn {
+                    name: "notes".to_string(),
+                    data_type: "text".to_string(),
+                    not_null: false,
+                    default: None,
+                    identity: None,
+                    generated_stored: false,
+                },
+                // `total_price` demos the STORED generated-column case:
+                // `pg_attrdef` DOES carry an expression here, prefixed
+                // "generated always as (...) stored" by the render layer.
+                TableDetailColumn {
+                    name: "total_price".to_string(),
+                    data_type: "numeric(14,2)".to_string(),
+                    not_null: false,
+                    default: Some("(qty * price)".to_string()),
+                    identity: None,
+                    generated_stored: true,
+                },
+            ],
+            constraints: vec![
+                TableDetailConstraint {
+                    name: "order_items_pkey".to_string(),
+                    kind: "PRIMARY KEY".to_string(),
+                    definition: "PRIMARY KEY (id)".to_string(),
+                    referencing_table: None,
+                },
+                TableDetailConstraint {
+                    name: "order_items_order_id_fkey".to_string(),
+                    kind: "FOREIGN KEY".to_string(),
+                    definition: "FOREIGN KEY (order_id) REFERENCES orders(id)".to_string(),
+                    referencing_table: None,
+                },
+                TableDetailConstraint {
+                    name: "order_items_order_product_uniq".to_string(),
+                    kind: "UNIQUE".to_string(),
+                    definition: "UNIQUE (order_id, product_id)".to_string(),
+                    referencing_table: None,
+                },
+                TableDetailConstraint {
+                    name: "order_items_qty_check".to_string(),
+                    kind: "CHECK".to_string(),
+                    definition: "CHECK (qty > 0)".to_string(),
+                    referencing_table: None,
+                },
+                // "Referenced by": a fictitious table's FK pointing back.
+                TableDetailConstraint {
+                    name: "order_item_notes_item_id_fkey".to_string(),
+                    kind: "FOREIGN KEY".to_string(),
+                    definition: "FOREIGN KEY (item_id) REFERENCES order_items(id)".to_string(),
+                    referencing_table: Some("order_item_notes".to_string()),
+                },
+            ],
+            indexes: vec![
+                TableDetailIndex {
+                    name: "order_items_pkey".to_string(),
+                    definition: "CREATE UNIQUE INDEX order_items_pkey ON public.order_items \
+                                 USING btree (id)"
+                        .to_string(),
+                },
+                TableDetailIndex {
+                    name: "order_items_customer_idx".to_string(),
+                    definition: "CREATE INDEX order_items_customer_idx ON public.order_items \
+                                 USING btree (customer_id)"
+                        .to_string(),
+                },
+            ],
+            error: None,
+        }
+    }
+
+    /// The calm "nothing to show" shape for a table `--mock` has no catalog
+    /// fixture for — every other row in the Schema Lens's mock table list
+    /// resolves here instead of silently reusing `order_items`'s detail.
+    pub fn mock_unavailable(oid: i64, schema: String, name: String) -> Self {
+        Self {
+            oid,
+            schema,
+            name,
+            collected_at_epoch_ms: epoch_ms_now(),
+            columns: Vec::new(),
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            error: Some(
+                "mock mode: no catalog fixture for this table (try order_items)".to_string(),
+            ),
+        }
+    }
+}
+
+/// A frontend→poller request for [`TableDetail`] (v0.15's on-demand `\d`
+/// overlay) — the mirror of [`AdminCommand`]'s shape (message-passing only,
+/// the poller is the sole DB-client owner). `Fetch` asks for one table's
+/// detail (identified by oid, with schema/name carried along purely for
+/// display — the poller trusts the oid for the actual catalog lookup);
+/// `Clear` drops the cached detail (e.g. the overlay closed) so a stale
+/// table's catalog info does not linger in every snapshot forever.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub enum TableDetailRequest {
+    Fetch { oid: i64, schema: String, name: String },
+    Clear,
+}
+
 /// An administrative request a frontend sends TO the poller task (which owns
 /// the DB client) over a `tokio::sync::mpsc` channel — the reverse direction
 /// of the snapshot `watch`, same message-passing-only rule. TUI-only today:
@@ -1316,6 +1787,12 @@ pub struct DbSnapshot {
     /// error). Oldest (most suspect) first, capped at
     /// `queries::IDLE_SESSIONS_LIMIT` rows.
     pub idle_sessions: Option<Vec<IdleSessionRow>>,
+    /// On-demand `\d`-style table detail (v0.15), stamped by the poller
+    /// after a [`TableDetailRequest::Fetch`] — see [`TableDetail`]'s doc
+    /// comment for the response-path rationale. `None` before any request
+    /// this session, or after a `Clear`.
+    #[serde(default)]
+    pub table_detail: Option<Arc<TableDetail>>,
     pub status: PollerStatus,
 }
 
@@ -1690,6 +2167,11 @@ impl DbSnapshot {
                     idle_age_secs: 42.0 + jitter(seq, 33, 30) as f64,
                 },
             ]),
+            // v0.15: always carries the `order_items` fixture so Enter on
+            // that row in `--mock` demos every `\d` section without waiting
+            // on a simulated request round-trip (the mock poller re-stamps
+            // this on request — see `poller::spawn_mock`).
+            table_detail: Some(Arc::new(TableDetail::mock())),
             status: PollerStatus::Ok,
         }
     }
@@ -1730,6 +2212,7 @@ impl DbSnapshot {
             prepared_xacts: None,
             lock_capacity: None,
             idle_sessions: None,
+            table_detail: None,
             status: PollerStatus::Connecting,
         }
     }

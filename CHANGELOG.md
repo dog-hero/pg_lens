@@ -4,6 +4,59 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.15.0] — 2026-08-05 — "Schema Lens completo"
+
+### Added
+- **Table structure detail (on-demand)** — pressing `Enter` on a Schema Lens
+  table now also shows the table's STRUCTURE, the kind of information
+  psql's `\d` covers but rendered in pg_lens's own detail-panel style:
+  columns (name/type/nullable/default, including `generated always as
+  identity` and generated-stored labels), constraints (PK/FK/UNIQUE/CHECK
+  via `pg_get_constraintdef`), tables that reference this one via incoming
+  foreign keys, and full index definitions. Fetched only when the detail
+  opens (a new request/response channel, zero cost when no detail is open,
+  never on the poll cadence), with a scrollable overlay (`j`/`k` inside the
+  detail), a "loading structure…" state, and a graceful "unavailable"
+  message on error. Web: `POST /api/schema/detail` (token-gated) plus a
+  structure section in the expanded row. TUI + Web.
+- **Partition collapsing + drill-down** — native partitioned tables now
+  collapse to a single parent row by default, with aggregated stats (summed
+  size/rows/dead tuples via `pg_partition_tree`) and a `[parts: N]` marker;
+  `p` toggles visibility of the individual leaf partitions (dimmed `↳`
+  prefix). `Enter` on a parent shows its partition list plus its structure,
+  and the `Δ1h` growth ring now tracks the parent aggregate instead of
+  scattering across leaves. TUI + Web (a "show partitions" checkbox).
+- **Cross-lens jump to Query Lens (`x`)** — pressing `x` on a selected
+  Schema Lens table jumps straight to the Query Lens, pre-filtered
+  (substring match on the table name) to statements that mention it;
+  `Backspace` returns, and the seeded filter is visible and clearable with
+  `\` like any other lens filter. TUI + Web.
+- **Per-table lock indicator** — tables with locks held against them now
+  show a dim `L:N` marker in the Schema Lens Tables view, turning red
+  (`L:N!`) when something is WAITING on that table — a new fast-tick,
+  best-effort per-relation lock collection (reuses `pg_locks`, refreshes
+  every poll rather than the slow 60s schema cadence, so it never masks a
+  developing lock pile-up). TUI + Web badge.
+
+### Fixed
+- **Honest Schema Lens table counts + configurable row cap** — the
+  `table_stats` query had a silent `LIMIT 200` (ranked by size): table
+  201+ never appeared, and the footer reported the truncated list length
+  as if it were the database's true table count. Fixed with a cheap
+  `count(*)` alongside the row query so the footer now reads `"N of M
+  tables — raise schema_table_limit or filter"` only when actually
+  truncated, plain `"N tables"` otherwise; the cap is now configurable
+  (`--schema-table-limit` / `PG_LENS_SCHEMA_TABLE_LIMIT` / `schema_table_limit`
+  in config.toml, clamped 10–10000, default 200 unchanged); and the query
+  now ranks candidates by the cheap catalog column `pg_class.relpages`
+  first, so the expensive exact-size computation only runs for the rows
+  actually shown instead of every table in the cluster. TUI + Web.
+- **PG16 partition double-count** — PG16 emits an all-zero
+  `pg_stat_user_tables` row for a partitioned table's parent relation,
+  which was being summed into the new partition-aggregate stats on top of
+  the leaves' real numbers; parent rows (`relkind = 'p'`) are now excluded
+  from that aggregation.
+
 ## [0.14.0] — 2026-07-17 — "See the trend, not just the moment"
 
 ### Added

@@ -47,10 +47,34 @@
 --     right cost/accuracy trade for "which N tables should the dashboard
 --     show" on large clusters; the growth ring and vacuum/bloat views are
 --     unaffected (bloat estimation already reads relpages directly).
+--
+-- v0.15 (partition collapsing + drill-down):
+--   * `c.relispartition` (-> `is_partition`) flags a row as a LEAF of a
+--     native partitioned table. A partitioned-table PARENT
+--     (`relkind = 'p'`) is EXCLUDED here (`c.relkind <> 'p'` below) —
+--     verified live against PG16 that, contrary to the "parents have no
+--     row at all" assumption from older Postgres docs,
+--     `pg_stat_user_tables` DOES carry an all-zero row for the parent
+--     itself (no physical storage, so every counter reads 0/NULL) — left
+--     in, this query would double-report the parent alongside the properly
+--     AGGREGATED row `queries/partition_parents.sql` produces, so it is
+--     filtered out here regardless of PG version (a no-op filter on a
+--     version where the row never existed). Frontends hide
+--     `is_partition = true` (leaf) rows by default (collapsed view) and
+--     show them on an explicit toggle.
+--   * `i.inhparent` (-> `parent_oid`, `NULL` for a non-partition table) is
+--     the leaf's IMMEDIATE parent oid from `pg_inherits` — lets frontends
+--     group leaves under their parent for the drill-down section without a
+--     second round-trip. Multi-level partitioning (a partition that is
+--     itself partitioned) reports the immediate parent, which may not be
+--     the top-level partitioned table shown as a row in
+--     `partition_parents.sql` — an accepted simplification: pg_lens groups
+--     one level deep, the common case by far.
 WITH ranked AS (
     SELECT s.relid
       FROM pg_stat_user_tables AS s
       JOIN pg_class AS c ON c.oid = s.relid
+     WHERE c.relkind <> 'p'
      ORDER BY c.relpages DESC
      LIMIT $1
 )
@@ -80,7 +104,11 @@ SELECT
       coalesce(s.vacuum_count, 0) AS vacuum_count,
       coalesce(s.autovacuum_count, 0) AS autovacuum_count,
       coalesce(s.analyze_count, 0) AS analyze_count,
-      coalesce(s.autoanalyze_count, 0) AS autoanalyze_count
+      coalesce(s.autoanalyze_count, 0) AS autoanalyze_count,
+      c.relispartition AS is_partition,
+      i.inhparent::int8 AS parent_oid
  FROM pg_stat_user_tables AS s
  JOIN ranked AS r ON r.relid = s.relid
+ JOIN pg_class AS c ON c.oid = s.relid
+ LEFT JOIN pg_inherits AS i ON i.inhrelid = s.relid
 ORDER BY pg_total_relation_size(s.relid) DESC;

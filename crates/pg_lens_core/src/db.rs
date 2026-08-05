@@ -9,8 +9,9 @@ use tokio_postgres::{Client, Config, NoTls, Row, Transaction};
 
 use crate::models::{
     ActivityRow, BloatRow, DatabaseRow, IdleSessionRow, LockRow, PreparedXactRow,
-    ReplicationSlotRow, StatementRow, TableStatRow, VacuumClusterAge, VacuumProgressRow,
-    VacuumTableRow, WalReceiverRow, WalSenderRow,
+    ReplicationSlotRow, StatementRow, TableDetailColumn, TableDetailConstraint, TableDetailIndex,
+    TableStatRow, VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalReceiverRow,
+    WalSenderRow,
 };
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
@@ -264,6 +265,64 @@ pub fn table_stat_from_row(row: &Row) -> Result<TableStatRow, tokio_postgres::Er
         // is parsed (`crate::schema_growth`), never by the SQL itself.
         growth_1h_bytes: None,
         growth_1h_pct: None,
+        is_partition: row.try_get("is_partition")?,
+        parent_oid: row.try_get("parent_oid")?,
+        // Only a synthesized partition-parent row carries this (see
+        // `partition_parent_from_row`) — never a plain `table_stats` row.
+        partition_count: None,
+        // Filled in by the poller from the FAST-tick lock join after every
+        // row is parsed (`poller::fold_relation_locks`), never by this SQL.
+        lock_count: None,
+        lock_waiters: None,
+    })
+}
+
+/// Maps one row of `queries/partition_parents.sql` onto a SYNTHESIZED
+/// [`TableStatRow`] (v0.15's partition collapsing): a partitioned PARENT has
+/// no physical storage of its own, so this row's size/tuple fields are
+/// SUMS over its leaf partitions, never a direct catalog reading. Vacuum/
+/// analyze bookkeeping (`last_vacuum`, `vacuum_count`, ...) has no single
+/// meaningful value for an aggregate of many leaves — each leaf is vacuumed
+/// independently — so those fields stay at their honest "unknown" default
+/// (`None`/`0`) rather than a made-up rollup. `idx_scan`/`idx_tup_fetch`
+/// likewise stay `None` (not aggregated by the SQL) rather than a
+/// misleading partial sum.
+pub fn partition_parent_from_row(row: &Row) -> Result<TableStatRow, tokio_postgres::Error> {
+    Ok(TableStatRow {
+        oid: row.try_get("relid")?,
+        schema: row.try_get("schemaname")?,
+        name: row.try_get("relname")?,
+        total_bytes: row.try_get("total_bytes")?,
+        table_bytes: row.try_get("table_bytes")?,
+        index_bytes: row.try_get("index_bytes")?,
+        seq_scan: row.try_get("seq_scan")?,
+        seq_tup_read: row.try_get("seq_tup_read")?,
+        idx_scan: None,
+        idx_tup_fetch: None,
+        n_tup_ins: row.try_get("n_tup_ins")?,
+        n_tup_upd: row.try_get("n_tup_upd")?,
+        n_tup_del: row.try_get("n_tup_del")?,
+        n_tup_hot_upd: row.try_get("n_tup_hot_upd")?,
+        n_live_tup: row.try_get("n_live_tup")?,
+        n_dead_tup: row.try_get("n_dead_tup")?,
+        n_mod_since_analyze: 0,
+        n_ins_since_vacuum: 0,
+        last_vacuum_epoch_secs: None,
+        last_autovacuum_epoch_secs: None,
+        last_analyze_epoch_secs: None,
+        last_autoanalyze_epoch_secs: None,
+        vacuum_count: 0,
+        autovacuum_count: 0,
+        analyze_count: 0,
+        autoanalyze_count: 0,
+        growth_1h_bytes: None,
+        growth_1h_pct: None,
+        is_partition: false,
+        parent_oid: None,
+        partition_count: Some(row.try_get("partition_count")?),
+        // Same fold-in-poller contract as `table_stat_from_row`.
+        lock_count: None,
+        lock_waiters: None,
     })
 }
 
@@ -518,6 +577,24 @@ pub fn lock_capacity_from_row(row: &Row) -> Result<LockCapacityRow, tokio_postgr
     })
 }
 
+/// Raw row of `queries/locks_by_relation.sql` (v0.15's per-table lock
+/// indicator), before the poller folds it onto each [`crate::models::TableStatRow`]
+/// by `rel_oid` (`poller::fold_relation_locks`).
+pub struct RelationLockRow {
+    pub rel_oid: i64,
+    pub locks: i64,
+    pub waiting: i64,
+}
+
+/// Maps one row of `queries/locks_by_relation.sql` onto [`RelationLockRow`].
+pub fn relation_lock_from_row(row: &Row) -> Result<RelationLockRow, tokio_postgres::Error> {
+    Ok(RelationLockRow {
+        rel_oid: row.try_get("rel_oid")?,
+        locks: row.try_get("locks")?,
+        waiting: row.try_get("waiting")?,
+    })
+}
+
 /// Maps one row of `queries/idle_sessions.sql` onto [`IdleSessionRow`]
 /// (v0.11's idle connection / connection-age census). `client` collapses a
 /// NULL address to `"local"`, same convention as `activity_from_row`.
@@ -531,6 +608,76 @@ pub fn idle_session_from_row(row: &Row) -> Result<IdleSessionRow, tokio_postgres
             .unwrap_or_else(|| "local".to_string()),
         username: opt_text(row, "usename")?,
         idle_age_secs: row.try_get("idle_age_seconds")?,
+    })
+}
+
+/// `pg_attribute.attidentity` (a single character) to the friendly label
+/// the detail overlay renders instead of the raw catalog letter — `''`
+/// (not an identity column) maps to `None`.
+fn identity_label(attidentity: &str) -> Option<&'static str> {
+    match attidentity {
+        "a" => Some("generated always as identity"),
+        "d" => Some("generated by default as identity"),
+        _ => None,
+    }
+}
+
+/// Maps one row of `queries/table_detail_columns.sql` onto
+/// [`TableDetailColumn`] (v0.15's on-demand `\d`-style table detail).
+/// `default_expr` is `pg_get_expr`'s own `text` output — NULL (no default)
+/// stays `None`, never a made-up empty string. `identity`/`generated` are
+/// mapped to friendly labels here — see the SQL file's header for why a
+/// `GENERATED ... AS IDENTITY` column has no `pg_attrdef` row (so `default`
+/// stays `None` for those) while `GENERATED ... AS (...) STORED` DOES (so
+/// `default` carries the stored generation expression, flagged by
+/// `generated_stored`).
+pub fn table_detail_column_from_row(row: &Row) -> Result<TableDetailColumn, tokio_postgres::Error> {
+    let attidentity: String = row.try_get("identity")?;
+    let attgenerated: String = row.try_get("generated")?;
+    Ok(TableDetailColumn {
+        name: row.try_get("name")?,
+        data_type: row.try_get("data_type")?,
+        not_null: row.try_get("not_null")?,
+        default: row.try_get("default_expr")?,
+        identity: identity_label(&attidentity).map(str::to_string),
+        generated_stored: attgenerated == "s",
+    })
+}
+
+/// `pg_constraint.contype` (a single character) to the friendly label the
+/// detail overlay renders — never surfaces the raw catalog letter.
+fn constraint_kind_label(contype: &str) -> &'static str {
+    match contype {
+        "p" => "PRIMARY KEY",
+        "f" => "FOREIGN KEY",
+        "u" => "UNIQUE",
+        "c" => "CHECK",
+        "x" => "EXCLUDE",
+        _ => "OTHER",
+    }
+}
+
+/// Maps one row of `queries/table_detail_constraints.sql` onto
+/// [`TableDetailConstraint`] — the table's own constraints AND the
+/// referencing-FK half of the same UNION ALL (see that file's header).
+pub fn table_detail_constraint_from_row(
+    row: &Row,
+) -> Result<TableDetailConstraint, tokio_postgres::Error> {
+    let contype: String = row.try_get("contype")?;
+    Ok(TableDetailConstraint {
+        name: row.try_get("name")?,
+        kind: constraint_kind_label(&contype).to_string(),
+        definition: row.try_get("definition")?,
+        referencing_table: row.try_get("referencing_table")?,
+    })
+}
+
+/// Maps one row of `queries/table_detail_indexdefs.sql` onto
+/// [`TableDetailIndex`].
+pub fn table_detail_index_from_row(row: &Row) -> Result<TableDetailIndex, tokio_postgres::Error> {
+    Ok(TableDetailIndex {
+        name: row.try_get("name")?,
+        definition: row.try_get("definition")?,
     })
 }
 
@@ -571,6 +718,23 @@ mod tests {
         // Garbage: refused with a clear message, never a panic.
         let err = statements_availability(Some("banana")).expect_err("unparsable");
         assert!(err.contains("could not parse"));
+    }
+
+    #[test]
+    fn constraint_kind_label_maps_every_pg_constraint_contype() {
+        assert_eq!(constraint_kind_label("p"), "PRIMARY KEY");
+        assert_eq!(constraint_kind_label("f"), "FOREIGN KEY");
+        assert_eq!(constraint_kind_label("u"), "UNIQUE");
+        assert_eq!(constraint_kind_label("c"), "CHECK");
+        assert_eq!(constraint_kind_label("x"), "EXCLUDE");
+        assert_eq!(constraint_kind_label("t"), "OTHER");
+    }
+
+    #[test]
+    fn identity_label_maps_every_pg_attribute_attidentity() {
+        assert_eq!(identity_label("a"), Some("generated always as identity"));
+        assert_eq!(identity_label("d"), Some("generated by default as identity"));
+        assert_eq!(identity_label(""), None, "'' means not an identity column");
     }
 
     #[test]

@@ -47,6 +47,8 @@ const ROWS: &[Row] = &[
     Row::Bind("w", "full waits panel (Micro Lens only)"),
     Row::Bind("I", "idle connection census (Micro Lens only)"),
     Row::Bind("v", "Vacuum sub-view (Schema Lens only)"),
+    Row::Bind("p", "show/hide partition leaves (Schema Tables view only)"),
+    Row::Bind("x", "jump to Query Lens filtered on this table (Schema Tables)"),
     Row::Bind("d", "database picker (any lens)"),
     Row::Bind("!", "open a psql shell on the same connection (any lens)"),
     Row::Bind("?", "this help"),

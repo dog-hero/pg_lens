@@ -274,14 +274,20 @@
                 <span>Refresh</span>
               </button>
             </h2>
-            <input
-              id="schema-filter"
-              class="filter-input"
-              type="search"
-              placeholder="Filter by schema or table… (/)"
-              autocomplete="off"
-              spellcheck="false"
-            />
+            <div class="schema-toolbar">
+              <input
+                id="schema-filter"
+                class="filter-input"
+                type="search"
+                placeholder="Filter by schema or table… (/)"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <label class="schema-partitions-toggle" for="schema-partitions-toggle">
+                <input id="schema-partitions-toggle" type="checkbox" />
+                show partition leaves
+              </label>
+            </div>
             <p id="schema-staleness" class="staleness"></p>
             <p id="schema-warning" class="inline-warning" hidden></p>
             <p id="schema-placeholder" class="placeholder">collecting…</p>
