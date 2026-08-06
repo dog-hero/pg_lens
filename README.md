@@ -34,6 +34,14 @@ Web Lens dashboard running on recorded data (no database required).
 - **Micro Lens** — per-backend activity table: state, wait events, running
   duration, and a status marker for **blocked** (`B`, red) and **waiting**
   (`W`, yellow) sessions, powered by `pg_locks` + `pg_blocking_pids()`.
+  **pg_activity-style row colors**: the whole row is tinted by session state
+  (active green, idle dim, idle-in-transaction yellow, aborted red, unknown
+  neutral); for `active` rows only, a long-running query overrides that
+  color (orange past 10s, red past 30s) so a merely-idle session never gets
+  mislabelled as a problem, and a live `wait_event` tints the row yellow
+  immediately regardless of duration. A **blocked** row always outranks
+  every other tint. SQL keyword highlighting lives in the `Enter` detail
+  panel, not the table row. TUI + Web.
 - **Query detail panel** — press `Enter` on any row to read the full SQL.
 - **Resilient by design** — if the database goes down, pg_lens shows an
   error banner, keeps the last known data on screen, and reconnects with
@@ -76,6 +84,18 @@ Web Lens dashboard running on recorded data (no database required).
   cluster-wide); collection shares the Schema Lens slow cadence, and `R`
   force-refreshes both. `queryid` is exposed as a string in the JSON API —
   the raw int8 can exceed JavaScript's safe-integer range.
+- **I/O profile** (`pg_stat_io`, **PG 16+**) — cumulative reads/writes/hits
+  aggregated by `backend_type` × `context` (all-zero rows filtered), with
+  per-second rates derived from tick-to-tick deltas (reset-safe) and average
+  read/write latency shown as `--` when `track_io_timing` is off. Collected
+  on the slow schema cadence; lives inside the Macro Lens's buffer/IO
+  column (no new tab) and as a Web Lens vitals card. Cleanly absent — not
+  broken — on PG 13–15.
+- **WAL generation rate** (`pg_stat_wal`, **PG 14+**) — WAL bytes/s and
+  records/s from tick-to-tick deltas (reset-safe), plus `wal_buffers_full`
+  tinted only while it's actively climbing (a tuning nudge, not an
+  incident); timing shows `--` when `track_wal_io_timing` is off. Fast
+  tick. A Replication Lens panel and a Macro Lens line; absent on PG 13.
 - **Replication** — the Macro Lens shows a compact **Replication** summary
   (capped, with a "Tab → Replication for all" hint once it clips) alongside
   a dedicated **Replication Lens** tab with the full, never-clipped picture:
@@ -184,7 +204,7 @@ prints the old → new version.
 
 | Knob | Env var | Flag |
 | --- | --- | --- |
-| Pin a version | `PG_LENS_VERSION=v0.15.0` | `--version v0.15.0` |
+| Pin a version | `PG_LENS_VERSION=v0.16.0` | `--version v0.16.0` |
 | Install elsewhere | `PG_LENS_INSTALL_DIR=/opt/bin` | `--dir /opt/bin` |
 | Preview only | — | `--dry-run` (prints the resolved version, URLs and target path, downloads nothing) |
 
@@ -325,13 +345,13 @@ forbids `_` in package names); it installs `/usr/bin/pg_lens` plus docs
 and has no dependencies.
 
 ```sh
-# Debian / Ubuntu (pick amd64 or arm64) — replace 0.15.0 with the latest release
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.15.0/pg-lens_0.15.0_amd64.deb
-sudo dpkg -i pg-lens_0.15.0_amd64.deb
+# Debian / Ubuntu (pick amd64 or arm64) — replace 0.16.0 with the latest release
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.16.0/pg-lens_0.16.0_amd64.deb
+sudo dpkg -i pg-lens_0.16.0_amd64.deb
 
 # RHEL / Fedora / SUSE (x86_64 or aarch64)
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.15.0/pg-lens-0.15.0-1.x86_64.rpm
-sudo rpm -i pg-lens-0.15.0-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.15.0-1.x86_64.rpm
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.16.0/pg-lens-0.16.0-1.x86_64.rpm
+sudo rpm -i pg-lens-0.16.0-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.16.0-1.x86_64.rpm
 ```
 
 ### Cargo (crates.io)
@@ -900,11 +920,15 @@ lock-table pressure gauge, invalid-index flag, `psql` shell launch), v0.13
 modern Web Lens redesign with a database switcher and keyboard
 navigation), v0.14 "see the trend, not just the moment" (vitals trend
 arrows, a web history time-scrubber, Schema Lens `Δ1h` size growth, Query
-Lens temp-spill/I/O profile, an interactive `serve` service picker), and
-v0.15 "Schema Lens completo" (honest `N of M` table counts with a
-configurable `--schema-table-limit`, on-demand table structure detail,
-partition collapsing with drill-down, a per-table lock indicator, and a
-Query Lens cross-lens jump). See [ROADMAP.md](ROADMAP.md) for what's next.
+Lens temp-spill/I/O profile, an interactive `serve` service picker), v0.15
+"Schema Lens completo" (honest `N of M` table counts with a configurable
+`--schema-table-limit`, on-demand table structure detail, partition
+collapsing with drill-down, a per-table lock indicator, and a Query Lens
+cross-lens jump), and v0.16 "First impression" (a `curl | sh` install
+script with checksum verification, pg_activity-style Micro Lens row
+colors, `y` copy-to-clipboard via OSC 52, a `pg_stat_io` I/O profile panel,
+a `pg_stat_wal` WAL generation rate panel, and shell completions). See
+[ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Changelog
 

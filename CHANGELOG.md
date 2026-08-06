@@ -4,6 +4,60 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.16.0] — 2026-08-06 — "First impression"
+
+### Added
+- **`curl | sh` install script** — `scripts/install.sh`: detects your
+  platform (macOS arm64/x86_64, Linux musl x86_64/aarch64), resolves the
+  latest release via the GitHub API (or pins one with `PG_LENS_VERSION` /
+  `--version`), **verifies the download against the `.sha256` sidecar the
+  release already publishes**, and installs into `~/.local/bin` with no
+  sudo and no rc-file edits (it prints the `export PATH=...` line for you).
+  Re-running it is the upgrade path. `--dry-run` previews without
+  downloading; unpublished platforms fail loud with a clear message. Also
+  mirrored at `https://dog-hero.github.io/pg_lens/install.sh`.
+- **Micro Lens row colors, pg_activity-style** — the whole activity row is
+  now tinted by session state (active green, idle dim, idle-in-transaction
+  yellow, aborted red, unknown neutral). For `active` rows only, a
+  long-running query overrides that base color (orange past 10s, red past
+  30s) so an old idle session is never mislabelled as a problem. A row
+  whose backend reports a live `wait_event` is tinted yellow immediately,
+  independent of the duration thresholds — this extends the pre-existing
+  `W` marker's meaning to the whole row and is deliberate, not a
+  regression. **Blocked** outranks every other tint. The `B`/`W` textual
+  markers are unchanged, so the signal never depends on color alone, and
+  selection highlighting stays unmistakable. TUI + Web.
+- **Copy to clipboard (`y`)** — copies the current selection's full text:
+  the Micro Lens's selected query, the Query Lens's selected statement, the
+  Index Lens's verbatim `CREATE INDEX` definition, or the Schema Lens's
+  selected table's qualified name (its column list once the structure
+  detail is open). Uses the **OSC 52** terminal escape sequence directly —
+  no clipboard dependency, and it works over SSH — capped at 100 KB, with
+  an honest toast ("sent to clipboard (OSC 52)") since pg_lens can't
+  confirm the terminal acted on it; supported in iTerm2/kitty/WezTerm/
+  Ghostty and tmux with `set-clipboard on`, not in Apple Terminal. Web Lens
+  gets copy buttons on the query/statement details instead.
+- **I/O profile — `pg_stat_io`, PG 16+** — reads/writes/hits aggregated by
+  `backend_type` × `context` (all-zero rows filtered), per-second rates
+  from tick-to-tick deltas with stats-reset handling, average read/write
+  latency shown as `--` when `track_io_timing` is off. Slow cadence; lives
+  in the Macro Lens's checkpointer/buffer column (no new tab) and as a Web
+  Lens vitals card. Cleanly absent, not broken, on PG 13–15.
+- **WAL generation rate — `pg_stat_wal`, PG 14+** — WAL bytes/s and
+  records/s from tick-to-tick deltas (reset-safe), with `wal_buffers_full`
+  tinted only while actively climbing (a tuning nudge, not an incident);
+  timing shows `--` when `track_wal_io_timing` is off. Fast tick — a
+  Replication Lens panel plus a Macro Lens line. Absent on PG 13.
+- **Shell completions** — `pg_lens completions <bash|zsh|fish|powershell|
+  elvish>` via `clap_complete`, resolved before any DB/terminal work so it
+  never touches the network or a connection.
+
+### Changed
+- **SQL keyword highlighting** moved out of the Micro/Query Lens table rows
+  (which now render plain query text in the row's state/duration color)
+  and lives only in the `Enter` detail panel / expanded row, in both
+  lenses.
+
 ## [0.15.0] — 2026-08-05 — "Schema Lens completo"
 
 ### Added
