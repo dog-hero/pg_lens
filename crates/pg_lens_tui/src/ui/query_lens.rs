@@ -175,11 +175,14 @@ fn draw_table(app: &mut App, statements: &StatementsSnapshot, frame: &mut Frame,
         .iter()
         .filter_map(|&i| statements.statements.get(i))
         .map(|row| {
-            // Truncate FIRST (char-safe), then tokenize — the ellipsis
-            // lands in a default-styled span (same as the Micro Lens).
+            // Truncate FIRST (char-safe). v0.16 (Part B): plain text in the
+            // table row — SQL keyword highlighting only lives in the `Enter`
+            // detail panel (see `draw_detail`), matching the Micro Lens's
+            // same move (severity/scanning table vs. a read-the-whole-query
+            // expanded view).
             let query_text = format::truncate_with_ellipsis(&row.query, query_width);
             Row::new(vec![
-                Cell::from(sql::highlight_line(&query_text)),
+                Cell::from(query_text),
                 Cell::from(format::human_count(row.calls)),
                 Cell::from(format::human_ms(row.total_exec_ms)),
                 Cell::from(format::human_ms(row.mean_exec_ms)),

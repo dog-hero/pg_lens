@@ -4,8 +4,14 @@
 //! - status column `S`: `B` = blocked (pid present in `DbSnapshot::locks`),
 //!   `W` = waiting on a non-null `wait_event`, ` ` otherwise — so captures
 //!   prove the state without relying on color;
-//! - row style mirrors it: red for blocked (wins), yellow for waiting;
-//! - the query cell is truncated to the column width with an explicit `…`;
+//! - v0.16: the WHOLE row is colored, pg_activity-style — see
+//!   [`row_severity_style`] for the full precedence (blocked wins, then a
+//!   running-query duration override, then plain waiting, then the state's
+//!   own base color from [`state_row_color`]); the `S` column's `B`/`W`
+//!   marker stays the textual proof (captures never rely on color alone);
+//! - the query cell is truncated to the column width with an explicit `…`,
+//!   in the row's own color — SQL keyword highlighting only appears in the
+//!   `Enter` detail panel, never the table row (Part B, v0.16);
 //! - `Enter` opens a detail panel with the full query (wrapped); while it is
 //!   open `j`/`k` keep moving the selection (the panel follows),
 //!   `Enter`/`Esc` close it (see `crate::app::handle_key`).
@@ -360,6 +366,72 @@ fn draw_empty(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(para, inner);
 }
 
+/// Above this running-query duration the row's color overrides the state
+/// base color with bad-tier red; below it but above [`ROW_DURATION_WARN_SECS`]
+/// it overrides with warn-tier yellow/orange; below both, the state's own
+/// color (see [`state_row_color`]) applies untouched. The override keys on
+/// [`pg_lens_core::ActivityRow::duration_secs`] — the age of the RUNNING
+/// QUERY — and only ever fires for `state == "active"` sessions: an idle (or
+/// idle-in-transaction) session sitting still for 40s is not the same signal
+/// as a query still executing after 40s, and idle-in-transaction risk
+/// already has its own story (the state color itself, plus the v0.9 xact-age
+/// column/headline) — painting an old idle row red here would just be noise
+/// on top of a signal that already exists.
+const ROW_DURATION_BAD_SECS: f64 = 30.0;
+const ROW_DURATION_WARN_SECS: f64 = 10.0;
+
+/// pg_activity-style base row color, one per session state (v0.16) — applied
+/// to the WHOLE row (not just a marker column) so a scan of the table reads
+/// at a glance:
+/// - `active`: green — the calm, expected state (nothing wrong YET; see the
+///   duration override above for when it runs long);
+/// - `idle`: dim gray — the least interesting state, deliberately quiet;
+/// - `idle in transaction`: yellow — a standing risk (holds snapshot/locks,
+///   ages the xmin horizon) even at duration zero, so it never dims;
+/// - `idle in transaction (aborted)`: red — a leaked, doomed transaction
+///   that will never commit; strictly worse than a live idle-in-transaction;
+/// - anything else PostgreSQL reports (`fastpath function call`, `disabled`,
+///   or a future addition never listed here): a neutral default rather than
+///   guessing at a severity that was never verified — same "never invent
+///   data" instinct as `PollerStatus`'s explicit states.
+fn state_row_color(state: &str) -> Color {
+    match state {
+        "active" => Color::Green,
+        "idle" => Color::DarkGray,
+        "idle in transaction" => Color::Yellow,
+        "idle in transaction (aborted)" => Color::Red,
+        _ => Color::Reset,
+    }
+}
+
+/// The full row-color decision, in precedence order:
+/// 1. blocked (red bold) — wins over everything else. It is the single most
+///    actionable signal on screen (see the module doc's "captures prove the
+///    state without relying on color" — the `B` marker already proves it in
+///    text; the row color makes it impossible to miss at a glance too);
+/// 2. the duration override (bad/warn red/yellow, active sessions only —
+///    see [`ROW_DURATION_BAD_SECS`]/[`ROW_DURATION_WARN_SECS`]);
+/// 3. plain waiting (yellow, unbolded) — kept for parity with the
+///    pre-existing `W` marker on a non-blocked, non-long-running session;
+/// 4. the state's own base color ([`state_row_color`]).
+fn row_severity_style(row: &pg_lens_core::ActivityRow, is_blocked: bool, is_waiting: bool) -> Style {
+    if is_blocked {
+        return Style::new().fg(Color::Red).bold();
+    }
+    if row.state == "active" {
+        if row.duration_secs > ROW_DURATION_BAD_SECS {
+            return Style::new().fg(Color::Red).bold();
+        }
+        if row.duration_secs > ROW_DURATION_WARN_SECS {
+            return Style::new().fg(Color::Yellow).bold();
+        }
+    }
+    if is_waiting {
+        return Style::new().fg(Color::Yellow);
+    }
+    Style::new().fg(state_row_color(&row.state))
+}
+
 fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
     let header = Row::new([
         "S", "PID", "DB", "User", "Client", "State", "Wait", "Duration", "Xact", "Query",
@@ -386,24 +458,14 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
             } else {
                 " "
             };
-            let style = if is_blocked {
-                Style::new().fg(Color::Red).bold()
-            } else if is_waiting {
-                Style::new().fg(Color::Yellow)
-            } else {
-                Style::new()
-            };
-            // Truncate FIRST (char-safe), then tokenize the truncated text —
-            // the ellipsis lands in a default-styled span. Tinted rows
-            // (blocked red / waiting yellow) keep PLAIN text: their row fg
-            // is the severity signal, and per-span SQL colors would
-            // fragment it (documented decision — severity beats syntax).
-            let query_text = format::truncate_with_ellipsis(&row.query, query_width);
-            let query_cell = if is_blocked || is_waiting {
-                Cell::from(query_text)
-            } else {
-                Cell::from(sql::highlight_line(&query_text))
-            };
+            let style = row_severity_style(row, is_blocked, is_waiting);
+            // Truncate FIRST (char-safe). v0.16 (Part B): the row's own
+            // severity/state color IS the signal for this cell — keyword
+            // SQL highlighting moved to the Enter detail panel only (see
+            // `draw_detail`), never the table row (owner decision: syntax
+            // highlighting belongs in the expanded view, not a scanning
+            // table where every row now carries a meaningful color).
+            let query_cell = Cell::from(format::truncate_with_ellipsis(&row.query, query_width));
             // Xact column: age of the open transaction (`—` when none),
             // tinted by the same severity the headline uses — idle in
             // transaction reads worse than an equally-old active query.
@@ -623,12 +685,13 @@ fn wait_bar(count: usize, max: usize, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        WAITS_TOP_N, blocking_chain_lines, idle_headline, oldest_xact_headline,
-        query_column_width, wait_bar, wait_percent, waits_strip,
+        ROW_DURATION_BAD_SECS, ROW_DURATION_WARN_SECS, WAITS_TOP_N, blocking_chain_lines,
+        idle_headline, oldest_xact_headline, query_column_width, row_severity_style,
+        state_row_color, wait_bar, wait_percent, waits_strip,
     };
     use pg_lens_core::waits::WaitSummary;
     use pg_lens_core::xact_age::{OldestXact, Severity as XactSeverity};
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier, Style};
 
     #[test]
     fn query_width_shrinks_with_the_terminal_and_never_underflows() {
@@ -970,5 +1033,214 @@ mod tests {
             .find(|s| s.content.contains('h') || s.content.contains('m'))
             .expect("age span present");
         assert_eq!(age_span.style.fg, Some(Color::Red));
+    }
+
+    // --- v0.16: per-row pg_activity-style color system (Part A) ----------
+
+    fn row(state: &str, duration_secs: f64) -> pg_lens_core::ActivityRow {
+        pg_lens_core::ActivityRow {
+            pid: 1,
+            application_name: "app".to_string(),
+            database: "db".to_string(),
+            client: "10.0.0.1".to_string(),
+            duration_secs,
+            xact_age_secs: None,
+            wait_event: None,
+            username: "u".to_string(),
+            state: state.to_string(),
+            query: "SELECT 1".to_string(),
+            query_leader_pid: 1,
+            is_parallel_worker: false,
+            query_id: None,
+        }
+    }
+
+    #[test]
+    fn state_row_color_maps_every_known_state_and_defaults_neutral_for_unknown() {
+        assert_eq!(state_row_color("active"), Color::Green);
+        assert_eq!(state_row_color("idle"), Color::DarkGray);
+        assert_eq!(state_row_color("idle in transaction"), Color::Yellow);
+        assert_eq!(state_row_color("idle in transaction (aborted)"), Color::Red);
+        // Unknown/rare states (fastpath function call, disabled, or any
+        // future addition) must never invent a severity — neutral default.
+        assert_eq!(state_row_color("fastpath function call"), Color::Reset);
+        assert_eq!(state_row_color("disabled"), Color::Reset);
+        assert_eq!(state_row_color("something new in a future PG"), Color::Reset);
+    }
+
+    #[test]
+    fn duration_override_only_fires_for_active_sessions() {
+        // An active query past the bad threshold: red, bold.
+        let r = row("active", ROW_DURATION_BAD_SECS + 0.1);
+        assert_eq!(
+            row_severity_style(&r, false, false),
+            Style::new().fg(Color::Red).bold()
+        );
+        // Past the warn threshold only: yellow, bold.
+        let r = row("active", ROW_DURATION_WARN_SECS + 0.1);
+        assert_eq!(
+            row_severity_style(&r, false, false),
+            Style::new().fg(Color::Yellow).bold()
+        );
+        // At/below warn: plain active green, override does not fire.
+        let r = row("active", ROW_DURATION_WARN_SECS);
+        assert_eq!(row_severity_style(&r, false, false), Style::new().fg(Color::Green));
+
+        // The exact same duration on an IDLE session must NOT turn red/
+        // yellow — idle-in-transaction risk already has its own story (the
+        // state color itself + the xact-age column), and a merely-idle
+        // session sitting still is not urgent the way a still-running query
+        // is. This is the owner's explicit "idle stays its state color
+        // regardless of age" requirement.
+        let r = row("idle", ROW_DURATION_BAD_SECS + 10_000.0);
+        assert_eq!(row_severity_style(&r, false, false), Style::new().fg(Color::DarkGray));
+        let r = row("idle in transaction", ROW_DURATION_BAD_SECS + 10_000.0);
+        assert_eq!(row_severity_style(&r, false, false), Style::new().fg(Color::Yellow));
+    }
+
+    #[test]
+    fn blocked_wins_over_the_duration_override_and_over_waiting() {
+        // A blocked session that ALSO has a long-running active query stays
+        // red-bold via the blocked path (same visual result here, but this
+        // locks in the precedence — blocked is checked first).
+        let r = row("active", ROW_DURATION_BAD_SECS + 1.0);
+        assert_eq!(
+            row_severity_style(&r, true, false),
+            Style::new().fg(Color::Red).bold()
+        );
+        // Blocked wins over waiting too.
+        assert_eq!(
+            row_severity_style(&r, true, true),
+            Style::new().fg(Color::Red).bold()
+        );
+    }
+
+    #[test]
+    fn waiting_tints_yellow_when_nothing_stronger_applies() {
+        let r = row("active", 1.0);
+        assert_eq!(row_severity_style(&r, false, true), Style::new().fg(Color::Yellow));
+    }
+
+    /// Render proof: a >30s active row renders red, AND the selected row
+    /// stays visibly distinct from an unselected row of the same color (the
+    /// REVERSED highlight modifier is present only on the selected row's
+    /// cells) — the sharp edge the owner flagged explicitly.
+    #[test]
+    fn a_long_running_active_row_renders_red_and_selection_stays_distinguishable() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::MicroLens;
+        let snapshot = app.snapshot.clone();
+        crate::app::update(&mut app, crate::app::Action::Snapshot(snapshot));
+
+        // Mock pid 4650 (vacuumdb) is `active`, not blocked/waiting, with a
+        // duration well past ROW_DURATION_BAD_SECS.
+        let pos = app
+            .row_order
+            .iter()
+            .position(|&i| app.snapshot.activity[i].pid == 4650)
+            .expect("mock's long-running active row is present");
+        app.table_state.select(Some(pos));
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+
+        // Find the row of cells containing "4650" (the PID column) and
+        // assert its fg is red.
+        let width = buffer.area.width;
+        let row_y = (0..buffer.area.height)
+            .find(|&y| {
+                let line: String = (0..width)
+                    .map(|x| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                    .collect();
+                line.contains("4650")
+            })
+            .expect("the long-running row is on screen");
+        let red_present = (0..width).any(|x| {
+            buffer
+                .cell((x, row_y))
+                .is_some_and(|c| c.fg == Color::Red && c.symbol() != " ")
+        });
+        assert!(red_present, "the long-running active row must render red");
+
+        // Selection: the same row, once selected, must carry the REVERSED
+        // modifier (the table's highlight style) — proving the cursor is
+        // still visually distinguishable even though the row itself is
+        // already colored.
+        let reversed_present = (0..width).any(|x| {
+            buffer
+                .cell((x, row_y))
+                .is_some_and(|c| c.modifier.contains(Modifier::REVERSED))
+        });
+        assert!(
+            reversed_present,
+            "the selected row must carry the REVERSED highlight on top of its severity color"
+        );
+    }
+
+    /// Part B: the table row must NOT carry SQL keyword highlighting (no
+    /// cyan-bold `SELECT`/`UPDATE` span in the Query column) while the
+    /// `Enter` detail panel still highlights the full query — keyword syntax
+    /// coloring moved to the expanded view only.
+    #[test]
+    fn table_row_query_is_plain_but_the_detail_panel_still_highlights_it() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::MicroLens;
+        let snapshot = app.snapshot.clone();
+        crate::app::update(&mut app, crate::app::Action::Snapshot(snapshot));
+        // pid 4821's query starts with SELECT and is short enough to fit
+        // un-truncated at 160 cols — a keyword span would be provable if
+        // present.
+        let pos = app
+            .row_order
+            .iter()
+            .position(|&i| app.snapshot.activity[i].pid == 4821)
+            .expect("mock row present");
+        app.table_state.select(Some(pos));
+
+        let backend = ratatui::backend::TestBackend::new(160, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let width = buffer.area.width;
+        let row_y = (0..buffer.area.height)
+            .find(|&y| {
+                let line: String = (0..width)
+                    .map(|x| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                    .collect();
+                line.contains("SELECT")
+            })
+            .expect("the SELECT row is on screen");
+        // No cyan-bold keyword span in that row (Cyan is reserved for the
+        // keyword highlighter; the row itself is state-colored green/etc,
+        // never cyan).
+        let cyan_bold_present = (0..width).any(|x| {
+            buffer.cell((x, row_y)).is_some_and(|c| {
+                c.fg == Color::Cyan && c.modifier.contains(Modifier::BOLD) && c.symbol() != " "
+            })
+        });
+        assert!(!cyan_bold_present, "the table row must not carry keyword highlighting");
+
+        // Open the detail panel on the same row: the full query DOES carry
+        // keyword highlighting there.
+        app.detail_open = true;
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let width = buffer.area.width;
+        let cyan_bold_present = (0..buffer.area.height).any(|y| {
+            (0..width).any(|x| {
+                buffer.cell((x, y)).is_some_and(|c| {
+                    c.fg == Color::Cyan && c.modifier.contains(Modifier::BOLD) && c.symbol() != " "
+                })
+            })
+        });
+        assert!(cyan_bold_present, "the detail panel must still highlight SQL keywords");
     }
 }

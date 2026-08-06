@@ -3,13 +3,72 @@
 // Mirrors the TUI's micro_lens.rs conventions: status column `S` shows `B`
 // when the pid appears in DbSnapshot::locks (blocked — red tint, wins) and
 // `W` when wait_event is non-null (waiting — yellow tint).
+//
+// v0.16: the WHOLE row is colored, pg_activity-style (Part A) — see
+// `activityRowClass` for the exact precedence (blocked wins, then a
+// running-query duration override, then plain waiting, then the session
+// state's own base color), mirroring `ui/micro_lens.rs::row_severity_style`
+// exactly. The query cell itself is now plain text in the table row — SQL
+// keyword highlighting moved into the expanded detail row only (Part B),
+// which also carries a copy-to-clipboard button (Part C).
 
 import type { ActivityRow, LockRow } from "./types";
-import { humanDuration } from "./format";
-import { renderSqlInto } from "./sql";
-import { xactAgeSeverity } from "./xact_age";
-import { blockingChain, renderBlockingChain } from "./blocking";
+import { humanDuration } from "./format.ts";
+import { renderSqlInto } from "./sql.ts";
+import { xactAgeSeverity } from "./xact_age.ts";
+import { blockingChain, renderBlockingChain } from "./blocking.ts";
+import { renderCopyButton } from "./clipboard.ts";
 import type { AdminKind } from "./actions";
+
+/** Above this running-query duration the row's color overrides the state
+ * base color — bad (red) past this, warn (yellow) past `ROW_DURATION_WARN_SECS`
+ * — mirroring the TUI's `ROW_DURATION_BAD_SECS`/`ROW_DURATION_WARN_SECS`
+ * exactly. Only ever applies to `state === "active"` sessions: an idle (or
+ * idle-in-transaction) session's AGE is a different signal, already carried
+ * by its own state color and the Xact column — see `activityRowClass`. */
+export const ROW_DURATION_BAD_SECS = 30;
+export const ROW_DURATION_WARN_SECS = 10;
+
+/** The full row-color decision, precedence order (mirrors the TUI's
+ * `row_severity_style` 1:1):
+ * 1. `"blocked"` — wins over everything (the single most actionable signal);
+ * 2. the duration override — active sessions only;
+ * 3. `"waiting"` — kept for parity with the pre-existing `W` marker;
+ * 4. the session state's own base color (`"row-state-*"`), or `""` (neutral
+ *    default) for any state pg_lens does not recognize. */
+export function activityRowClass(
+  row: ActivityRow,
+  isBlocked: boolean,
+  isWaiting: boolean,
+): string {
+  if (isBlocked) return "blocked";
+  if (row.state === "active") {
+    if (row.duration_secs > ROW_DURATION_BAD_SECS) return "row-duration-bad";
+    if (row.duration_secs > ROW_DURATION_WARN_SECS) return "row-duration-warn";
+  }
+  if (isWaiting) return "waiting";
+  return stateRowClass(row.state);
+}
+
+/** pg_activity-style base row color, one CSS class per session state —
+ * mirrors the TUI's `state_row_color` mapping exactly (see its doc comment
+ * for the full reasoning). Unknown/rare states (`fastpath function call`,
+ * `disabled`, or any future addition) intentionally map to `""` (no class,
+ * neutral default) rather than guessing at a severity. */
+function stateRowClass(state: string): string {
+  switch (state) {
+    case "active":
+      return "row-state-active";
+    case "idle":
+      return "row-state-idle";
+    case "idle in transaction":
+      return "row-state-idle-txn";
+    case "idle in transaction (aborted)":
+      return "row-state-idle-txn-aborted";
+    default:
+      return "";
+  }
+}
 
 type SortKey =
   | "pid"
@@ -62,9 +121,11 @@ export class ActivityTable {
   private rows: ActivityRow[] = [];
   private blocked = new Set<number>();
   private locks: LockRow[] = [];
-  /** pid of the blocked row whose wait-for chain is expanded, if any —
-   * mirrors the TUI's detail panel (v0.9), toggled by clicking a `B` row. */
-  private expandedChainPid: number | null = null;
+  /** pid of the row whose expanded detail (full highlighted query + copy
+   * button, plus the wait-for chain when blocked) is open, if any — v0.9's
+   * blocked-only chain toggle generalized (v0.16) to every row, mirroring
+   * the TUI's `Enter`-to-open detail panel. */
+  private expandedPid: number | null = null;
   private filter = "";
   private readonly thead: HTMLTableSectionElement;
   private readonly tbody: HTMLTableSectionElement;
@@ -73,6 +134,9 @@ export class ActivityTable {
   private readonly adminEnabled: () => boolean;
   /** Invoked when a row's Cancel/Kill button is pressed. */
   private readonly onAdmin: ((kind: AdminKind, row: ActivityRow) => void) | null;
+  /** Invoked after a copy-button click resolves — lets the caller show a
+   * toast (see `main.ts`'s `showToast`). */
+  private readonly onCopy: ((ok: boolean, chars: number) => void) | null;
 
   constructor(
     table: HTMLTableElement,
@@ -81,6 +145,7 @@ export class ActivityTable {
     opts?: {
       adminEnabled?: () => boolean;
       onAdmin?: (kind: AdminKind, row: ActivityRow) => void;
+      onCopy?: (ok: boolean, chars: number) => void;
     },
   ) {
     this.thead = table.tHead ?? table.createTHead();
@@ -88,6 +153,7 @@ export class ActivityTable {
     this.count = count ?? null;
     this.adminEnabled = opts?.adminEnabled ?? (() => false);
     this.onAdmin = opts?.onAdmin ?? null;
+    this.onCopy = opts?.onCopy ?? null;
     if (filterInput) {
       filterInput.addEventListener("input", () => {
         this.filter = filterInput.value.trim().toLowerCase();
@@ -101,11 +167,10 @@ export class ActivityTable {
     this.rows = activity;
     this.locks = locks;
     this.blocked = new Set(locks.map((lock) => lock.pid));
-    // A pid can stop being blocked between polls (deadlock resolved, query
-    // finished) — drop a stale expansion rather than showing a chain for a
-    // pid that no longer has one.
-    if (this.expandedChainPid !== null && !this.blocked.has(this.expandedChainPid)) {
-      this.expandedChainPid = null;
+    // A pid can stop being on screen between polls (query finished, session
+    // gone) — drop a stale expansion rather than pointing at nothing.
+    if (this.expandedPid !== null && !this.rows.some((r) => r.pid === this.expandedPid)) {
+      this.expandedPid = null;
     }
     // Re-render the head too: the Actions column appears once a token makes
     // admin available (it may become enabled after the first render).
@@ -206,8 +271,11 @@ export class ActivityTable {
       const isBlocked = this.blocked.has(row.pid);
       const isWaiting = row.wait_event !== null;
       const tr = document.createElement("tr");
-      if (isBlocked) tr.classList.add("blocked");
-      else if (isWaiting) tr.classList.add("waiting");
+      // v0.16 (Part A): the whole row carries a pg_activity-style severity/
+      // state color — see `activityRowClass`'s doc comment for the exact
+      // precedence (mirrors the TUI 1:1).
+      const rowClass = activityRowClass(row, isBlocked, isWaiting);
+      if (rowClass !== "") tr.classList.add(rowClass);
       const marker = isBlocked ? "B" : isWaiting ? "W" : "";
       const cells: Array<[string, boolean]> = [
         [marker, false],
@@ -240,44 +308,68 @@ export class ActivityTable {
         xactTd.classList.add("xact-none");
       }
       tr.append(xactTd);
-      // Query cell: SQL-highlighted spans (XSS-safe — renderSqlInto only
-      // ever writes textContent), tooltip carries the full text.
+      // Query cell (v0.16, Part B): PLAIN text — the row's own severity/
+      // state color IS the signal here; SQL keyword highlighting only shows
+      // in the expanded detail row below (tooltip still carries the full
+      // text for a quick hover).
       const query = document.createElement("td");
       query.classList.add("query");
       query.title = row.query;
-      renderSqlInto(query, row.query);
+      query.textContent = row.query;
       tr.append(query);
       if (this.showActions()) {
         tr.append(this.actionsCell(row));
       }
-      // v0.9: blocked rows are clickable — toggles the wait-for chain
-      // (mirrors the TUI's Enter-to-open detail panel) into a sub-row
-      // right below, so the reader gets to the root blocker without
-      // leaving the table.
-      if (isBlocked) {
-        tr.classList.add("blocking-chain-toggle");
-        tr.addEventListener("click", (e) => {
-          // Don't hijack clicks on the Cancel/Kill buttons.
-          if (e.target instanceof HTMLButtonElement) return;
-          this.expandedChainPid = this.expandedChainPid === row.pid ? null : row.pid;
-          this.renderBody();
-        });
-      }
+      // v0.16: every row is clickable — toggles an expanded detail row
+      // (full highlighted query + copy button, plus the wait-for chain when
+      // blocked) right below, mirroring the TUI's `Enter` detail panel.
+      // Generalized (v0.9 used to gate this on `isBlocked` only).
+      tr.classList.add("row-toggle");
+      tr.addEventListener("click", (e) => {
+        // Don't hijack clicks on the Cancel/Kill/Copy buttons.
+        if (e.target instanceof HTMLButtonElement) return;
+        this.expandedPid = this.expandedPid === row.pid ? null : row.pid;
+        this.renderBody();
+      });
       trs.push(tr);
-      if (isBlocked && this.expandedChainPid === row.pid) {
-        const chain = blockingChain(row.pid, this.locks);
-        if (chain !== null) {
-          const chainTr = document.createElement("tr");
-          chainTr.classList.add("blocking-chain-row");
-          const td = document.createElement("td");
-          td.colSpan = colCount;
-          td.append(renderBlockingChain(chain));
-          chainTr.append(td);
-          trs.push(chainTr);
-        }
+      if (this.expandedPid === row.pid) {
+        trs.push(this.detailRow(row, isBlocked, colCount));
       }
     }
     this.tbody.replaceChildren(...trs);
+  }
+
+  /** Expanded detail row (v0.16): the full, SQL-highlighted query (Part B —
+   * this is the ONLY place in the Micro Lens that still highlights), a copy
+   * button (Part C), and — when the row is blocked — the wait-for chain
+   * that used to be the whole of this sub-row pre-v0.16. */
+  private detailRow(row: ActivityRow, isBlocked: boolean, colCount: number): HTMLTableRowElement {
+    const tr = document.createElement("tr");
+    tr.classList.add("activity-detail");
+    const td = document.createElement("td");
+    td.colSpan = colCount;
+    const pre = document.createElement("pre");
+    renderSqlInto(pre, row.query);
+    td.append(pre);
+    if (this.onCopy !== null) {
+      td.append(
+        renderCopyButton(
+          () => row.query,
+          (ok, chars) => this.onCopy?.(ok, chars),
+        ),
+      );
+    }
+    if (isBlocked) {
+      const chain = blockingChain(row.pid, this.locks);
+      if (chain !== null) {
+        const chainWrap = document.createElement("div");
+        chainWrap.classList.add("blocking-chain-row");
+        chainWrap.append(renderBlockingChain(chain));
+        td.append(chainWrap);
+      }
+    }
+    tr.append(td);
+    return tr;
   }
 
   /** Cancel / Kill buttons for one row (only rendered when admin is on). */

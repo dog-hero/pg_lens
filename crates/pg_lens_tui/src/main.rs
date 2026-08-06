@@ -39,6 +39,7 @@ use pg_lens_core::{AdminCommand, TableDetailRequest};
 use crate::app::{Action, App, PickerEntry, PickerState, update};
 
 mod app;
+mod clipboard;
 mod event;
 mod psql;
 mod ui;
@@ -1237,6 +1238,17 @@ async fn run(
             && detail_tx.try_send(req.clone()).is_err()
         {
             app.table_detail_request = Some(req);
+        }
+        // v0.16 (`y`): the only place allowed to write the OSC 52 escape
+        // sequence to stdout — `update()`/`handle_key` only ever queue the
+        // request (see `App::clipboard_request`'s doc comment); `ui/` never
+        // touches I/O at all. Errors (a closed/broken stdout) fall back to a
+        // plain toast rather than panicking the whole TUI over a copy.
+        if let Some(text) = app.clipboard_request.take() {
+            let mut stdout = std::io::stdout();
+            let toast = clipboard::copy_to_clipboard(&mut stdout, &text)
+                .unwrap_or_else(|e| format!("clipboard write failed: {e}"));
+            update(&mut app, Action::ClipboardCopied { text: toast });
         }
 
         // Lazy poller spawn (picker mode): the first pass after Enter sees

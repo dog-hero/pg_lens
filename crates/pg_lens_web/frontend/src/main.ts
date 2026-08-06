@@ -114,6 +114,7 @@ const table = new ActivityTable(
   {
     adminEnabled: () => activeToken !== null && !readOnly,
     onAdmin: (kind, row) => void onAdmin(kind, row),
+    onCopy: (ok, chars) => onCopyResult(ok, chars),
   },
 );
 const vitalsContainer = el<HTMLElement>("vitals");
@@ -238,6 +239,7 @@ const statementsLens = new StatementsLens(
   el<HTMLParagraphElement>("statements-placeholder"),
   el<HTMLDivElement>("statements-unavailable"),
   document.getElementById("statements-filter") as HTMLInputElement | null,
+  (ok, chars) => onCopyResult(ok, chars),
 );
 
 // Tab switcher (U1: five top-level tabs, mirroring the TUI's six lenses —
@@ -357,6 +359,17 @@ function showToast(message: string, isError = false): void {
   toastTimer = window.setTimeout(() => {
     toast.hidden = true;
   }, 5000);
+}
+
+/** v0.16 (Part C): shared copy-button result handler for every lens's
+ * expanded detail (Micro/Query/Schema) — honest wording either way (never
+ * an unconditional "copied!"; see `clipboard.ts`'s doc comment). */
+function onCopyResult(ok: boolean, chars: number): void {
+  if (ok) {
+    showToast(`Copied ${chars} chars to clipboard`);
+  } else {
+    showToast("Copy failed — select the text manually", true);
+  }
 }
 
 function onSnapshot(snapshot: DbSnapshot): void {

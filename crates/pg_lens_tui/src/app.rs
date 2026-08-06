@@ -460,6 +460,13 @@ pub enum Action {
     /// its module doc for why that dance cannot live in `update()` or
     /// `ui/`).
     PsqlResult { text: String, error: bool },
+    /// v0.16 (`y`): `main.rs` emitted the OSC 52 copy escape sequence (the
+    /// only place allowed to touch stdout directly — see `clipboard.rs`'s
+    /// module doc) and reports the exact toast text back — same
+    /// `AdminFeedback` mechanism `c`/`K`/`!` already use. `update()` stays
+    /// the sole mutation point even though the actual terminal write
+    /// happened in `main.rs`, mirroring `PsqlResult`'s same reasoning.
+    ClipboardCopied { text: String },
     Tick,
     Quit,
 }
@@ -678,6 +685,15 @@ pub struct App {
     /// `std::mem::take`) the instant it observes it, then reports the
     /// outcome back through [`Action::PsqlResult`].
     pub launch_psql_requested: bool,
+    /// v0.16: at most one pending copy-to-clipboard request, queued by `y`
+    /// (see [`clipboard_text`]) and drained by `main.rs` into an OSC 52
+    /// write on stdout — the exact mirror of `launch_psql_requested`/
+    /// `table_detail_request`. Holds the FULL text to copy (already resolved
+    /// from whatever the active lens has selected), never a lens/context
+    /// enum: `update()` is the only place with enough state to resolve it,
+    /// and `main.rs` should not need to reach back into `App` beyond taking
+    /// this one field.
+    pub clipboard_request: Option<String>,
     pub should_quit: bool,
 }
 
@@ -739,6 +755,7 @@ impl App {
             esc_quit_armed_until: None,
             help_open: false,
             launch_psql_requested: false,
+            clipboard_request: None,
             should_quit: false,
         };
         resort(&mut app);
@@ -799,6 +816,61 @@ impl App {
     }
 }
 
+/// v0.16 (`y`): resolves the text `y` should copy for whatever the active
+/// lens currently has selected — `None` when there is nothing to copy (no
+/// row selected, or the lens has no clipboard-worthy content at all, e.g.
+/// the Replication Lens). Per the feature spec:
+/// - Micro Lens (Activity view): the selected row's FULL query text (not
+///   the truncated table cell — the same text the `Enter` detail panel
+///   shows);
+/// - Query Lens: the selected statement's full normalized text;
+/// - Index Lens: the selected index's verbatim `CREATE INDEX` definition;
+/// - Schema Lens (Tables view): the selected table's qualified name
+///   (`schema.table`) — or, when the on-demand structure detail overlay is
+///   open AND has resolved for THIS table, its column list instead (a more
+///   useful paste target once the operator is already looking at columns).
+pub fn clipboard_text(app: &App) -> Option<String> {
+    match app.active_tab {
+        Tab::MicroLens if app.micro_view == MicroView::Activity => {
+            app.selected_row().map(|row| row.query.clone())
+        }
+        Tab::QueryLens => app.selected_statement().map(|row| row.query.clone()),
+        Tab::IndexLens => app.selected_index().map(|idx| idx.indexdef.clone()),
+        Tab::SchemaLens if app.schema_view == SchemaView::Tables => {
+            let table = app.selected_table()?;
+            if app.detail_open
+                && let Some(detail) = app.snapshot.table_detail.as_deref()
+                && detail.oid == table.oid
+                && detail.error.is_none()
+                && !detail.columns.is_empty()
+            {
+                return Some(schema_column_list(detail));
+            }
+            Some(format!("{}.{}", table.schema, table.name))
+        }
+        _ => None,
+    }
+}
+
+/// `name type [NOT NULL]`, one column per line — the copy payload for a
+/// Schema Lens table whose structure detail is open. Deliberately terse
+/// (no constraints/indexes/identity notes): the obvious, pasteable "what are
+/// this table's columns" answer, not a reconstruction of the full `\d`.
+fn schema_column_list(detail: &pg_lens_core::TableDetail) -> String {
+    detail
+        .columns
+        .iter()
+        .map(|c| {
+            if c.not_null {
+                format!("{} {} NOT NULL", c.name, c.data_type)
+            } else {
+                format!("{} {}", c.name, c.data_type)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The single mutation point of the Model.
 pub fn update(app: &mut App, action: Action) {
     match action {
@@ -821,6 +893,13 @@ pub fn update(app: &mut App, action: Action) {
             app.admin_feedback = Some(AdminFeedback {
                 text,
                 error,
+                expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+            });
+        }
+        Action::ClipboardCopied { text } => {
+            app.admin_feedback = Some(AdminFeedback {
+                text,
+                error: false,
                 expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
             });
         }
@@ -1219,6 +1298,26 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.micro_view = app.micro_view.next();
             app.detail_open = false;
             app.waits_open = false;
+        }
+        // `y` (v0.16, vim yank): copies whatever the active lens has
+        // selected to the clipboard via OSC 52 — see [`clipboard_text`] for
+        // exactly what that is per lens. Free at this top level: `y` only
+        // ever means "confirm" INSIDE the admin modal (`handle_confirm_key`,
+        // reached via its own early return above `handle_key`'s big match),
+        // so the two never collide. `update()` only QUEUES the request
+        // (pure state, per `CLAUDE.md`'s no-`.await`-in-ui'/no-I/O-outside-
+        // main.rs discipline) — `main.rs` performs the actual terminal write
+        // and reports back via `Action::ClipboardCopied`.
+        KeyCode::Char('y') => {
+            if let Some(text) = clipboard_text(app) {
+                app.clipboard_request = Some(text);
+            } else {
+                app.admin_feedback = Some(AdminFeedback {
+                    text: "nothing to copy here".to_string(),
+                    error: false,
+                    expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+                });
+            }
         }
         // `d` opens the database picker (U2) from ANY lens — reconnecting is
         // a cluster-wide, not a per-lens, action.
@@ -4502,5 +4601,107 @@ mod tests {
         // Selection still valid.
         let selected = app.table_state.selected().expect("non-empty table");
         assert!(selected < fresh.activity.len());
+    }
+
+    // --- v0.16: `y` copy-to-clipboard --------------------------------------
+
+    #[test]
+    fn y_queues_the_selected_micro_lens_row_query_and_is_free_at_top_level() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        let expected = app.selected_row().expect("mock has rows").query.clone();
+        update(&mut app, press(KeyCode::Char('y')));
+        assert_eq!(app.clipboard_request, Some(expected));
+        // `y` only queues — it never quits, never opens/closes anything.
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn y_queues_the_full_query_lens_statement_text() {
+        let mut app = App::new();
+        app.active_tab = Tab::QueryLens;
+        let expected = app.selected_statement().expect("mock has statements").query.clone();
+        update(&mut app, press(KeyCode::Char('y')));
+        assert_eq!(app.clipboard_request, Some(expected));
+    }
+
+    #[test]
+    fn y_queues_the_index_definition_on_the_index_lens() {
+        let mut app = App::new();
+        app.active_tab = Tab::IndexLens;
+        let expected = app.selected_index().expect("mock has indexes").indexdef.clone();
+        update(&mut app, press(KeyCode::Char('y')));
+        assert_eq!(app.clipboard_request, Some(expected));
+    }
+
+    #[test]
+    fn y_queues_the_qualified_table_name_on_the_schema_lens() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        let table = app.selected_table().expect("mock has tables");
+        let expected = format!("{}.{}", table.schema, table.name);
+        update(&mut app, press(KeyCode::Char('y')));
+        assert_eq!(app.clipboard_request, Some(expected));
+    }
+
+    /// With the Schema Lens structure detail open on the selected table, `y`
+    /// copies the column list instead of the bare qualified name.
+    #[test]
+    fn y_queues_the_column_list_when_the_schema_structure_detail_is_open() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        // Select the table `TableDetail::mock()` describes (order_items) so
+        // the oid actually matches.
+        let idx = app
+            .schema_row_order
+            .iter()
+            .position(|&i| app.snapshot.schema.as_ref().unwrap().tables[i].name == "order_items")
+            .expect("mock has order_items");
+        app.schema_table_state.select(Some(idx));
+        app.detail_open = true;
+        update(&mut app, press(KeyCode::Char('y')));
+        let text = app.clipboard_request.expect("queued");
+        assert!(text.contains("id bigint NOT NULL"), "{text}");
+        assert!(text.lines().count() > 1, "one line per column: {text}");
+    }
+
+    #[test]
+    fn y_shows_a_calm_toast_when_there_is_nothing_to_copy() {
+        let mut app = App::new();
+        app.active_tab = Tab::ReplicationLens; // no clipboard content defined
+        update(&mut app, press(KeyCode::Char('y')));
+        assert!(app.clipboard_request.is_none());
+        let feedback = app.admin_feedback.as_ref().expect("toast shown");
+        assert!(feedback.text.contains("nothing to copy"), "{}", feedback.text);
+        assert!(!feedback.error);
+    }
+
+    /// `y` inside the admin confirm modal still means "confirm", never
+    /// "copy" — the modal's own keymap intercepts it before `handle_key`'s
+    /// top-level match is ever reached.
+    #[test]
+    fn y_inside_the_confirm_modal_still_confirms_not_copies() {
+        let mut app = App::new();
+        app.active_tab = Tab::MicroLens;
+        update(&mut app, press(KeyCode::Char('c')));
+        assert!(app.confirm.is_some(), "modal open");
+        update(&mut app, press(KeyCode::Char('y')));
+        assert!(app.confirm.is_none(), "confirmed and closed");
+        assert!(!app.pending_admin.is_empty(), "the cancel command was queued");
+        assert!(app.clipboard_request.is_none(), "not a copy request");
+    }
+
+    #[test]
+    fn clipboard_copied_action_sets_admin_feedback() {
+        let mut app = App::new();
+        update(
+            &mut app,
+            Action::ClipboardCopied {
+                text: "sent to clipboard (OSC 52) \u{2014} copied 8 chars".to_string(),
+            },
+        );
+        let feedback = app.admin_feedback.as_ref().expect("feedback set");
+        assert!(feedback.text.contains("copied 8 chars"));
+        assert!(!feedback.error);
     }
 }

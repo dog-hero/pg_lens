@@ -20,6 +20,7 @@
 import type { StatementRow, StatementsSnapshot } from "./types";
 import { humanBytes, humanCount, humanDuration, humanMs } from "./format.ts";
 import { renderSqlInto } from "./sql.ts";
+import { renderCopyButton } from "./clipboard.ts";
 
 const NO_HIT_RATIO = "—";
 const NO_DATA = "—";
@@ -119,6 +120,9 @@ export class StatementsLens {
   private readonly warning: HTMLElement;
   private readonly placeholder: HTMLElement;
   private readonly unavailable: HTMLElement;
+  /** Invoked after a copy-button click resolves — lets the caller show a
+   * toast (see `table.ts`'s identical `onCopy` field). */
+  private readonly onCopy: ((ok: boolean, chars: number) => void) | null;
 
   // Plain assignment, not TS constructor-parameter-property shorthand — see
   // `schema.ts`'s identical constructor doc comment for why.
@@ -129,11 +133,13 @@ export class StatementsLens {
     placeholder: HTMLElement,
     unavailable: HTMLElement,
     filterInput?: HTMLInputElement | null,
+    onCopy?: (ok: boolean, chars: number) => void,
   ) {
     this.staleness = staleness;
     this.warning = warning;
     this.placeholder = placeholder;
     this.unavailable = unavailable;
+    this.onCopy = onCopy ?? null;
     this.thead = table.tHead ?? table.createTHead();
     this.tbody = table.tBodies[0] ?? table.createTBody();
     this.renderHead();
@@ -292,9 +298,12 @@ export class StatementsLens {
     const tr = document.createElement("tr");
     tr.classList.add("statement-row");
 
+    // v0.16 (Part B): plain text in the table row — the row stays a scan
+    // surface; SQL keyword highlighting only shows in the expanded detail
+    // row below (see `detailRow`).
     const queryTd = document.createElement("td");
     queryTd.classList.add("query");
-    renderSqlInto(queryTd, row.query);
+    queryTd.textContent = row.query;
     queryTd.title = row.query;
     tr.append(queryTd);
 
@@ -360,6 +369,14 @@ export class StatementsLens {
     const query = document.createElement("pre");
     renderSqlInto(query, row.query);
     td.append(meta, io, query);
+    if (this.onCopy !== null) {
+      td.append(
+        renderCopyButton(
+          () => row.query,
+          (ok, chars) => this.onCopy?.(ok, chars),
+        ),
+      );
+    }
     tr.append(td);
     return tr;
   }

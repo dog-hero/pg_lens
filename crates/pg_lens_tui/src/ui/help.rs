@@ -51,6 +51,7 @@ const ROWS: &[Row] = &[
     Row::Bind("x", "jump to Query Lens filtered on this table (Schema Tables)"),
     Row::Bind("d", "database picker (any lens)"),
     Row::Bind("!", "open a psql shell on the same connection (any lens)"),
+    Row::Bind("y", "copy selection to clipboard, OSC 52 (Micro/Query/Index/Schema)"),
     Row::Bind("?", "this help"),
     Row::Section("Data & refresh"),
     Row::Bind("R", "force schema/query-stats refresh (any lens)"),

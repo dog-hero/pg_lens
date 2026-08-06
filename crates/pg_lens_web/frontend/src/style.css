@@ -754,7 +754,10 @@ table#activity {
   max-width: 480px;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--fg-dim);
+  /* v0.16 (Part B): no color override here on purpose — the query cell
+     inherits the ROW's severity/state color (see the `tr.row-*` rules
+     below), same as every other cell in the row; keyword highlighting
+     moved to the expanded detail row only. */
 }
 
 /* SQL syntax highlighting — same palette as the TUI's ui/sql.rs:
@@ -783,23 +786,68 @@ html[data-theme="light"] .sql-num {
   opacity: 0.7;
 }
 
-/* waiting (W): yellow tint; blocked (B): red tint — red wins, as in the TUI */
+/* v0.16 (Part A): pg_activity-style whole-row severity/state color, mirrors
+   the TUI's `row_severity_style`/`state_row_color` 1:1 — precedence order
+   is blocked > duration override > waiting > state (see
+   `table.ts::activityRowClass`). `color` cascades to every cell in the row
+   (including the query cell, which no longer overrides it — see
+   `td.query` above) EXCEPT cells with their own more specific rule (the
+   Xact column's `.xact-warn`/`.xact-bad`, which must keep signalling
+   idle-in-transaction risk independently of the row's own color). */
 #activity tr.waiting {
   background: var(--warn-bg);
+  color: var(--warn);
 }
 
 #activity tr.waiting td:first-child {
-  color: var(--warn);
   font-weight: 700;
 }
 
 #activity tr.blocked {
   background: var(--bad-bg);
+  color: var(--bad);
 }
 
 #activity tr.blocked td:first-child {
-  color: var(--bad);
   font-weight: 700;
+}
+
+/* Duration override (active sessions only): bad past 30s, warn past 10s —
+   mirrors `ROW_DURATION_BAD_SECS`/`ROW_DURATION_WARN_SECS`. Checked before
+   `waiting`/state in `activityRowClass`, so these classes never co-occur
+   with `.waiting`/a `.row-state-*` class on the same row. */
+#activity tr.row-duration-bad {
+  background: var(--bad-bg);
+  color: var(--bad);
+  font-weight: 600;
+}
+
+#activity tr.row-duration-warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-weight: 600;
+}
+
+/* Base per-state color (see `stateRowClass`): `active` reads calm ok-green,
+   `idle` dims out, `idle in transaction` is a standing risk even at
+   duration zero, `idle in transaction (aborted)` is worse still. Any state
+   pg_lens does not recognize gets no class at all (plain `--fg`, the
+   table's own default) rather than guessing. */
+#activity tr.row-state-active {
+  color: var(--ok);
+}
+
+#activity tr.row-state-idle {
+  color: var(--fg-dim);
+}
+
+#activity tr.row-state-idle-txn {
+  color: var(--warn);
+}
+
+#activity tr.row-state-idle-txn-aborted {
+  color: var(--bad);
+  font-weight: 600;
 }
 
 /* Xact column (v0.9): age of each session's open transaction, tinted by
@@ -851,19 +899,37 @@ html[data-theme="light"] .sql-num {
   color: var(--bad);
 }
 
-/* Blocking chain (v0.9): blocked rows are clickable — expands a sub-row
-   showing the wait-for chain up to the root blocker, mirrors the TUI's
-   detail panel. */
-#activity tr.blocking-chain-toggle {
+/* v0.16: every activity row is clickable — expands a detail row below it
+   (full highlighted query + copy button, plus the wait-for chain when
+   blocked), mirrors the TUI's `Enter` detail panel. Generalizes v0.9's
+   blocked-only chain toggle (`.blocking-chain-toggle`, renamed). */
+#activity tr.row-toggle {
   cursor: pointer;
 }
 
-#activity tr.blocking-chain-row {
-  background: var(--bad-bg);
+#activity tr.activity-detail td {
+  padding: 8px 10px 12px 28px;
+  background: var(--bg-raised);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
 }
 
-#activity tr.blocking-chain-row td {
+#activity tr.activity-detail pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg);
+}
+
+#activity tr.activity-detail .copy-btn {
+  margin-top: 8px;
+}
+
+.blocking-chain-row {
+  margin-top: 10px;
   padding: 6px 10px;
+  background: var(--bad-bg);
+  border-radius: 6px;
 }
 
 .blocking-chain-line {
@@ -1681,6 +1747,27 @@ td.actions {
 .action-btn.kill:hover {
   border-color: var(--bad);
   color: var(--bad);
+}
+
+/* v0.16 (Part C): copy-to-clipboard button on expanded query/statement/
+   index detail (Micro Lens, Query Lens, Schema Lens structure detail) —
+   same small, unobtrusive chrome as `.action-btn`, distinct accent color so
+   it doesn't read as a destructive action like Cancel/Kill. */
+.copy-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  border-radius: 5px;
+  padding: 2px 10px;
+  font: inherit;
+  font-family: var(--font-ui);
+  font-size: 0.8em;
+  cursor: pointer;
+}
+
+.copy-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 #token-input:focus {

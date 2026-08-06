@@ -607,6 +607,7 @@ they ever drift, trust the overlay.
 | `x` | Jump to the Query Lens filtered (substring match) to statements mentioning the selected table (Schema Lens Tables view only); `Backspace` returns, `\` clears the seeded filter |
 | `d` | Database picker (any lens) — reconnects the poller to the chosen database |
 | `!` | Open a `psql` shell on the same connection (any lens) — see [The `psql` shell](#the-psql-shell) |
+| `y` | Copy the current selection to the clipboard via OSC 52 — the Micro Lens's full selected query, the Query Lens's full statement, the Index Lens's `CREATE INDEX` definition, or the Schema Lens's selected table's qualified name (its column list instead, once the structure detail overlay is open); see [Copy to clipboard](#copy-to-clipboard) |
 | `?` | Keyboard help overlay — lists every binding |
 | `R` | Force schema/query-stats refresh (any lens) |
 | `s` | Cycle sort column (Micro Lens / Schema Lens tables / Query Lens; inert on Index, Replication, and the Vacuum sub-view) |
@@ -650,6 +651,31 @@ explicitly, so this is a nudge toward the read-only spirit, not a hard
 sandbox. In `--mock` there's no real connection to hand `psql`, so `!`
 shows a "not simulated" message instead of launching anything. Not
 available from the Web Lens — there's no local terminal to suspend into.
+
+### Copy to clipboard
+
+Press `y` (TUI, vim "yank") to copy the current selection's full text to the
+clipboard: the Micro Lens's selected session's full query, the Query Lens's
+selected statement's full normalized text, the Index Lens's selected index's
+verbatim `CREATE INDEX` definition, or the Schema Lens's selected table's
+qualified name (`schema.table`) — its column list instead once the `Enter`
+structure-detail overlay is open on that table. A calm "nothing to copy
+here" toast shows on any lens/state with no clipboard-worthy selection (e.g.
+the Replication Lens, or an empty table).
+
+The mechanism is the **OSC 52** terminal escape sequence, written directly to
+the terminal — no native clipboard crate, and (unlike one) it works over SSH,
+since the terminal emulator itself reacts to the sequence, not the remote
+shell. **Support varies by terminal**: it works in iTerm2, kitty, WezTerm,
+Ghostty, and inside tmux with `set -g set-clipboard on`; Apple Terminal does
+not implement it. Because pg_lens has no way to confirm the terminal actually
+acted on the sequence, the toast is deliberately honest about what happened
+— "sent to clipboard (OSC 52) — copied N chars", never a bare "copied!" — and
+the payload is capped at 100 KB (noted in the toast when a pathologically
+large query/definition gets truncated). Web Lens: use the copy button on the
+expanded query/statement detail (or an index definition in the Schema Lens
+structure detail) instead — the browser's own clipboard API there needs no
+such caveat.
 
 ### Read-only mode
 

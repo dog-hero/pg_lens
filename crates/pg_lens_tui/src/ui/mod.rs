@@ -462,6 +462,28 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(pk);
         spans.push(pd);
     }
+    // v0.16: `y` copies the active lens's selection to the clipboard (OSC
+    // 52) — only advertised on the lenses that actually have something to
+    // copy (mirrors `App::clipboard_text`'s own lens gate), lowest priority
+    // of all (it hides first on a tight bar, same "where width allows"
+    // discipline as `!` just above).
+    let clipboard_lens = matches!(app.active_tab, Tab::MicroLens | Tab::QueryLens | Tab::IndexLens)
+        || (app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables);
+    if clipboard_lens {
+        let [yk, yd] = style::hint("y", ": copy");
+        let fits = Line::from(spans.clone()).width()
+            + sep.width()
+            + yk.width()
+            + yd.width()
+            + sep.width()
+            + data_span.width()
+            <= area.width as usize;
+        if fits {
+            spans.push(sep.clone());
+            spans.push(yk);
+            spans.push(yd);
+        }
+    }
     spans.push(sep);
     spans.push(data_span);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -1633,8 +1655,9 @@ mod tests {
         // assertion below meaningful instead of silently checking clipped
         // content. v0.12 added two more rows (`/`'s updated description,
         // `\`'s new clear-filter row), so the terminal grew again. v0.15
-        // added the `x` cross-lens-jump row, one more.
-        let backend = TestBackend::new(120, 43);
+        // added the `x` cross-lens-jump row, one more. v0.16 added the `y`
+        // copy-to-clipboard row, one more still.
+        let backend = TestBackend::new(120, 44);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
         let screen: String = terminal
