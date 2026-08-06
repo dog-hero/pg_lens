@@ -312,9 +312,14 @@ pg_lens --mock            # no database needed</code></pre>
           <p class="lede">
             The README on GitHub is the full reference — flags, config file, services file,
             read-only mode, the <code>psql</code> shell, keyboard bindings and architecture. These
-            pages mirror the two documents people reach for most.
+            pages mirror the documents people reach for most.
           </p>
           <div class="grid">
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-replication"></use></svg> Connecting to PostgreSQL</h3>
+              <p>Every way to connect — DSN, libpq env vars, and the <strong>services file</strong>, whose <code>password_cmd</code> pulls the password from Vault, 1Password or the Keychain at connect time, so no secret is ever stored on disk.</p>
+              <p><a href="docs/connecting.html">Read the guide →</a></p>
+            </article>
             <article class="card">
               <h3><svg aria-hidden="true"><use href="#icon-schema"></use></svg> Least-privilege monitoring user</h3>
               <p>How to create a dedicated PostgreSQL role for pg_lens, what each grant buys you, and what degrades without it.</p>

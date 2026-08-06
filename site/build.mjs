@@ -30,6 +30,11 @@ const REPO_BLOB = `${REPO_URL}/blob/main`;
 /** Markdown docs to render. `src` is repo-relative. */
 const DOCS = [
   {
+    src: "docs/connecting.md",
+    slug: "connecting",
+    title: "Connecting pg_lens to PostgreSQL",
+  },
+  {
     src: "docs/connection-user.md",
     slug: "connection-user",
     title: "The pg_lens monitoring role",
@@ -114,12 +119,40 @@ ${body}
 `;
 }
 
-/** Point the docs' repo-relative markdown links at GitHub — nothing outside
- * the two rendered documents exists in `_site/`. */
+/** Point the docs' repo-relative markdown links at the right place: a link
+ * from one rendered document to another becomes a sibling `.html` page,
+ * everything else (the README) goes to GitHub — it does not exist in
+ * `_site/`. */
+/** `marked` does not emit heading ids, so in-page anchors (`#some-heading`)
+ * would dead-link. Inject GitHub-style slugs: lowercase, drop anything that
+ * is not alphanumeric/space/hyphen, spaces to hyphens (consecutive spaces
+ * survive as consecutive hyphens, which is what GitHub does with an em dash
+ * — and what the docs' own cross-links assume). */
+function addHeadingIds(html) {
+  return html.replace(
+    /<(h[23])>([\s\S]*?)<\/\1>/g,
+    (whole, tag, inner) => {
+      const slug = inner
+        .replace(/<[^>]+>/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9 -]/g, "")
+        .trim()
+        .replace(/ /g, "-");
+      return slug ? `<${tag} id="${slug}">${inner}</${tag}>` : whole;
+    },
+  );
+}
+
 function rewriteLinks(md) {
-  return md
+  let text = md
     .replace(/\]\(\.\.\/README\.md/g, `](${REPO_BLOB}/README.md`)
     .replace(/\]\(README\.md/g, `](${REPO_BLOB}/README.md`);
+  for (const doc of DOCS) {
+    if (!doc.src.startsWith("docs/")) continue;
+    // `](connecting.md#anchor)` -> `](connecting.html#anchor)`
+    text = text.replaceAll(`](${doc.src.slice("docs/".length)}`, `](${doc.slug}.html`);
+  }
+  return text;
 }
 
 async function main() {
@@ -140,7 +173,7 @@ async function main() {
   // Rendered markdown.
   for (const doc of DOCS) {
     const md = rewriteLinks(await readFile(join(repo, doc.src), "utf8"));
-    const body = marked.parse(md, { async: false, gfm: true });
+    const body = addHeadingIds(marked.parse(md, { async: false, gfm: true }));
     await writeFile(
       join(out, "docs", `${doc.slug}.html`),
       page({ title: doc.title, body, depth: 1 }),

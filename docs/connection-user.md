@@ -20,15 +20,20 @@ the *least* privilege that still lights up the panels you care about.
 > providers expose it: RDS/Aurora `GRANT pg_monitor TO ...`, Cloud SQL and
 > Azure grant it to your admin role so you can pass it on.
 
-Then connect with it — see [Connecting](../README.md#connecting):
+Then connect with it — every connection method is covered in
+**[Connecting pg_lens to PostgreSQL](connecting.md)**:
 
 ```sh
 PGPASSWORD='change-me' pg_lens --dsn "host=db.internal user=pg_lens_ro dbname=appdb"
 ```
 
-Store the password out of the file with a `password_cmd` in the
-[services file](../README.md#services-file) — pg_lens never needs the secret
-written in plaintext.
+For anything you run more than once, prefer the
+**[services file](connecting.md#3-the-services-file-recommended)** and keep the
+password out of it entirely with
+[`password_cmd`](connecting.md#password-resolution--never-store-a-secret) — an
+external command (Vault, 1Password, the macOS Keychain, `pass`, …) whose output
+becomes the password, re-run on every reconnect so short-lived tokens keep
+working. pg_lens never needs a secret written in plaintext.
 
 ---
 
