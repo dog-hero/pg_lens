@@ -35,7 +35,7 @@ use crate::models::{
     DbSnapshot, IdleSessionRow, IndexRow, IoStatRow, LockCapacity, PollerStatus, PreparedXactRow,
     ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow,
     StatementsSnapshot, StatementsStatus, TableDetail, TableDetailRequest, VacuumClusterAge,
-    VacuumProgressRow, VacuumTableRow,
+    VacuumProgressRow, VacuumTableRow, WalStats,
 };
 use crate::schema_growth::{GROWTH_LOOKBACK_MS, SchemaGrowthTracker};
 use crate::services::{self, PasswordSource};
@@ -1086,6 +1086,77 @@ struct DeltaState {
     blks_read: i64,
     cache_hit_ratio: f64,
     checkpointer: CheckpointerDeltaState,
+    /// v0.16's WAL generation rate delta window — `None` until the first
+    /// successful `wal_stats` collection of a session (the query is
+    /// best-effort, unlike `checkpointer`'s essential one, so this cannot
+    /// live as a plain non-`Option` field the way `CheckpointerDeltaState`
+    /// does). Carried forward unchanged across a tick whose collection
+    /// failed, so a transient failure never resets the delta window.
+    wal: Option<WalDeltaState>,
+}
+
+/// v0.16's previous-tick `pg_stat_wal` counters, the basis for
+/// [`WalStats`]'s derived rates — mirrors [`CheckpointerDeltaState`] minus
+/// the session-window ratio (WAL generation is a genuine per-tick rate, not
+/// a rare-event ratio like checkpoints).
+#[derive(Clone, Copy)]
+struct WalDeltaState {
+    at: Instant,
+    wal_records: i64,
+    wal_bytes: i64,
+    wal_buffers_full: i64,
+}
+
+/// Derives [`WalStats`] from one collection's raw counters, against the
+/// previous collection's (`prev`) — pure and DB-free (unit-tested directly),
+/// mirroring [`derive_checkpointer_stats`]'s raw-then-derive split minus the
+/// session-window ratio. `prev` is `None` on the first collection of a
+/// session (or after a gap where every collection failed): every rate is
+/// `None`. A counter going backwards (a `pg_stat_reset_shared('wal')` or
+/// server restart) is treated the same way — the whole delta window resets
+/// rather than reporting a negative rate.
+fn derive_wal_stats(
+    raw: &db::WalStatsRawRow,
+    now: Instant,
+    prev: Option<&WalDeltaState>,
+) -> (WalStats, WalDeltaState) {
+    let stats_reset = prev.is_some_and(|p| {
+        raw.wal_records < p.wal_records
+            || raw.wal_bytes < p.wal_bytes
+            || raw.wal_buffers_full < p.wal_buffers_full
+    });
+    let usable_prev = prev.filter(|_| !stats_reset);
+
+    let mut stats = WalStats {
+        wal_records: raw.wal_records,
+        wal_fpi: raw.wal_fpi,
+        wal_bytes: raw.wal_bytes,
+        wal_buffers_full: raw.wal_buffers_full,
+        wal_write_time_ms: raw.track_wal_io_timing_on.then_some(raw.wal_write_time_ms),
+        wal_sync_time_ms: raw.track_wal_io_timing_on.then_some(raw.wal_sync_time_ms),
+        wal_bytes_per_sec: None,
+        wal_records_per_sec: None,
+        wal_buffers_full_delta: None,
+    };
+
+    if let Some(p) = usable_prev {
+        let dt = now.duration_since(p.at).as_secs_f64();
+        if dt > 0.0 {
+            let d_bytes = raw.wal_bytes - p.wal_bytes;
+            let d_records = raw.wal_records - p.wal_records;
+            stats.wal_bytes_per_sec = Some(d_bytes as f64 / dt);
+            stats.wal_records_per_sec = Some(d_records as f64 / dt);
+        }
+        stats.wal_buffers_full_delta = Some(raw.wal_buffers_full - p.wal_buffers_full);
+    }
+
+    let next = WalDeltaState {
+        at: now,
+        wal_records: raw.wal_records,
+        wal_bytes: raw.wal_bytes,
+        wal_buffers_full: raw.wal_buffers_full,
+    };
+    (stats, next)
 }
 
 /// F4's previous-tick checkpointer/bgwriter counters, plus the
@@ -1303,6 +1374,15 @@ async fn poll_once(
     // function has no access to that cached collection.
     let relation_locks = collect_relation_locks(client, q).await;
 
+    // WAL generation rate (v0.16) is likewise best-effort — absent on PG <
+    // 14 (`q.wal_stats` is `None` there, so the query is never issued) or on
+    // any query/parse failure on 14+, never a poll fault. The rate
+    // derivation happens below, once `now`/`deltas` are in scope.
+    let wal_raw = match q.wal_stats {
+        Some(sql) => collect_wal_stats(client, sql).await,
+        None => None,
+    };
+
     let now = Instant::now();
     let xact_total = info.xact_commit + info.xact_rollback;
     let cumulative_ratio = hit_ratio(info.blks_hit, info.blks_read);
@@ -1340,6 +1420,20 @@ async fn poll_once(
         deltas.as_ref().map(|d| &d.checkpointer),
     );
 
+    // v0.16's WAL generation rate: `None` (no panel) when this tick's
+    // collection failed or the server is < 14, otherwise derived against the
+    // session's delta window — carried forward unchanged (not reset to
+    // `None`) across a tick whose collection failed, so a transient failure
+    // never loses the window.
+    let prev_wal = deltas.as_ref().and_then(|d| d.wal);
+    let (wal, next_wal_delta) = match &wal_raw {
+        Some(raw) => {
+            let (stats, next) = derive_wal_stats(raw, now, prev_wal.as_ref());
+            (Some(stats), Some(next))
+        }
+        None => (None, prev_wal),
+    };
+
     *deltas = Some(DeltaState {
         at: now,
         xact_total,
@@ -1347,6 +1441,7 @@ async fn poll_once(
         blks_read: info.blks_read,
         cache_hit_ratio,
         checkpointer: checkpointer_delta,
+        wal: next_wal_delta,
     });
 
     // One incremental push per poll — the ring is never rebuilt.
@@ -1399,6 +1494,7 @@ async fn poll_once(
             prepared_xacts,
             lock_capacity,
             idle_sessions,
+            wal,
             status: PollerStatus::Ok,
         },
         relation_locks,
@@ -1767,6 +1863,22 @@ async fn collect_databases(client: &mut Client, q: &queries::QuerySet) -> Option
     }
     tx.commit().await.ok()?;
     Some(out)
+}
+
+/// Best-effort WAL generation collection (v0.16, `pg_stat_wal`), refreshed
+/// every fast tick. Returns `None` on ANY query or parse failure — a
+/// restricted role, PG < 14 (the caller only invokes this when `q.wal_stats`
+/// is `Some`), or a server that hides the view degrades to "no WAL panel
+/// this tick", same contract as [`collect_databases`]. Returns the still-raw
+/// cumulative row; the caller (`poll_once`) derives the per-tick rates
+/// against the session's delta window, since only it owns that state.
+async fn collect_wal_stats(client: &mut Client, sql: &str) -> Option<db::WalStatsRawRow> {
+    let tx = begin_read(client).await.ok()?;
+    let row = tx.query_opt(sql, &[]).await.ok()??;
+    let raw = db::wal_stats_from_row(&row).ok()?;
+    // Best-effort: a failed commit just means no panel this tick.
+    tx.commit().await.ok()?;
+    Some(raw)
 }
 
 /// Best-effort orphaned-2PC watch (v0.9, `queries/prepared_xacts.sql`),
@@ -3142,6 +3254,119 @@ mod tests {
             "backend_type", "context", "reads", "writes", "writebacks", "extends", "hits",
             "evictions", "reuses", "fsyncs", "read_time_ms", "write_time_ms",
             "track_io_timing_on",
+        ] {
+            assert!(sql.contains(&format!("AS {col}")), "missing column alias: {col}");
+        }
+    }
+
+    // --- v0.16: WAL generation rate delta derivation ------------------------
+
+    fn wal_raw(
+        records: i64,
+        bytes: i64,
+        buffers_full: i64,
+        write_ms: f64,
+        sync_ms: f64,
+        track_wal_io_timing_on: bool,
+    ) -> db::WalStatsRawRow {
+        db::WalStatsRawRow {
+            wal_records: records,
+            wal_fpi: 0,
+            wal_bytes: bytes,
+            wal_buffers_full: buffers_full,
+            wal_write_time_ms: write_ms,
+            wal_sync_time_ms: sync_ms,
+            track_wal_io_timing_on,
+        }
+    }
+
+    #[test]
+    fn wal_stats_query_is_absent_below_pg14_and_present_on_14_plus() {
+        let q13 = queries::for_version(130_011).expect("supported");
+        assert!(q13.wal_stats.is_none(), "pg_stat_wal does not exist below PG 14");
+        for version in [140_000, 150_007, 160_003, 170_000] {
+            let q = queries::for_version(version).expect("supported");
+            let sql = q.wal_stats.expect("pg_stat_wal must be selected on PG 14+");
+            assert!(sql.contains("pg_stat_wal"));
+            assert!(sql.contains("track_wal_io_timing_on"));
+            assert!(sql.contains("wal_bytes::int8"), "numeric wal_bytes must be cast to int8");
+        }
+    }
+
+    #[test]
+    fn wal_stats_first_poll_has_no_rates_but_carries_cumulative_counters() {
+        let raw = wal_raw(1_000_000, 500_000_000, 0, 4_000.0, 300.0, true);
+        let (stats, _delta) = derive_wal_stats(&raw, Instant::now(), None);
+        assert_eq!(stats.wal_records, 1_000_000);
+        assert_eq!(stats.wal_bytes, 500_000_000);
+        assert_eq!(stats.wal_write_time_ms, Some(4_000.0));
+        assert_eq!(stats.wal_sync_time_ms, Some(300.0));
+        assert!(stats.wal_bytes_per_sec.is_none());
+        assert!(stats.wal_records_per_sec.is_none());
+        assert!(stats.wal_buffers_full_delta.is_none());
+    }
+
+    #[test]
+    fn wal_stats_second_tick_derives_bytes_and_records_per_sec() {
+        let raw0 = wal_raw(1_000_000, 500_000_000, 0, 4_000.0, 300.0, true);
+        let t0 = Instant::now();
+        let (_stats0, delta0) = derive_wal_stats(&raw0, t0, None);
+
+        // 10s later: +50,000 records, +20,000,000 bytes.
+        let raw1 = wal_raw(1_050_000, 520_000_000, 0, 4_100.0, 305.0, true);
+        let t1 = t0 + Duration::from_secs(10);
+        let (stats1, _delta1) = derive_wal_stats(&raw1, t1, Some(&delta0));
+
+        assert!((stats1.wal_bytes_per_sec.unwrap() - 2_000_000.0).abs() < 1e-6);
+        assert!((stats1.wal_records_per_sec.unwrap() - 5_000.0).abs() < 1e-6);
+        assert_eq!(stats1.wal_buffers_full_delta, Some(0));
+    }
+
+    #[test]
+    fn wal_stats_buffers_full_delta_flags_active_climbing() {
+        let raw0 = wal_raw(1_000_000, 500_000_000, 12, 4_000.0, 300.0, true);
+        let t0 = Instant::now();
+        let (_stats0, delta0) = derive_wal_stats(&raw0, t0, None);
+
+        // wal_buffers is undersized: 3 more buffer-full events this tick.
+        let raw1 = wal_raw(1_010_000, 505_000_000, 15, 4_050.0, 302.0, true);
+        let t1 = t0 + Duration::from_secs(10);
+        let (stats1, _delta1) = derive_wal_stats(&raw1, t1, Some(&delta0));
+
+        assert_eq!(stats1.wal_buffers_full, 15);
+        assert_eq!(stats1.wal_buffers_full_delta, Some(3));
+    }
+
+    #[test]
+    fn wal_stats_track_wal_io_timing_off_nulls_the_timing_never_a_misleading_zero() {
+        let raw = wal_raw(1_000_000, 500_000_000, 0, 0.0, 0.0, false);
+        let (stats, _delta) = derive_wal_stats(&raw, Instant::now(), None);
+        assert!(stats.wal_write_time_ms.is_none());
+        assert!(stats.wal_sync_time_ms.is_none());
+    }
+
+    #[test]
+    fn wal_stats_reset_shows_no_negative_rate() {
+        let raw0 = wal_raw(5_000_000, 2_000_000_000, 40, 90_000.0, 6_000.0, true);
+        let t0 = Instant::now();
+        let (_stats0, delta0) = derive_wal_stats(&raw0, t0, None);
+
+        // pg_stat_reset_shared('wal') happened in between: counters restart
+        // from a lower value than the previous collection saw.
+        let raw1 = wal_raw(500, 40_000, 0, 20.0, 4.0, true);
+        let t1 = t0 + Duration::from_secs(10);
+        let (stats1, _delta1) = derive_wal_stats(&raw1, t1, Some(&delta0));
+        assert!(stats1.wal_bytes_per_sec.is_none(), "a reset must never show a negative rate");
+        assert!(stats1.wal_records_per_sec.is_none());
+        assert!(stats1.wal_buffers_full_delta.is_none());
+    }
+
+    #[test]
+    fn wal_stat_from_row_parser_shape_matches_the_sql_column_names() {
+        let sql = queries::for_version(140_000).expect("PG14 supported").wal_stats.unwrap();
+        for col in [
+            "wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full", "wal_write_time_ms",
+            "wal_sync_time_ms", "track_wal_io_timing_on",
         ] {
             assert!(sql.contains(&format!("AS {col}")), "missing column alias: {col}");
         }

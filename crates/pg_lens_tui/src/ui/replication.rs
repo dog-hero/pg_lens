@@ -7,7 +7,7 @@
 //! ratatui) so it can double as the Replication Lens's sort key — this
 //! module only adds the marker/color mapping on top.
 
-use pg_lens_core::{ReplicationSlotRow, WalReceiverRow, WalSenderRow};
+use pg_lens_core::{ReplicationSlotRow, WalReceiverRow, WalSenderRow, WalStats};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -151,6 +151,46 @@ pub(crate) fn slot_line(slot: &ReplicationSlotRow) -> Line<'static> {
     ])
 }
 
+/// v0.16's WAL generation-rate severity: yellow only when `wal_buffers_full`
+/// is ACTIVELY CLIMBING this tick (a real `wal_buffers` sizing signal, not
+/// just a nonzero cumulative count from history) — never escalates to red,
+/// a tuning nudge rather than an incident, mirroring the Macro Lens's
+/// checkpoint-pressure rule (`checkpoint_pressure_severity`).
+pub(crate) fn wal_buffers_full_severity(wal: &WalStats) -> Severity {
+    match wal.wal_buffers_full_delta {
+        Some(d) if d > 0 => Severity::Warn,
+        _ => Severity::Ok,
+    }
+}
+
+/// One-line WAL generation summary: bytes/s, records/s, and the
+/// `wal_buffers_full` pressure signal — dashes for the rates before the
+/// first delta window this session (never a misleading `0/s`). Shared by
+/// the Macro Lens's compact vitals and the full Replication Lens, so both
+/// views agree on the exact same numbers and severity.
+pub(crate) fn wal_generation_line(wal: &WalStats) -> Line<'static> {
+    let sev = wal_buffers_full_severity(wal);
+    let bytes_rate = wal
+        .wal_bytes_per_sec
+        .map(|v| format!("{}/s", format::human_bytes(v.max(0.0) as i64)))
+        .unwrap_or_else(|| "--".to_string());
+    let records_rate = wal
+        .wal_records_per_sec
+        .map(|v| format!("{v:.0} rec/s"))
+        .unwrap_or_else(|| "-- rec/s".to_string());
+    let buffers_full = match wal.wal_buffers_full_delta {
+        Some(d) if d > 0 => format!("{} (+{d} this tick)", wal.wal_buffers_full),
+        _ => wal.wal_buffers_full.to_string(),
+    };
+    Line::from(vec![
+        Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
+        Span::styled("WAL generation: ", style::label_style()),
+        Span::styled(format!("{bytes_rate} \u{b7} {records_rate}  "), style::value_style()),
+        Span::styled("buffers_full: ", style::label_style()),
+        Span::styled(buffers_full, Style::new().fg(sev.color())),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +290,60 @@ mod tests {
             slot_severity(&slot(true, Some("unreserved"), Some(0))),
             Severity::Bad
         ));
+    }
+
+    fn wal(bytes_per_sec: Option<f64>, buffers_full: i64, delta: Option<i64>) -> WalStats {
+        WalStats {
+            wal_records: 1_000_000,
+            wal_fpi: 10_000,
+            wal_bytes: 500_000_000,
+            wal_buffers_full: buffers_full,
+            wal_write_time_ms: Some(1_000.0),
+            wal_sync_time_ms: Some(100.0),
+            wal_bytes_per_sec: bytes_per_sec,
+            wal_records_per_sec: bytes_per_sec.map(|_| 400.0),
+            wal_buffers_full_delta: delta,
+        }
+    }
+
+    #[test]
+    fn wal_generation_is_calm_when_buffers_full_is_not_climbing() {
+        assert!(matches!(
+            wal_buffers_full_severity(&wal(Some(2_000_000.0), 0, Some(0))),
+            Severity::Ok
+        ));
+        // Nonzero from history, but not climbing THIS tick — still calm.
+        assert!(matches!(
+            wal_buffers_full_severity(&wal(Some(2_000_000.0), 40, Some(0))),
+            Severity::Ok
+        ));
+        // No delta window yet (first poll) — calm, not a fault.
+        assert!(matches!(
+            wal_buffers_full_severity(&wal(None, 0, None)),
+            Severity::Ok
+        ));
+    }
+
+    #[test]
+    fn wal_generation_warns_when_buffers_full_is_actively_climbing() {
+        assert!(matches!(
+            wal_buffers_full_severity(&wal(Some(2_000_000.0), 15, Some(3))),
+            Severity::Warn
+        ));
+    }
+
+    #[test]
+    fn wal_generation_line_dashes_rates_before_the_first_delta_window() {
+        let line = wal_generation_line(&wal(None, 0, None));
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("--"), "{text}");
+        assert!(text.contains("buffers_full: 0"), "{text}");
+    }
+
+    #[test]
+    fn wal_generation_line_shows_the_climbing_delta() {
+        let line = wal_generation_line(&wal(Some(2_000_000.0), 15, Some(3)));
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("buffers_full: 15 (+3 this tick)"), "{text}");
     }
 }

@@ -34,6 +34,11 @@ web = ["dep:pg_lens_web"]
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive", "env"] }
+# `completions` subcommand (v0.16): generates shell completion scripts from
+# the SAME `Cli` clap already builds — build/CLI-only, no runtime cost, and
+# it is the standard way clap-based CLIs (rustup, starship, uv) ship this,
+# so it is worth the one small new dependency.
+clap_complete = "4.6.1"
 color-eyre = "0.6.5"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 futures = "0.3.32"

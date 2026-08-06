@@ -20,7 +20,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::ui::format;
-use crate::ui::replication::{receiver_line, sender_line, slot_severity};
+use crate::ui::replication::{receiver_line, sender_line, slot_severity, wal_generation_line};
 
 /// Fixed widths of every column except the flexible Slot one, in order:
 /// severity, Type, Active, Retained, WAL Status, Safe Size.
@@ -51,13 +51,25 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     // This view has room: no artificial cap on senders, but the role panel
     // still yields most of the screen to the slots table below it.
     let role_height = (lines.len() as u16 + 2).min(area.height.saturating_sub(6).max(3));
+    // v0.16: WAL generation is what replicas must keep up with, so it gets
+    // its own compact section here — a single bordered line, present only
+    // once the fast tick has collected `pg_stat_wal` at least once this
+    // session (absent, not an empty box, on PG < 14 or a restricted role).
+    let wal_height = u16::from(app.snapshot.wal.is_some()) * 3;
 
-    let [role_area, table_area, footer_area] = Layout::vertical([
+    let [wal_area, role_area, table_area, footer_area] = Layout::vertical([
+        Constraint::Length(wal_height),
         Constraint::Length(role_height),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
     .areas(area);
+
+    if let Some(wal) = app.snapshot.wal.as_ref() {
+        let panel =
+            Paragraph::new(wal_generation_line(wal)).block(Block::bordered().title("WAL Generation"));
+        frame.render_widget(panel, wal_area);
+    }
 
     let role_panel = Paragraph::new(lines).block(Block::bordered().title("Role"));
     frame.render_widget(role_panel, role_area);

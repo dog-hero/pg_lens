@@ -39,7 +39,7 @@ pub use models::{
     SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
     StatementsStatus, TableDetail, TableDetailColumn, TableDetailConstraint, TableDetailIndex,
     TableDetailRequest, TableStatRow, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
-    WalReceiverRow, WalSenderRow,
+    WalReceiverRow, WalSenderRow, WalStats,
 };
 pub use idle_sessions::{
     OldestIdleSession, Severity as IdleSessionSeverity, oldest_idle_session,

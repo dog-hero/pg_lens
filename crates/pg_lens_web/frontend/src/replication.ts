@@ -7,8 +7,10 @@ import type {
   ReplicationSlotRow,
   WalReceiverRow,
   WalSenderRow,
+  WalStats,
 } from "./types";
 import { humanBytes, humanDuration } from "./format.ts";
+import { walBuffersFullSeverity, walGenerationText } from "./wal.ts";
 
 type Severity = "" | "warn" | "bad";
 
@@ -120,6 +122,18 @@ function calmRow(text: string): HTMLDivElement {
   return div;
 }
 
+/** v0.16's WAL Generation row — same one-line summary as the TUI's
+ * dedicated Replication Lens panel, present only once `pg_stat_wal` has
+ * been collected at least once this session (absent, not an empty row, on
+ * PG < 14 or a restricted role). */
+function walRow(wal: WalStats): HTMLDivElement {
+  const sev = walBuffersFullSeverity(wal);
+  const div = document.createElement("div");
+  div.className = `repl-row repl-wal ${sev}`.trim();
+  div.textContent = walGenerationText(wal);
+  return div;
+}
+
 /** Worst-severity-first, then retained bytes descending — the web twin of
  * the TUI's `resort_replication` (see `crates/pg_lens_tui/src/app.rs`). */
 function sortedSlots(slots: ReplicationSlotRow[]): ReplicationSlotRow[] {
@@ -147,6 +161,7 @@ export function renderReplication(
   placeholder: HTMLElement,
   repl: ReplicationInfo | null,
   slots: ReplicationSlotRow[] | null,
+  wal: WalStats | null = null,
 ): void {
   if (repl === null && slots === null) {
     placeholder.hidden = false;
@@ -156,6 +171,9 @@ export function renderReplication(
   placeholder.hidden = true;
 
   const rows: HTMLElement[] = [];
+  if (wal !== null) {
+    rows.push(walRow(wal));
+  }
   if (repl && "Primary" in repl) {
     if (repl.Primary.senders.length === 0) {
       rows.push(calmRow("primary · no replicas connected"));

@@ -7,12 +7,14 @@ import type {
   ServerVitals,
   SnapshotHistory,
   VacuumClusterAge,
+  WalStats,
 } from "./types";
 import { humanBytes, humanCount, humanDuration, humanPercent } from "./format";
 import { ageSeverity } from "./vacuum";
 import { checkpointerCard } from "./checkpointer";
 import { ioStatLines } from "./io_stats";
 import { lockCapacitySeverity } from "./lock_capacity";
+import { walBuffersFullSeverity, walGenerationText } from "./wal";
 import { TREND_LOOKBACK_TICKS, cardTrend, sampleForTrend, trendGlyph, trendTitle, trendTone } from "./trend";
 
 interface Card {
@@ -51,11 +53,16 @@ function vacuumCard(age: VacuumClusterAge | null): Card | null {
 }
 
 /**
- * F4's checkpointer/bgwriter card. `null` (before the first poll of a
- * session) renders a calm collecting-state card instead of being omitted —
- * the card slot is always present so the layout doesn't jump.
+ * F4's checkpointer/bgwriter card, plus v0.16's WAL generation summary
+ * tacked onto the detail line (both are disk-write/buffer-pressure health,
+ * thematically adjacent — mirrors the TUI's Macro Lens placement of
+ * `wal_generation_line` inside the "Checkpoints / writer" panel). `cp ===
+ * null` (before the first poll of a session) renders a calm collecting-state
+ * card instead of being omitted — the card slot is always present so the
+ * layout doesn't jump. `wal === null` (PG < 14, a restricted role, or no
+ * successful collection yet) simply omits that part of the detail line.
  */
-function checkpointCard(cp: CheckpointerStats | null): Card {
+function checkpointCard(cp: CheckpointerStats | null, wal: WalStats | null): Card {
   if (cp === null) {
     return {
       label: "Checkpoints",
@@ -75,12 +82,17 @@ function checkpointCard(cp: CheckpointerStats | null): Card {
     cp.checkpoints_per_min_timed !== null && cp.checkpoints_per_min_req !== null
       ? `${(cp.checkpoints_per_min_timed + cp.checkpoints_per_min_req).toFixed(2)}/min`
       : "--/min";
+  const walDetail = wal !== null ? ` · ${walGenerationText(wal)}` : "";
+  const tone: Card["tone"] =
+    card.severity === "warn" || (wal !== null && walBuffersFullSeverity(wal) === "warn")
+      ? "warn"
+      : "";
   return {
     label: "Checkpoints",
     value: total,
-    detail: `${card.perMin} · ${card.pressure} · ${card.buffersPerSec} · avg ${card.avgWriteSync}`,
+    detail: `${card.perMin} · ${card.pressure} · ${card.buffersPerSec} · avg ${card.avgWriteSync}${walDetail}`,
     meter: null,
-    tone: card.severity,
+    tone,
   };
 }
 
@@ -138,6 +150,7 @@ function cards(
   lockCapacity: LockCapacity | null,
   history: SnapshotHistory,
   ioStats: IoStatRow[] | null,
+  wal: WalStats | null,
 ): Card[] {
   const saturation =
     v.max_connections > 0 ? v.connections_total / v.max_connections : 0;
@@ -214,7 +227,7 @@ function cards(
       meter: null,
       tone: "",
     },
-    checkpointCard(checkpointer),
+    checkpointCard(checkpointer, wal),
     ...(ioStatsCard(ioStats) ? [ioStatsCard(ioStats) as Card] : []),
   ];
 }
@@ -227,9 +240,10 @@ export function renderVitals(
   lockCapacity: LockCapacity | null = null,
   history: SnapshotHistory = { cap: 0, points: [] },
   ioStats: IoStatRow[] | null = null,
+  wal: WalStats | null = null,
 ): void {
   container.replaceChildren(
-    ...cards(v, vacuumAge, checkpointer, lockCapacity, history, ioStats).map((card) => {
+    ...cards(v, vacuumAge, checkpointer, lockCapacity, history, ioStats, wal).map((card) => {
       const el = document.createElement("div");
       const classes = ["card", card.tone, card.lead ? "lead" : ""].filter(Boolean);
       el.className = classes.join(" ");

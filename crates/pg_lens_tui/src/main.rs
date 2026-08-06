@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use pg_lens_core::DbSnapshot;
 use pg_lens_core::services::ServicesFile;
 use pg_lens_core::settings::{self, ConnSpec, Resolved, ServiceSummary};
@@ -67,6 +67,16 @@ enum Command {
     /// Serve the web UI and JSON/SSE API over HTTP (read-only).
     #[cfg(feature = "web")]
     Serve(ServeArgs),
+
+    /// Print a shell completion script to stdout, e.g.
+    /// `pg_lens completions zsh > "${fpath[1]}/_pg_lens"`. Never connects to
+    /// a database or starts the TUI — pure CLI-metadata generation from the
+    /// same `Cli` definition clap already parses, so it can never drift out
+    /// of sync with the real flag/subcommand surface.
+    Completions {
+        /// Target shell.
+        shell: clap_complete::Shell,
+    },
 }
 
 /// Connection flags shared by every subcommand. Every flag is `global`, so it
@@ -889,6 +899,15 @@ fn drain_admin(app: &mut App, admin_tx: &mpsc::Sender<AdminCommand>) {
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
+
+    // `completions` must work standalone (no terminal color_eyre setup, no
+    // connection-flag validation, no DB) — handled first and returns before
+    // any of that runs.
+    if let Some(Command::Completions { shell }) = cli.command {
+        clap_complete::generate(shell, &mut Cli::command(), "pg_lens", &mut std::io::stdout());
+        return Ok(());
+    }
+
     color_eyre::install()?;
 
     // Runtime backstop for the `--dsn`/`--service` conflict that clap's
@@ -904,6 +923,7 @@ async fn main() -> color_eyre::Result<()> {
         None | Some(Command::Tui) => run_tui(cli.conn).await,
         #[cfg(feature = "web")]
         Some(Command::Serve(args)) => run_serve(cli.conn, args).await,
+        Some(Command::Completions { .. }) => unreachable!("handled above"),
     }
 }
 
@@ -1566,6 +1586,38 @@ mod tests {
             .expect("parse serve --service");
         assert_eq!(after.conn.service.as_deref(), Some("demo"));
         assert!(matches!(after.command, Some(Command::Serve(_))));
+    }
+
+    /// v0.16's `completions` subcommand: parses for every shell clap_complete
+    /// supports, and actually generating a script for one produces real,
+    /// non-empty output — the regression guard against a silently broken
+    /// generator (e.g. an empty `Command` from a stale `Cli::command()`).
+    #[test]
+    fn completions_subcommand_parses_and_generates_non_empty_output() {
+        for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+            let cli = Cli::try_parse_from(["pg_lens", "completions", shell])
+                .unwrap_or_else(|e| panic!("parse completions {shell}: {e}"));
+            let Some(Command::Completions { shell }) = cli.command else {
+                panic!("expected Command::Completions for {shell}");
+            };
+            let mut buf = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "pg_lens", &mut buf);
+            assert!(!buf.is_empty(), "generated completion script must not be empty");
+        }
+    }
+
+    /// The existing subcommand/flag surface must still parse exactly as
+    /// before `completions` was added — no accidental interference from the
+    /// new `Subcommand` variant.
+    #[test]
+    fn completions_subcommand_does_not_disturb_the_existing_cli_surface() {
+        assert!(Cli::try_parse_from(["pg_lens"]).is_ok());
+        assert!(Cli::try_parse_from(["pg_lens", "--mock"]).is_ok());
+        assert!(Cli::try_parse_from(["pg_lens", "tui"]).is_ok());
+        assert!(Cli::try_parse_from(["pg_lens", "serve"]).is_ok());
+        // `completions` requires exactly one shell argument.
+        assert!(Cli::try_parse_from(["pg_lens", "completions"]).is_err());
+        assert!(Cli::try_parse_from(["pg_lens", "completions", "not-a-shell"]).is_err());
     }
 
     /// Bare `pg_lens --dsn ...` (no subcommand) still parses as the historical

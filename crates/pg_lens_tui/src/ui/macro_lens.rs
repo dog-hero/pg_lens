@@ -9,7 +9,7 @@
 use pg_lens_core::{
     CheckpointerStats, HistoryPoint, IoStatRow, LockCapacity, LockCapacitySeverity,
     ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, TREND_DEADBAND, TREND_LOOKBACK_TICKS,
-    Trend,
+    Trend, WalStats,
 };
 use ratatui::{
     Frame,
@@ -20,7 +20,9 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::ui::replication::{Severity as Lag, receiver_line, sender_line, slot_line, slot_severity};
+use crate::ui::replication::{
+    Severity as Lag, receiver_line, sender_line, slot_line, slot_severity, wal_generation_line,
+};
 use crate::ui::{format, style, vacuum};
 
 /// Bordered block with the panel title in the shared accent style.
@@ -217,10 +219,15 @@ fn backend_rate_text(cp: &CheckpointerStats) -> String {
     }
 }
 
-/// The Checkpoints/writer panel's lines (F4). Absent counters (first poll of
-/// a session) render as `--`, never a fault — mirrors the vitals panel's
-/// pre-first-snapshot treatment of TPS.
-fn checkpointer_lines(cp: Option<&CheckpointerStats>) -> Vec<Line<'static>> {
+/// The Checkpoints/writer panel's lines (F4), plus v0.16's WAL generation
+/// summary tacked on as one more line (both are disk-write/buffer-pressure
+/// health, thematically adjacent — no dedicated tab, mirroring the I/O
+/// profile sub-panel's placement). Absent counters (first poll of a
+/// session) render as `--`, never a fault — mirrors the vitals panel's
+/// pre-first-snapshot treatment of TPS. `wal` is `None` on PG < 14, a
+/// restricted role, or before the first successful collection — silently
+/// omitted, never a scary empty line.
+fn checkpointer_lines(cp: Option<&CheckpointerStats>, wal: Option<&WalStats>) -> Vec<Line<'static>> {
     let Some(cp) = cp else {
         return vec![Line::from(Span::styled(
             "collecting checkpointer stats\u{2026}",
@@ -245,7 +252,7 @@ fn checkpointer_lines(cp: Option<&CheckpointerStats>) -> Vec<Line<'static>> {
         .map(format::human_ms)
         .unwrap_or_else(|| "--".to_string());
 
-    vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
             Span::styled("checkpoints: ", style::label_style()),
@@ -268,7 +275,11 @@ fn checkpointer_lines(cp: Option<&CheckpointerStats>) -> Vec<Line<'static>> {
             "  avg write/sync: ",
             format!("{avg_write} / {avg_sync}"),
         ),
-    ]
+    ];
+    if let Some(wal) = wal {
+        lines.push(wal_generation_line(wal));
+    }
+    lines
 }
 
 /// Cap on rows in the compact v0.16 I/O profile panel — highest-activity
@@ -504,7 +515,8 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     let [checkpoint_area, io_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(io_height)]).areas(checkpoint_area);
 
-    let checkpoint_lines = checkpointer_lines(app.snapshot.checkpointer.as_ref());
+    let checkpoint_lines =
+        checkpointer_lines(app.snapshot.checkpointer.as_ref(), app.snapshot.wal.as_ref());
     let checkpoint_panel = Paragraph::new(checkpoint_lines).block(titled_block("Checkpoints / writer"));
     frame.render_widget(checkpoint_panel, checkpoint_area);
 
@@ -781,7 +793,7 @@ mod tests {
 
     #[test]
     fn checkpointer_panel_shows_collecting_state_before_first_poll() {
-        let lines = checkpointer_lines(None);
+        let lines = checkpointer_lines(None, None);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -793,7 +805,7 @@ mod tests {
     #[test]
     fn checkpointer_panel_renders_rates_and_a_calm_pressure_line() {
         let cp = checkpointer(Some(0.1));
-        let lines = checkpointer_lines(Some(&cp));
+        let lines = checkpointer_lines(Some(&cp), None);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -811,7 +823,7 @@ mod tests {
     #[test]
     fn checkpointer_panel_flags_pressure_and_absent_first_tick_rates() {
         let cp = checkpointer(Some(0.9));
-        let lines = checkpointer_lines(Some(&cp));
+        let lines = checkpointer_lines(Some(&cp), None);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -829,7 +841,7 @@ mod tests {
         cp0.buffers_backend_per_sec = None;
         cp0.avg_checkpoint_write_ms = None;
         cp0.avg_checkpoint_sync_ms = None;
-        let lines = checkpointer_lines(Some(&cp0));
+        let lines = checkpointer_lines(Some(&cp0), None);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -928,7 +940,7 @@ mod tests {
         let mut cp = checkpointer(Some(0.1));
         cp.buffers_backend = None;
         cp.buffers_backend_per_sec = None;
-        let lines = checkpointer_lines(Some(&cp));
+        let lines = checkpointer_lines(Some(&cp), None);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -1055,5 +1067,72 @@ mod tests {
             .collect();
         assert!(screen.contains("I/O profile"), "{screen}");
         assert!(screen.contains("client backend"), "{screen}");
+    }
+
+    // --- v0.16: WAL generation rate --------------------------------------
+
+    fn wal(bytes_per_sec: Option<f64>, buffers_full: i64, delta: Option<i64>) -> WalStats {
+        WalStats {
+            wal_records: 1_000_000,
+            wal_fpi: 10_000,
+            wal_bytes: 500_000_000,
+            wal_buffers_full: buffers_full,
+            wal_write_time_ms: Some(1_000.0),
+            wal_sync_time_ms: Some(100.0),
+            wal_bytes_per_sec: bytes_per_sec,
+            wal_records_per_sec: bytes_per_sec.map(|_| 400.0),
+            wal_buffers_full_delta: delta,
+        }
+    }
+
+    #[test]
+    fn checkpointer_panel_omits_the_wal_line_when_absent() {
+        let cp = checkpointer(Some(0.1));
+        let lines = checkpointer_lines(Some(&cp), None);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(!text.contains("WAL generation"), "{text}");
+    }
+
+    #[test]
+    fn checkpointer_panel_appends_the_wal_line_when_present() {
+        let cp = checkpointer(Some(0.1));
+        let w = wal(Some(2_000_000.0), 15, Some(3));
+        let lines = checkpointer_lines(Some(&cp), Some(&w));
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("WAL generation"), "{text}");
+        assert!(text.contains("buffers_full: 15 (+3 this tick)"), "{text}");
+    }
+
+    /// The Macro Lens renders the mock's WAL generation line (via the
+    /// checkpointer panel) and the Replication Lens renders its own
+    /// dedicated WAL Generation panel — both from the same `snapshot.wal`.
+    #[test]
+    fn macro_lens_renders_the_wal_generation_line_from_mock() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::MacroLens;
+        let snapshot = app.snapshot.clone();
+        crate::app::update(&mut app, crate::app::Action::Snapshot(snapshot));
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("WAL generation"), "{screen}");
     }
 }

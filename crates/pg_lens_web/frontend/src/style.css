@@ -998,6 +998,19 @@ html[data-theme="light"] .sql-num {
   background: var(--bad-bg);
 }
 
+/* v0.16: WAL generation summary row — one line, font-mono like the lag
+   figures, tinted yellow only when wal_buffers_full is actively climbing
+   (see wal.ts's walBuffersFullSeverity — never escalates to red). */
+#replication .repl-wal {
+  font-family: var(--font-mono);
+  color: var(--fg-dim);
+}
+
+#replication .repl-wal.warn {
+  color: var(--warn);
+  background: var(--warn-bg);
+}
+
 /* ── schema table ───────────────────────────────────────────────────── */
 
 .panel-note {

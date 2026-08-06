@@ -376,6 +376,25 @@ With rustup available (e.g. in CI), the leaner recipe is
 [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) or
 [`cross`](https://github.com/cross-rs/cross).
 
+### Shell completions
+
+`pg_lens completions <shell>` prints a completion script to stdout for
+`bash`, `zsh`, `fish`, `powershell`, or `elvish` — it never connects to a
+database or starts the TUI.
+
+```sh
+# zsh
+pg_lens completions zsh > "${fpath[1]}/_pg_lens"
+
+# bash
+pg_lens completions bash > ~/.local/share/bash-completion/completions/pg_lens
+
+# fish
+pg_lens completions fish > ~/.config/fish/completions/pg_lens.fish
+```
+
+Open a new shell (or re-source your rc file) afterward.
+
 ## Usage
 
 ```sh

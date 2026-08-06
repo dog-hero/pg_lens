@@ -190,6 +190,43 @@ pub struct IoStatRow {
     pub hit_ratio: Option<f64>,
 }
 
+/// WAL generation rate (v0.16, `queries/wal_stats_post_140000.sql`,
+/// `pg_stat_wal`, PG 14+ only): cluster-wide cumulative WAL counters plus
+/// poller-derived per-tick rates, the same raw-then-derive split as
+/// [`CheckpointerStats`]. Collected on the FAST tick and best-effort like
+/// [`crate::models::ReplicationInfo`] (absent on any failure — a restricted
+/// role or a hidden view degrades to "no WAL panel this tick", never a poll
+/// fault): unlike [`IoStatRow`]'s slow cadence, this is one tiny single-row
+/// catalog read, and WAL generation is genuinely spiky/useful live.
+#[derive(Clone, Debug, Serialize)]
+pub struct WalStats {
+    // --- cumulative counters (since server start, or the last stats reset) ---
+    pub wal_records: i64,
+    pub wal_fpi: i64,
+    pub wal_bytes: i64,
+    /// Times a backend had to write WAL data directly because every WAL
+    /// buffer was full — a real tuning signal (`wal_buffers` too small) when
+    /// nonzero, not just an FYI counter; see `wal_buffers_full_delta` for
+    /// the "is it climbing right now" read.
+    pub wal_buffers_full: i64,
+    /// `None` when `track_wal_io_timing` is off (the raw column reads back
+    /// as 0, indistinguishable from "no time spent" — same convention as
+    /// [`IoStatRow::avg_read_ms`]).
+    pub wal_write_time_ms: Option<f64>,
+    pub wal_sync_time_ms: Option<f64>,
+
+    // --- derived per-tick rates: `None` on the first poll of a session, OR
+    // across a stats reset (a counter went backwards) — never negative ---
+    pub wal_bytes_per_sec: Option<f64>,
+    pub wal_records_per_sec: Option<f64>,
+    /// `wal_buffers_full`'s delta over this tick's window. `Some(0)` means no
+    /// NEW buffer-full events since the last tick (calm, even if the
+    /// cumulative counter is nonzero from history); `Some(n)` with `n > 0`
+    /// means it is actively climbing right now — the severity signal the
+    /// panel tints on. Same `None` rules as the rate fields above.
+    pub wal_buffers_full_delta: Option<i64>,
+}
+
 /// One row of the Schema Lens table-stats query
 /// (`queries/table_stats_post_130000.sql`): `pg_stat_user_tables` counters
 /// plus on-disk sizes, for one user table of the *connected database*.
@@ -1844,6 +1881,12 @@ pub struct DbSnapshot {
     /// all-zero rows out, so this is a real, if unusual, possibility).
     #[serde(default)]
     pub io_stats: Option<Vec<IoStatRow>>,
+    /// WAL generation rate (v0.16, `pg_stat_wal`), refreshed every fast
+    /// tick, best-effort like `replication`: `None` on PG < 14 (the view
+    /// does not exist — absent, not an error), a restricted role, or when
+    /// the collection failed this tick.
+    #[serde(default)]
+    pub wal: Option<WalStats>,
     pub status: PollerStatus,
 }
 
@@ -2286,6 +2329,21 @@ impl DbSnapshot {
                     hit_ratio: None,
                 },
             ]),
+            // v0.16: a healthy, moderately busy primary — wal_buffers_full
+            // stays at 0 (the calm case) and the byte rate jitters so
+            // `--mock` visibly moves; track_wal_io_timing on, so the avg
+            // timings are populated too.
+            wal: Some(WalStats {
+                wal_records: 84_200_000 + (seq as i64) * 900,
+                wal_fpi: 2_100_000 + (seq as i64) * 12,
+                wal_bytes: 612_000_000_000 + (seq as i64) * 4_800_000,
+                wal_buffers_full: 0,
+                wal_write_time_ms: Some(41_200.0 + jitter(seq, 51, 900) as f64),
+                wal_sync_time_ms: Some(6_400.0 + jitter(seq, 52, 300) as f64),
+                wal_bytes_per_sec: Some(2_400_000.0 + jitter(seq, 53, 400_000) as f64),
+                wal_records_per_sec: Some(410.0 + jitter(seq, 54, 80) as f64),
+                wal_buffers_full_delta: Some(0),
+            }),
             status: PollerStatus::Ok,
         }
     }
@@ -2328,6 +2386,7 @@ impl DbSnapshot {
             idle_sessions: None,
             table_detail: None,
             io_stats: None,
+            wal: None,
             status: PollerStatus::Connecting,
         }
     }

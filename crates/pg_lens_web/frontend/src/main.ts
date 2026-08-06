@@ -390,12 +390,14 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.lock_capacity,
     snapshot.history,
     snapshot.io_stats,
+    snapshot.wal,
   );
   renderReplication(
     replicationBody,
     replicationPlaceholder,
     snapshot.replication,
     snapshot.replication_slots,
+    snapshot.wal,
   );
   currentHistory = snapshot.history;
   chart.update(snapshot.history);

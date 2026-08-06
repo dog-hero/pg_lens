@@ -115,6 +115,13 @@ pub struct QuerySet {
     /// reason to burden the 2s fast tick. Best-effort like `statements`'s
     /// availability check — see `poller::collect_io_stats`.
     pub io_stats: Option<&'static str>,
+    /// WAL generation rate (v0.16, `pg_stat_wal`), PG 14+ ONLY — `None` on 13
+    /// (the view does not exist there, so the poller must never issue this
+    /// query). Runs on the FAST tick, best-effort like `replication`: one
+    /// tiny single-row catalog read, and WAL rate is genuinely spiky/useful
+    /// live, unlike `io_stats`'s slow cadence. See
+    /// `poller::collect_wal_stats`.
+    pub wal_stats: Option<&'static str>,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -238,6 +245,11 @@ const TABLE_DETAIL_INDEXDEFS: &str = include_str!("../queries/table_detail_index
 // by SERVER version directly in `for_version`, not a post_NNNNNN pair, since
 // there is no pre-16 variant to fall back to (the field is `None` instead).
 const IO_STATS_POST_160000: &str = include_str!("../queries/io_post_160000.sql");
+// WAL generation rate (v0.16). PG 14+ only (`pg_stat_wal` shipped in 14) —
+// selected by SERVER version directly in `for_version`, not a post_NNNNNN
+// pair, since there is no pre-14 variant to fall back to (the field is
+// `None` instead).
+const WAL_STATS_POST_140000: &str = include_str!("../queries/wal_stats_post_140000.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -250,6 +262,12 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
     // v0.16: pg_stat_io shipped in PG 16 — absent (not broken) below that.
     let io_stats = if server_version_num >= 160_000 {
         Some(IO_STATS_POST_160000)
+    } else {
+        None
+    };
+    // v0.16: pg_stat_wal shipped in PG 14 — absent (not broken) below that.
+    let wal_stats = if server_version_num >= 140_000 {
+        Some(WAL_STATS_POST_140000)
     } else {
         None
     };
@@ -284,6 +302,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             table_detail_constraints: TABLE_DETAIL_CONSTRAINTS,
             table_detail_indexdefs: TABLE_DETAIL_INDEXDEFS,
             io_stats,
+            wal_stats,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -316,6 +335,7 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             table_detail_constraints: TABLE_DETAIL_CONSTRAINTS,
             table_detail_indexdefs: TABLE_DETAIL_INDEXDEFS,
             io_stats,
+            wal_stats,
         })
     } else {
         Err(format!(

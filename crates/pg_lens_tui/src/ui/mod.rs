@@ -577,6 +577,18 @@ mod tests {
         assert!(screen.contains('!'), "warn marker must be visible: {screen}");
     }
 
+    /// v0.16: the Replication Lens's dedicated WAL Generation section, fed
+    /// from the same `snapshot.wal` the Macro Lens's checkpointer panel
+    /// consumes — the mock carries a plausible calm reading.
+    #[test]
+    fn replication_lens_renders_the_wal_generation_panel() {
+        let mut app = App::new();
+        app.active_tab = Tab::ReplicationLens;
+        let screen = render(&mut app);
+        assert!(screen.contains("WAL Generation"), "{screen}");
+        assert!(screen.contains("buffers_full"), "{screen}");
+    }
+
     #[test]
     fn micro_lens_renders_activity_table() {
         let mut app = App::new();

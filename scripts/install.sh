@@ -310,6 +310,7 @@ say "Next:"
 say "  ${BIN} --mock        # try it with no database at all"
 say "  ${BIN} --dsn \"host=localhost user=postgres dbname=postgres\""
 say "  Live demo in the browser: ${DEMO_URL}"
+say "  Shell completions: ${BIN} completions <bash|zsh|fish|powershell|elvish>"
 
 if [ "$os" = Darwin ]; then
   say ""

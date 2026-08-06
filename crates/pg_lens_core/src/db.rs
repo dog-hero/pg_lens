@@ -725,6 +725,36 @@ pub fn io_stat_from_row(row: &Row) -> Result<IoStatRawRow, tokio_postgres::Error
     })
 }
 
+/// One raw (still-cumulative) row of `queries/wal_stats_post_140000.sql`
+/// (v0.16, PG 14+ only): the single-row `pg_stat_wal` catalog view. The
+/// poller turns this into [`crate::models::WalStats`] by computing per-tick
+/// deltas against the previous fast-tick collection, the same
+/// raw-then-derive split `BgwriterRow` feeds `CheckpointerStats`.
+#[derive(Clone, Debug)]
+pub struct WalStatsRawRow {
+    pub wal_records: i64,
+    pub wal_fpi: i64,
+    pub wal_bytes: i64,
+    pub wal_buffers_full: i64,
+    pub wal_write_time_ms: f64,
+    pub wal_sync_time_ms: f64,
+    pub track_wal_io_timing_on: bool,
+}
+
+/// Maps one row of `queries/wal_stats_post_140000.sql` onto
+/// [`WalStatsRawRow`].
+pub fn wal_stats_from_row(row: &Row) -> Result<WalStatsRawRow, tokio_postgres::Error> {
+    Ok(WalStatsRawRow {
+        wal_records: row.try_get("wal_records")?,
+        wal_fpi: row.try_get("wal_fpi")?,
+        wal_bytes: row.try_get("wal_bytes")?,
+        wal_buffers_full: row.try_get("wal_buffers_full")?,
+        wal_write_time_ms: row.try_get("wal_write_time_ms")?,
+        wal_sync_time_ms: row.try_get("wal_sync_time_ms")?,
+        track_wal_io_timing_on: row.try_get("track_wal_io_timing_on")?,
+    })
+}
+
 /// `try_get` an optional text column, defaulting NULL to `""`.
 fn opt_text(row: &Row, column: &str) -> Result<String, tokio_postgres::Error> {
     Ok(row.try_get::<_, Option<String>>(column)?.unwrap_or_default())

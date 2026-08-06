@@ -536,6 +536,36 @@ export interface IoStatRow {
   hit_ratio: number | null;
 }
 
+/**
+ * WAL generation rate (v0.16, `pg_stat_wal`, PG 14+ only): cluster-wide
+ * cumulative WAL counters plus poller-derived per-tick rates, the same
+ * raw + derived split as `CheckpointerStats`. Collected on the FAST tick,
+ * best-effort like `replication` (null on PG < 14, a restricted role, or
+ * any collection failure — never an error state, just absent).
+ */
+export interface WalStats {
+  wal_records: number;
+  wal_fpi: number;
+  wal_bytes: number;
+  /** Times a backend had to write WAL data directly because every WAL
+   * buffer was full — a real tuning signal (wal_buffers too small) when
+   * nonzero; see `wal_buffers_full_delta` for "is it climbing right now". */
+  wal_buffers_full: number;
+  /** null when track_wal_io_timing is off (indistinguishable from 0
+   * otherwise — same convention as `IoStatRow.avg_read_ms`). */
+  wal_write_time_ms: number | null;
+  wal_sync_time_ms: number | null;
+  /** null on the first collection of a session, OR across a stats reset
+   * (the counter went backwards) — never a negative rate. */
+  wal_bytes_per_sec: number | null;
+  wal_records_per_sec: number | null;
+  /** wal_buffers_full's delta over this tick's window. 0 means no NEW
+   * buffer-full events since the last tick (calm, even if the cumulative
+   * counter is nonzero from history); a positive value means it is
+   * actively climbing right now. Same null rules as the rate fields. */
+  wal_buffers_full_delta: number | null;
+}
+
 /** Result of an admin action, stamped by the poller inside every snapshot
  * until superseded; frontends dedupe by `at_epoch_ms`. Serde shapes:
  * kind = "Cancel"|"Terminate", outcome = {Signalled:bool}|{Error:string}. */
@@ -618,6 +648,13 @@ export interface DbSnapshot {
    * no nonzero row (a genuinely idle server).
    */
   io_stats: IoStatRow[] | null;
+  /**
+   * WAL generation rate (v0.16, `pg_stat_wal`), refreshed every fast tick,
+   * best-effort like `replication`: null on PG < 14 (the view does not
+   * exist — absent, not an error), a restricted role, or when the
+   * collection failed this tick.
+   */
+  wal: WalStats | null;
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
 }
