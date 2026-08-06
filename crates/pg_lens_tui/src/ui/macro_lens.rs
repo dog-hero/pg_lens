@@ -7,8 +7,9 @@
 //! [`DbSnapshot::history`]: pg_lens_core::DbSnapshot
 
 use pg_lens_core::{
-    CheckpointerStats, HistoryPoint, LockCapacity, LockCapacitySeverity, ReplicationInfo,
-    ReplicationSlotRow, SchemaSnapshot, TREND_DEADBAND, TREND_LOOKBACK_TICKS, Trend,
+    CheckpointerStats, HistoryPoint, IoStatRow, LockCapacity, LockCapacitySeverity,
+    ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, TREND_DEADBAND, TREND_LOOKBACK_TICKS,
+    Trend,
 };
 use ratatui::{
     Frame,
@@ -270,6 +271,67 @@ fn checkpointer_lines(cp: Option<&CheckpointerStats>) -> Vec<Line<'static>> {
     ]
 }
 
+/// Cap on rows in the compact v0.16 I/O profile panel — highest-activity
+/// (backend_type, context) combinations first (the SQL already orders by
+/// `reads + writes + hits` descending), same "compact here, full elsewhere"
+/// philosophy as `SENDERS_SHOWN`/`SLOTS_SHOWN` — there is no dedicated
+/// I/O tab (yet) to send the overflow to, so clipping just drops the
+/// quietest rows silently rather than a "Tab → " hint pointing nowhere.
+const IO_ROWS_SHOWN: usize = 4;
+
+fn io_rate_text(v: Option<f64>) -> String {
+    rate_per_sec(v)
+}
+
+fn io_avg_ms_text(v: Option<f64>) -> String {
+    match v {
+        Some(ms) => format!("{ms:.2}ms"),
+        None => "--".to_string(),
+    }
+}
+
+fn io_hit_ratio_text(v: Option<f64>) -> String {
+    match v {
+        Some(r) => format!("{:.0}%", r * 100.0),
+        None => "--".to_string(),
+    }
+}
+
+/// The v0.16 I/O profile panel's lines (`pg_stat_io`, PG 16+). `None` when
+/// there is no data to show at all — PG < 16 (the query is never issued) or
+/// no slow-cadence collection has run yet this session — so the panel is
+/// simply ABSENT (no scary empty box), mirroring the replication panel's
+/// "nothing worth showing → nothing rendered" rule. `Some(&[])` (the SQL's
+/// `HAVING` genuinely found no nonzero row — an idle server) renders one
+/// calm line rather than vanishing, since it IS PG 16+ data, just quiet.
+fn io_stats_lines(rows: Option<&[IoStatRow]>) -> Option<Vec<Line<'static>>> {
+    let rows = rows?;
+    if rows.is_empty() {
+        return Some(vec![Line::from(Span::styled(
+            "no I/O activity recorded this interval",
+            style::label_style(),
+        ))]);
+    }
+    Some(
+        rows.iter()
+            .take(IO_ROWS_SHOWN)
+            .map(|r| {
+                style::kv(
+                    format!("  {}/{}: ", r.backend_type, r.context),
+                    format!(
+                        "rd {} ({}) \u{b7} wr {} ({}) \u{b7} hit {}",
+                        io_rate_text(r.reads_per_sec),
+                        io_avg_ms_text(r.avg_read_ms),
+                        io_rate_text(r.writes_per_sec),
+                        io_avg_ms_text(r.avg_write_ms),
+                        io_hit_ratio_text(r.hit_ratio),
+                    ),
+                )
+            })
+            .collect(),
+    )
+}
+
 pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     let vitals = &app.snapshot.vitals;
     let history = &app.snapshot.history;
@@ -432,9 +494,24 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new(lines).block(titled_block("Vitals"));
     frame.render_widget(paragraph, vitals_area);
 
+    // v0.16: the I/O profile panel is a compact sub-panel of the checkpoint
+    // column (both are buffer/IO health, thematically adjacent) rather than
+    // a new tab — absent entirely (0 height, checkpoint panel keeps the
+    // whole column, unchanged from before v0.16) on PG < 16 or before the
+    // first slow collection.
+    let io_lines = io_stats_lines(app.snapshot.io_stats.as_deref());
+    let io_height = io_lines.as_ref().map(|l| (l.len() as u16 + 2).min(8)).unwrap_or(0);
+    let [checkpoint_area, io_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(io_height)]).areas(checkpoint_area);
+
     let checkpoint_lines = checkpointer_lines(app.snapshot.checkpointer.as_ref());
     let checkpoint_panel = Paragraph::new(checkpoint_lines).block(titled_block("Checkpoints / writer"));
     frame.render_widget(checkpoint_panel, checkpoint_area);
+
+    if let Some(lines) = io_lines {
+        let panel = Paragraph::new(lines).block(titled_block("I/O profile (pg_stat_io)"));
+        frame.render_widget(panel, io_area);
+    }
 
     if let Some(lines) = repl_lines {
         let panel = Paragraph::new(lines).block(titled_block("Replication"));
@@ -860,4 +937,123 @@ mod tests {
         assert!(text.contains("backend n/a (17+)"), "{text}");
     }
 
+    // --- v0.16: I/O profile (pg_stat_io) panel ---------------------------
+
+    #[test]
+    fn io_stats_panel_absent_below_pg16() {
+        // `None` (never issued this SQL, or PG < 16) means no panel at
+        // all — never an empty box.
+        assert!(io_stats_lines(None).is_none());
+    }
+
+    #[test]
+    fn io_stats_panel_shows_a_calm_line_when_genuinely_idle() {
+        let lines = io_stats_lines(Some(&[])).expect("Some([]) still renders a panel");
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("no I/O activity"), "{text}");
+    }
+
+    #[test]
+    fn io_stats_panel_renders_rates_and_dashes_for_absent_timing() {
+        let rows = vec![
+            IoStatRow {
+                backend_type: "client backend".to_string(),
+                context: "normal".to_string(),
+                reads: 1_000,
+                writes: 200,
+                writebacks: 0,
+                extends: 0,
+                hits: 9_000,
+                evictions: 0,
+                reuses: 0,
+                fsyncs: 0,
+                avg_read_ms: Some(0.18),
+                avg_write_ms: Some(0.42),
+                reads_per_sec: Some(1_380.0),
+                writes_per_sec: Some(58.0),
+                hit_ratio: Some(0.947),
+            },
+            IoStatRow {
+                backend_type: "checkpointer".to_string(),
+                context: "normal".to_string(),
+                reads: 0,
+                writes: 1_240_000,
+                writebacks: 0,
+                extends: 0,
+                hits: 0,
+                evictions: 0,
+                reuses: 0,
+                fsyncs: 8_400,
+                avg_read_ms: None,
+                avg_write_ms: None,
+                reads_per_sec: None,
+                writes_per_sec: Some(210.0),
+                hit_ratio: None,
+            },
+        ];
+        let lines = io_stats_lines(Some(&rows)).expect("rows present");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("client backend/normal"), "{text}");
+        assert!(text.contains("1380.0/s"), "{text}");
+        assert!(text.contains("95%"), "{text}");
+        // The absent-timing row shows dashes, never a fabricated 0.
+        assert!(text.contains("checkpointer/normal"), "{text}");
+        assert!(text.contains("rd --"), "{text}");
+    }
+
+    #[test]
+    fn io_stats_panel_clips_at_the_row_cap() {
+        let rows: Vec<IoStatRow> = (0..8)
+            .map(|i| IoStatRow {
+                backend_type: format!("backend{i}"),
+                context: "normal".to_string(),
+                reads: 0,
+                writes: 0,
+                writebacks: 0,
+                extends: 0,
+                hits: 0,
+                evictions: 0,
+                reuses: 0,
+                fsyncs: 0,
+                avg_read_ms: None,
+                avg_write_ms: None,
+                reads_per_sec: None,
+                writes_per_sec: None,
+                hit_ratio: None,
+            })
+            .collect();
+        let lines = io_stats_lines(Some(&rows)).expect("rows present");
+        assert_eq!(lines.len(), IO_ROWS_SHOWN);
+    }
+
+    /// The Macro Lens renders the mock's I/O profile panel, including a
+    /// dash for the timing-off row (the checkpointer fixture) so `--mock`
+    /// exercises both paths end to end.
+    #[test]
+    fn macro_lens_renders_the_io_profile_panel_from_mock() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::MacroLens;
+        let snapshot = app.snapshot.clone();
+        crate::app::update(&mut app, crate::app::Action::Snapshot(snapshot));
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("I/O profile"), "{screen}");
+        assert!(screen.contains("client backend"), "{screen}");
+    }
 }

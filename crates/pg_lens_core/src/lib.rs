@@ -34,7 +34,8 @@ pub use index_advisor::{IndexCatalogRow, classify as classify_indexes};
 pub use models::{
     ActivityRow, AdminActionResult, AdminCommand, AdminKind, AdminOutcome, BloatRow,
     CheckpointerStats, DatabaseRow, DbSnapshot, IdleSessionRow, IndexFinding, IndexRow,
-    LockCapacity, LockRow, PollerStatus, PreparedXactRow, ReplicationInfo, ReplicationSlotRow,
+    IoStatRow, LockCapacity, LockRow, PollerStatus, PreparedXactRow, ReplicationInfo,
+    ReplicationSlotRow,
     SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
     StatementsStatus, TableDetail, TableDetailColumn, TableDetailConstraint, TableDetailIndex,
     TableDetailRequest, TableStatRow, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,

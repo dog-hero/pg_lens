@@ -681,6 +681,50 @@ pub fn table_detail_index_from_row(row: &Row) -> Result<TableDetailIndex, tokio_
     })
 }
 
+/// One raw (still-cumulative) row of `queries/io_post_160000.sql` (v0.16,
+/// PG 16+): `pg_stat_io` aggregated by `backend_type` x `context`. The
+/// poller turns these into [`crate::models::IoStatRow`] by computing
+/// per-tick deltas against the previous slow-cadence collection, exactly
+/// like `BgwriterRow` feeds `CheckpointerStats` — kept as a separate raw
+/// struct (not the model itself) because the model additionally carries
+/// derived rates that only the poller (which owns the delta window) can
+/// compute.
+#[derive(Clone, Debug)]
+pub struct IoStatRawRow {
+    pub backend_type: String,
+    pub context: String,
+    pub reads: i64,
+    pub writes: i64,
+    pub writebacks: i64,
+    pub extends: i64,
+    pub hits: i64,
+    pub evictions: i64,
+    pub reuses: i64,
+    pub fsyncs: i64,
+    pub read_time_ms: f64,
+    pub write_time_ms: f64,
+    pub track_io_timing_on: bool,
+}
+
+/// Maps one row of `queries/io_post_160000.sql` onto [`IoStatRawRow`].
+pub fn io_stat_from_row(row: &Row) -> Result<IoStatRawRow, tokio_postgres::Error> {
+    Ok(IoStatRawRow {
+        backend_type: row.try_get("backend_type")?,
+        context: row.try_get("context")?,
+        reads: row.try_get("reads")?,
+        writes: row.try_get("writes")?,
+        writebacks: row.try_get("writebacks")?,
+        extends: row.try_get("extends")?,
+        hits: row.try_get("hits")?,
+        evictions: row.try_get("evictions")?,
+        reuses: row.try_get("reuses")?,
+        fsyncs: row.try_get("fsyncs")?,
+        read_time_ms: row.try_get("read_time_ms")?,
+        write_time_ms: row.try_get("write_time_ms")?,
+        track_io_timing_on: row.try_get("track_io_timing_on")?,
+    })
+}
+
 /// `try_get` an optional text column, defaulting NULL to `""`.
 fn opt_text(row: &Row, column: &str) -> Result<String, tokio_postgres::Error> {
     Ok(row.try_get::<_, Option<String>>(column)?.unwrap_or_default())

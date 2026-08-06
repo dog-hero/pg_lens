@@ -147,6 +147,49 @@ pub struct CheckpointerStats {
     pub requested_ratio_session: Option<f64>,
 }
 
+/// One row of the I/O profile (v0.16, `queries/io_post_160000.sql`,
+/// `pg_stat_io`, PG 16+ only): one `backend_type` x `context` combination's
+/// cumulative counters plus the poller-derived per-tick rates (same split as
+/// [`CheckpointerStats`] — raw cumulative counters alongside `Option` rates
+/// that are `None` on the first collection of a session or across a stats
+/// reset). Collected on the SLOW schema cadence (a cluster-wide cumulative
+/// view, not per-backend — no reason to burden the 2s fast tick), so the
+/// rates are effectively "per second, averaged over the last schema
+/// interval" rather than a true instantaneous rate.
+#[derive(Clone, Debug, Serialize)]
+pub struct IoStatRow {
+    pub backend_type: String,
+    pub context: String,
+    // --- cumulative counters (since server start, or the last stats reset) ---
+    pub reads: i64,
+    pub writes: i64,
+    pub writebacks: i64,
+    pub extends: i64,
+    pub hits: i64,
+    pub evictions: i64,
+    pub reuses: i64,
+    pub fsyncs: i64,
+    /// Average milliseconds per read (`read_time` / `reads`, both
+    /// cumulative). `None` when `track_io_timing` is off (the raw column
+    /// reads back as 0, indistinguishable from "no time spent" — same
+    /// convention as [`StatementRow::blk_read_time_ms`]) OR when `reads` is
+    /// 0 (division undefined).
+    pub avg_read_ms: Option<f64>,
+    /// Average milliseconds per write, same rules as `avg_read_ms`.
+    pub avg_write_ms: Option<f64>,
+    // --- derived per-tick (per-schema-interval) rates ---
+    /// `None` on the first collection of a session, OR when the previous
+    /// collection's counter for this same `(backend_type, context)` key was
+    /// HIGHER (a `pg_stat_reset_shared('io')` or server restart happened in
+    /// between) — never a negative rate.
+    pub reads_per_sec: Option<f64>,
+    pub writes_per_sec: Option<f64>,
+    /// `hits / (hits + reads)`, over the delta window when one exists
+    /// (falls back to the cumulative ratio on the first collection of a
+    /// session). `None` only when the denominator is 0.
+    pub hit_ratio: Option<f64>,
+}
+
 /// One row of the Schema Lens table-stats query
 /// (`queries/table_stats_post_130000.sql`): `pg_stat_user_tables` counters
 /// plus on-disk sizes, for one user table of the *connected database*.
@@ -1793,6 +1836,14 @@ pub struct DbSnapshot {
     /// this session, or after a `Clear`.
     #[serde(default)]
     pub table_detail: Option<Arc<TableDetail>>,
+    /// I/O profile (v0.16, `pg_stat_io`), collected on the SAME slow schema
+    /// cadence as `schema`/`statements`. `None` on PG < 16 (the view does
+    /// not exist — absent, not an error) OR before the first slow
+    /// collection of a session; `Some(vec![])` would mean the view returned
+    /// no nonzero rows (a genuinely idle server — the SQL's `HAVING` filters
+    /// all-zero rows out, so this is a real, if unusual, possibility).
+    #[serde(default)]
+    pub io_stats: Option<Vec<IoStatRow>>,
     pub status: PollerStatus,
 }
 
@@ -2172,6 +2223,69 @@ impl DbSnapshot {
             // on a simulated request round-trip (the mock poller re-stamps
             // this on request — see `poller::spawn_mock`).
             table_detail: Some(Arc::new(TableDetail::mock())),
+            // v0.16: a plausible profile demoing both the "timing available"
+            // and "track_io_timing off" paths in one fixture — client
+            // backends (the biggest reader), autovacuum (writer-heavy), and
+            // the checkpointer (writer, timing off — the `avg_*_ms: None`
+            // case) — plus rates that jitter so `--mock` visibly moves.
+            io_stats: Some(vec![
+                IoStatRow {
+                    backend_type: "client backend".to_string(),
+                    context: "normal".to_string(),
+                    reads: 48_210_000 + (seq as i64) * 1_400,
+                    writes: 2_100_000 + (seq as i64) * 60,
+                    writebacks: 0,
+                    extends: 180_000 + (seq as i64) * 4,
+                    hits: 912_400_000 + (seq as i64) * 22_000,
+                    evictions: 12_000,
+                    reuses: 0,
+                    fsyncs: 0,
+                    avg_read_ms: Some(0.18 + jitter(seq, 40, 10) as f64 / 100.0),
+                    avg_write_ms: Some(0.42 + jitter(seq, 41, 10) as f64 / 100.0),
+                    reads_per_sec: Some(1_380.0 + jitter(seq, 42, 200) as f64),
+                    writes_per_sec: Some(58.0 + jitter(seq, 43, 20) as f64),
+                    hit_ratio: Some(0.947 + jitter(seq, 44, 20) as f64 / 1_000.0),
+                },
+                IoStatRow {
+                    backend_type: "autovacuum worker".to_string(),
+                    context: "vacuum".to_string(),
+                    reads: 3_400_000 + (seq as i64) * 90,
+                    writes: 1_850_000 + (seq as i64) * 40,
+                    writebacks: 0,
+                    extends: 0,
+                    hits: 41_200_000 + (seq as i64) * 900,
+                    evictions: 2_100,
+                    reuses: 410_000,
+                    fsyncs: 0,
+                    avg_read_ms: Some(0.31 + jitter(seq, 45, 15) as f64 / 100.0),
+                    avg_write_ms: Some(0.55 + jitter(seq, 46, 15) as f64 / 100.0),
+                    reads_per_sec: Some(96.0 + jitter(seq, 47, 30) as f64),
+                    writes_per_sec: Some(52.0 + jitter(seq, 48, 20) as f64),
+                    hit_ratio: Some(0.923 + jitter(seq, 49, 30) as f64 / 1_000.0),
+                },
+                // track_io_timing off for this row (a common production
+                // choice to avoid `gettimeofday` overhead on some
+                // platforms): avg_*_ms stay None, never a misleading 0 —
+                // the rate/hit_ratio fields are unaffected (they don't
+                // depend on the timing GUC).
+                IoStatRow {
+                    backend_type: "checkpointer".to_string(),
+                    context: "normal".to_string(),
+                    reads: 0,
+                    writes: 1_240_000 + (seq as i64) * 37,
+                    writebacks: 0,
+                    extends: 0,
+                    hits: 0,
+                    evictions: 0,
+                    reuses: 0,
+                    fsyncs: 8_400 + (seq as i64) / 5,
+                    avg_read_ms: None,
+                    avg_write_ms: None,
+                    reads_per_sec: None,
+                    writes_per_sec: Some(210.0 + jitter(seq, 50, 40) as f64),
+                    hit_ratio: None,
+                },
+            ]),
             status: PollerStatus::Ok,
         }
     }
@@ -2213,6 +2327,7 @@ impl DbSnapshot {
             lock_capacity: None,
             idle_sessions: None,
             table_detail: None,
+            io_stats: None,
             status: PollerStatus::Connecting,
         }
     }

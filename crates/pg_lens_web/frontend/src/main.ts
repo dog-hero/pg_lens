@@ -389,6 +389,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.checkpointer,
     snapshot.lock_capacity,
     snapshot.history,
+    snapshot.io_stats,
   );
   renderReplication(
     replicationBody,

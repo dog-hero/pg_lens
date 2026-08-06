@@ -32,7 +32,7 @@ use crate::history_store::HistoryStore;
 use crate::index_advisor::{self, IndexCatalogRow};
 use crate::models::{
     AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats, DatabaseRow,
-    DbSnapshot, IdleSessionRow, IndexRow, LockCapacity, PollerStatus, PreparedXactRow,
+    DbSnapshot, IdleSessionRow, IndexRow, IoStatRow, LockCapacity, PollerStatus, PreparedXactRow,
     ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow,
     StatementsSnapshot, StatementsStatus, TableDetail, TableDetailRequest, VacuumClusterAge,
     VacuumProgressRow, VacuumTableRow,
@@ -291,6 +291,131 @@ impl TableDetailState {
     fn clear(&mut self) {
         self.current = None;
     }
+}
+
+/// I/O profile (v0.16, `pg_stat_io`) collection state, owned by the poller
+/// task like [`StatementsState`] — shares the SAME slow schema cadence (no
+/// timer of its own), and additionally carries the previous collection's raw
+/// (still-cumulative) counters keyed by `(backend_type, context)`, the basis
+/// for the per-tick rates in [`IoStatRow`] — the exact same raw-then-derive
+/// split `DeltaState`/`CheckpointerDeltaState` use for the fast tick, just at
+/// the slow cadence instead. Survives reconnects like schema/statements
+/// (the last collection AND the delta window both carry over a connection
+/// blip, so a blip does not spuriously reset every rate to `None`).
+struct IoStatsState {
+    /// Last collection, reused by every fast tick in between (clone cost —
+    /// a handful of rows, unlike the `Arc`-wrapped schema/statements
+    /// payloads). `None` on PG < 16, or before the first slow collection.
+    current: Option<Vec<IoStatRow>>,
+    /// The previous collection's raw counters, for the next collection's
+    /// delta. `None` before the first successful collection of a session.
+    prev: Option<IoStatsPrev>,
+}
+
+/// The previous slow-cadence collection's raw counters, keyed by
+/// `(backend_type, context)`, plus when it ran — factored out of
+/// [`IoStatsState`] purely to keep clippy's type-complexity lint quiet.
+type IoStatsPrev = (Instant, std::collections::HashMap<(String, String), db::IoStatRawRow>);
+
+impl IoStatsState {
+    fn new() -> Self {
+        Self { current: None, prev: None }
+    }
+
+    /// Stores a successful collection, deriving per-tick rates against
+    /// `self.prev` and then updating it to this collection's raw counters.
+    fn store(&mut self, raws: Vec<db::IoStatRawRow>) {
+        let now = Instant::now();
+        let rows = derive_io_stats(&raws, now, self.prev.as_ref());
+        let map = raws
+            .into_iter()
+            .map(|r| ((r.backend_type.clone(), r.context.clone()), r))
+            .collect();
+        self.prev = Some((now, map));
+        self.current = Some(rows);
+    }
+}
+
+/// Derives [`IoStatRow`]s from one collection's raw counters, against the
+/// previous collection's (`prev`) — pure and DB-free (unit-tested directly),
+/// mirroring [`derive_checkpointer_stats`]'s raw-then-derive split. `prev`
+/// is `None` on the first collection of a session: every rate is `None`,
+/// `hit_ratio` falls back to the cumulative ratio (same first-poll rule as
+/// `ServerVitals::cache_hit_ratio`). A key present now but absent from
+/// `prev` (a `backend_type`/`context` combination that just started
+/// producing I/O) gets the same "no delta window yet" treatment.
+fn derive_io_stats(raws: &[db::IoStatRawRow], now: Instant, prev: Option<&IoStatsPrev>) -> Vec<IoStatRow> {
+    raws.iter()
+        .map(|raw| {
+            let avg_read_ms = avg_ms(raw.track_io_timing_on, raw.read_time_ms, raw.reads);
+            let avg_write_ms = avg_ms(raw.track_io_timing_on, raw.write_time_ms, raw.writes);
+
+            let key = (raw.backend_type.clone(), raw.context.clone());
+            let prev_raw = prev.and_then(|(_, map)| map.get(&key));
+            let dt = prev.map(|(at, _)| now.duration_since(*at).as_secs_f64());
+
+            let (reads_per_sec, writes_per_sec, hit_ratio) = match (prev_raw, dt) {
+                (Some(p), Some(dt)) if dt > 0.0 => {
+                    let d_reads = raw.reads - p.reads;
+                    let d_writes = raw.writes - p.writes;
+                    let d_hits = raw.hits - p.hits;
+                    // A counter going backwards means pg_stat_reset_shared('io')
+                    // or a server restart — never a negative rate; the whole
+                    // window's rates fall back to "no delta yet" rather than a
+                    // misleading number, same rule as the checkpointer's
+                    // per-tick rates.
+                    let reset = d_reads < 0 || d_writes < 0 || d_hits < 0;
+                    if reset {
+                        (None, None, hit_ratio_from(raw.hits, raw.reads))
+                    } else {
+                        let reads_per_sec = Some(d_reads as f64 / dt);
+                        let writes_per_sec = Some(d_writes as f64 / dt);
+                        let hit_ratio = if d_hits + d_reads > 0 {
+                            Some(d_hits as f64 / (d_hits + d_reads) as f64)
+                        } else {
+                            hit_ratio_from(raw.hits, raw.reads)
+                        };
+                        (reads_per_sec, writes_per_sec, hit_ratio)
+                    }
+                }
+                _ => (None, None, hit_ratio_from(raw.hits, raw.reads)),
+            };
+
+            IoStatRow {
+                backend_type: raw.backend_type.clone(),
+                context: raw.context.clone(),
+                reads: raw.reads,
+                writes: raw.writes,
+                writebacks: raw.writebacks,
+                extends: raw.extends,
+                hits: raw.hits,
+                evictions: raw.evictions,
+                reuses: raw.reuses,
+                fsyncs: raw.fsyncs,
+                avg_read_ms,
+                avg_write_ms,
+                reads_per_sec,
+                writes_per_sec,
+                hit_ratio,
+            }
+        })
+        .collect()
+}
+
+/// `time_ms / count`, `None` when timing is off (mirrors
+/// `statement_from_row`'s `track_io_timing_on` gate) or `count` is 0.
+fn avg_ms(track_io_timing_on: bool, time_ms: f64, count: i64) -> Option<f64> {
+    if !track_io_timing_on || count <= 0 {
+        None
+    } else {
+        Some(time_ms / count as f64)
+    }
+}
+
+/// The cumulative-ratio fallback: `None` only when the denominator is 0.
+fn hit_ratio_from(hits: i64, reads: i64) -> Option<f64> {
+    let denom = hits + reads;
+    if denom > 0 { Some(hits as f64 / denom as f64) } else { None }
 }
 
 /// The pure elapsed check behind [`SchemaState::due`], factored out so the
@@ -594,6 +719,10 @@ async fn run(
     // Statements share the schema's slow cadence and, like it, outlive a
     // connection blip (the last collection stays on screen).
     let mut statements = StatementsState::new();
+    // v0.16: the I/O profile shares the same slow cadence and outlives a
+    // connection blip too — including its delta window, so a blip does not
+    // spuriously blank every rate back to "collecting" for one tick.
+    let mut io_stats = IoStatsState::new();
     // v0.15's on-demand table detail: no cadence of its own, survives
     // reconnects like `schema`/`statements`, reset on a database switch
     // below (same reasoning — a different database's oid means different
@@ -614,6 +743,7 @@ async fn run(
             &mut history,
             &mut schema,
             &mut statements,
+            &mut io_stats,
             &mut table_detail,
             &mut admin_rx,
             &mut last_admin,
@@ -641,6 +771,7 @@ async fn run(
                 appends_since_compact = 0;
                 schema.reset();
                 statements = StatementsState::new();
+                io_stats = IoStatsState::new();
                 table_detail = TableDetailState::new();
                 last_admin = None;
                 store = history_path_fn
@@ -700,6 +831,7 @@ async fn session(
     history: &mut SnapshotHistory,
     schema: &mut SchemaState,
     statements: &mut StatementsState,
+    io_stats: &mut IoStatsState,
     table_detail: &mut TableDetailState,
     admin_rx: &mut mpsc::Receiver<AdminCommand>,
     last_admin: &mut Option<AdminActionResult>,
@@ -753,6 +885,7 @@ async fn session(
             history,
             schema,
             statements,
+            io_stats,
             table_detail,
             admin_rx,
             last_admin,
@@ -774,6 +907,7 @@ async fn poll_loop(
     history: &mut SnapshotHistory,
     schema: &mut SchemaState,
     statements: &mut StatementsState,
+    io_stats: &mut IoStatsState,
     table_detail: &mut TableDetailState,
     admin_rx: &mut mpsc::Receiver<AdminCommand>,
     last_admin: &mut Option<AdminActionResult>,
@@ -861,6 +995,7 @@ async fn poll_loop(
         snapshot.schema = fold_relation_locks(schema.current.clone(), relation_locks.as_deref());
         snapshot.statements = statements.current.clone();
         snapshot.table_detail = table_detail.current.clone();
+        snapshot.io_stats = io_stats.current.clone();
         // The most recent admin result rides in every envelope from then
         // on; frontends dedupe on its `at_epoch_ms`.
         snapshot.last_admin_action = last_admin.clone();
@@ -906,6 +1041,21 @@ async fn poll_loop(
                     }
                 },
                 Err(reason) => statements.store_unavailable(reason.clone()),
+            }
+            // v0.16: the I/O profile shares the SAME slow tick too. Absent
+            // (not an error) below PG 16 — `q.io_stats` is `None` there, so
+            // the query is simply never issued and `io_stats.current` stays
+            // `None` forever on that server. A failing query on 16+ (a
+            // restricted role, a future privilege change) degrades to "keep
+            // the last good rows" would be nice, but `pg_stat_io` is
+            // world-readable and cheap, so a genuine failure is rare enough
+            // that dropping to `None` (no panel this tick) is acceptable —
+            // same best-effort contract as `replication`/`databases`, unlike
+            // schema/statements' keep-last-good treatment.
+            if let Some(sql) = query_set.io_stats
+                && let Ok(raws) = collect_io_stats(client, sql).await
+            {
+                io_stats.store(raws);
             }
         }
         // The tick sleep doubles as the admin-command AND table-detail-
@@ -1235,10 +1385,11 @@ async fn poll_once(
             activity,
             locks,
             history: history.clone(),
-            // All four stamped by the caller from poller-owned state.
+            // All five stamped by the caller from poller-owned state.
             schema: None,
             statements: None,
             table_detail: None,
+            io_stats: None,
             last_admin_action: None,
             replication,
             replication_slots,
@@ -1429,6 +1580,23 @@ async fn collect_statements(
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(db::statement_from_row(row).map_err(|e| e.to_string())?);
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// Runs the I/O profile collection (v0.16, `pg_stat_io`, PG 16+), same slow
+/// cadence and same shape of read as `collect_statements`. The caller only
+/// invokes this when `q.io_stats` is `Some` (PG 16+) — see `poll_loop`.
+async fn collect_io_stats(
+    client: &mut Client,
+    sql: &str,
+) -> Result<Vec<db::IoStatRawRow>, String> {
+    let tx = begin_read(client).await.map_err(|e| e.to_string())?;
+    let rows = tx.query(sql, &[]).await.map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        out.push(db::io_stat_from_row(row).map_err(|e| e.to_string())?);
     }
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(out)
@@ -2844,5 +3012,138 @@ mod tests {
         let schema = Some(Arc::new(SchemaSnapshot::mock()));
         let folded = fold_relation_locks(schema, Some(&[])).expect("schema present");
         assert!(folded.tables.iter().all(|t| t.lock_count.is_none()));
+    }
+
+    // --- v0.16: I/O profile (pg_stat_io) delta derivation --------------------
+
+    /// `(reads, writes, hits, read_time_ms, write_time_ms, track_io_timing_on)`
+    /// — grouped into one tuple param purely to dodge clippy's
+    /// too-many-arguments lint on a test helper.
+    fn io_raw(
+        backend_type: &str,
+        context: &str,
+        counters: (i64, i64, i64, f64, f64, bool),
+    ) -> db::IoStatRawRow {
+        let (reads, writes, hits, read_time_ms, write_time_ms, track_io_timing_on) = counters;
+        db::IoStatRawRow {
+            backend_type: backend_type.to_string(),
+            context: context.to_string(),
+            reads,
+            writes,
+            writebacks: 0,
+            extends: 0,
+            hits,
+            evictions: 0,
+            reuses: 0,
+            fsyncs: 0,
+            read_time_ms,
+            write_time_ms,
+            track_io_timing_on,
+        }
+    }
+
+    #[test]
+    fn io_stats_query_is_absent_below_pg16_and_present_on_16_plus() {
+        for version in [130_011, 140_000, 150_007] {
+            let q = queries::for_version(version).expect("supported");
+            assert!(q.io_stats.is_none(), "pg_stat_io does not exist below PG 16");
+        }
+        for version in [160_000, 160_003, 170_000] {
+            let q = queries::for_version(version).expect("supported");
+            let sql = q.io_stats.expect("pg_stat_io must be selected on PG 16+");
+            assert!(sql.contains("pg_stat_io"));
+            assert!(sql.contains("track_io_timing_on"));
+        }
+    }
+
+    #[test]
+    fn io_stats_first_collection_has_no_rates_but_a_cumulative_hit_ratio() {
+        let raw = io_raw("client backend", "normal", (1_000, 200, 9_000, 500.0, 100.0, true));
+        let rows = derive_io_stats(&[raw], Instant::now(), None);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.reads, 1_000);
+        assert!(row.reads_per_sec.is_none());
+        assert!(row.writes_per_sec.is_none());
+        // hits / (hits + reads) = 9000 / 10000
+        assert!((row.hit_ratio.unwrap() - 0.9).abs() < 1e-9);
+        assert_eq!(row.avg_read_ms, Some(0.5));
+        assert_eq!(row.avg_write_ms, Some(0.5));
+    }
+
+    #[test]
+    fn io_stats_track_io_timing_off_nulls_the_avg_ms_never_a_misleading_zero() {
+        let raw = io_raw("client backend", "normal", (1_000, 200, 9_000, 0.0, 0.0, false));
+        let rows = derive_io_stats(&[raw], Instant::now(), None);
+        assert!(rows[0].avg_read_ms.is_none());
+        assert!(rows[0].avg_write_ms.is_none());
+    }
+
+    #[test]
+    fn io_stats_second_collection_derives_delta_rates_and_ratio() {
+        let raw0 = io_raw("client backend", "normal", (1_000, 200, 9_000, 500.0, 100.0, true));
+        let t0 = Instant::now();
+        let mut prev = std::collections::HashMap::new();
+        prev.insert(("client backend".to_string(), "normal".to_string()), raw0);
+        let t1 = t0 + Duration::from_secs(10);
+
+        // 10s later: +500 reads, +100 writes, +490 hits.
+        let raw1 = io_raw("client backend", "normal", (1_500, 300, 9_490, 700.0, 150.0, true));
+        let rows = derive_io_stats(&[raw1], t1, Some(&(t0, prev)));
+        let row = &rows[0];
+        assert_eq!(row.reads_per_sec, Some(50.0));
+        assert_eq!(row.writes_per_sec, Some(10.0));
+        // delta hit ratio: 490 / (490 + 500)
+        assert!((row.hit_ratio.unwrap() - 490.0 / 990.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn io_stats_reset_shows_no_negative_rate() {
+        let raw0 = io_raw("client backend", "normal", (5_000, 800, 40_000, 2_000.0, 400.0, true));
+        let t0 = Instant::now();
+        let mut prev = std::collections::HashMap::new();
+        prev.insert(("client backend".to_string(), "normal".to_string()), raw0);
+        let t1 = t0 + Duration::from_secs(10);
+
+        // pg_stat_reset_shared('io') happened in between: counters restart
+        // from a lower value than the previous collection saw.
+        let raw1 = io_raw("client backend", "normal", (50, 10, 400, 20.0, 4.0, true));
+        let rows = derive_io_stats(&[raw1], t1, Some(&(t0, prev)));
+        let row = &rows[0];
+        assert!(row.reads_per_sec.is_none(), "a reset must never show a negative rate");
+        assert!(row.writes_per_sec.is_none());
+        // Falls back to this collection's own cumulative ratio.
+        assert!((row.hit_ratio.unwrap() - 400.0 / 450.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn io_stats_new_key_with_no_prior_history_has_no_rates() {
+        // A backend_type/context combination that just started producing
+        // I/O (not present in `prev` at all) is treated like a first
+        // collection for that key, not a reset.
+        let mut prev = std::collections::HashMap::new();
+        prev.insert(
+            ("client backend".to_string(), "normal".to_string()),
+            io_raw("client backend", "normal", (1_000, 200, 9_000, 500.0, 100.0, true)),
+        );
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(10);
+        let raw1 = io_raw("autovacuum worker", "vacuum", (40, 10, 300, 12.0, 3.0, true));
+        let rows = derive_io_stats(&[raw1], t1, Some(&(t0, prev)));
+        assert!(rows[0].reads_per_sec.is_none());
+        assert!(rows[0].hit_ratio.is_some());
+    }
+
+    #[test]
+    fn io_stat_from_row_parser_shape_matches_the_sql_column_names() {
+        let sql = queries::for_version(160_003).expect("PG16 supported").io_stats.unwrap();
+        // Every column the parser reads by name must exist in the SQL.
+        for col in [
+            "backend_type", "context", "reads", "writes", "writebacks", "extends", "hits",
+            "evictions", "reuses", "fsyncs", "read_time_ms", "write_time_ms",
+            "track_io_timing_on",
+        ] {
+            assert!(sql.contains(&format!("AS {col}")), "missing column alias: {col}");
+        }
     }
 }

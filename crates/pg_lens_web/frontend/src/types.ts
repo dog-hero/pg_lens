@@ -504,6 +504,38 @@ export interface CheckpointerStats {
   requested_ratio_session: number | null;
 }
 
+/**
+ * One row of the v0.16 I/O profile (`pg_stat_io`, PG 16+ only): one
+ * backend_type x context combination's cumulative counters plus
+ * poller-derived per-tick rates (same raw + derived split as
+ * `CheckpointerStats`). Collected on the SLOW schema cadence — a
+ * cluster-wide cumulative view, not per-backend.
+ */
+export interface IoStatRow {
+  backend_type: string;
+  context: string;
+  reads: number;
+  writes: number;
+  writebacks: number;
+  extends: number;
+  hits: number;
+  evictions: number;
+  reuses: number;
+  fsyncs: number;
+  /** Average ms/read (read_time / reads, both cumulative). null when
+   * track_io_timing is off (indistinguishable from 0 otherwise — same
+   * convention as `StatementRow.blk_read_time_ms`) or reads is 0. */
+  avg_read_ms: number | null;
+  avg_write_ms: number | null;
+  /** null on the first collection of a session, OR across a stats reset
+   * (the counter went backwards) — never a negative rate. */
+  reads_per_sec: number | null;
+  writes_per_sec: number | null;
+  /** hits / (hits + reads), delta-based when a window exists. null only
+   * when the denominator is 0. */
+  hit_ratio: number | null;
+}
+
 /** Result of an admin action, stamped by the poller inside every snapshot
  * until superseded; frontends dedupe by `at_epoch_ms`. Serde shapes:
  * kind = "Cancel"|"Terminate", outcome = {Signalled:bool}|{Error:string}. */
@@ -578,6 +610,14 @@ export interface DbSnapshot {
    * or two behind the click).
    */
   table_detail: TableDetail | null;
+  /**
+   * I/O profile (v0.16, `pg_stat_io`), collected on the SAME slow schema
+   * cadence as `schema`/`statements`. `null` on PG < 16 (the view does not
+   * exist — absent, not an error) OR before the first slow collection of a
+   * session; an empty array means the collection succeeded and simply found
+   * no nonzero row (a genuinely idle server).
+   */
+  io_stats: IoStatRow[] | null;
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
 }

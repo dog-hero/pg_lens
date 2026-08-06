@@ -2,6 +2,7 @@
 
 import type {
   CheckpointerStats,
+  IoStatRow,
   LockCapacity,
   ServerVitals,
   SnapshotHistory,
@@ -10,6 +11,7 @@ import type {
 import { humanBytes, humanCount, humanDuration, humanPercent } from "./format";
 import { ageSeverity } from "./vacuum";
 import { checkpointerCard } from "./checkpointer";
+import { ioStatLines } from "./io_stats";
 import { lockCapacitySeverity } from "./lock_capacity";
 import { TREND_LOOKBACK_TICKS, cardTrend, sampleForTrend, trendGlyph, trendTitle, trendTone } from "./trend";
 
@@ -111,12 +113,31 @@ function lockCapacityCard(
   };
 }
 
+/**
+ * v0.16's I/O profile card (`pg_stat_io`, PG 16+). `null` (PG < 16, or no
+ * slow collection yet) means NO card at all — unlike `checkpointCard`, this
+ * is genuinely absent on unsupported servers, not just "collecting", so the
+ * card list must not grow for a feature the connected server can't offer.
+ */
+function ioStatsCard(rows: IoStatRow[] | null): Card | null {
+  if (rows === null) return null;
+  const lines = ioStatLines(rows);
+  return {
+    label: "I/O profile (pg_stat_io)",
+    value: `${rows.length} source${rows.length === 1 ? "" : "s"}`,
+    detail: lines.join(" · "),
+    meter: null,
+    tone: "",
+  };
+}
+
 function cards(
   v: ServerVitals,
   vacuumAge: VacuumClusterAge | null,
   checkpointer: CheckpointerStats | null,
   lockCapacity: LockCapacity | null,
   history: SnapshotHistory,
+  ioStats: IoStatRow[] | null,
 ): Card[] {
   const saturation =
     v.max_connections > 0 ? v.connections_total / v.max_connections : 0;
@@ -194,6 +215,7 @@ function cards(
       tone: "",
     },
     checkpointCard(checkpointer),
+    ...(ioStatsCard(ioStats) ? [ioStatsCard(ioStats) as Card] : []),
   ];
 }
 
@@ -204,9 +226,10 @@ export function renderVitals(
   checkpointer: CheckpointerStats | null = null,
   lockCapacity: LockCapacity | null = null,
   history: SnapshotHistory = { cap: 0, points: [] },
+  ioStats: IoStatRow[] | null = null,
 ): void {
   container.replaceChildren(
-    ...cards(v, vacuumAge, checkpointer, lockCapacity, history).map((card) => {
+    ...cards(v, vacuumAge, checkpointer, lockCapacity, history, ioStats).map((card) => {
       const el = document.createElement("div");
       const classes = ["card", card.tone, card.lead ? "lead" : ""].filter(Boolean);
       el.className = classes.join(" ");
