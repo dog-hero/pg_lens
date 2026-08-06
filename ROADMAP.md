@@ -217,6 +217,31 @@ Deferred from the same pass: Index Lens jump (needs new filter state —
 reopens a v0.12 decision; after the Query jump proves the pattern), sequence
 exhaustion, matview badge / TOAST split / per-table cache-hit columns.
 
+## Project site — GitHub Pages (shipped 2026-08-05)
+
+Landing page + docs + a **live interactive demo** at
+`https://dog-hero.github.io/pg_lens/`. The Web Lens frontend is a static bundle
+that only consumes JSON, so the real dashboard can run on Pages against canned
+snapshots captured from `--mock` — visitors click through all six lenses with
+no backend. Deployed by a `pages.yml` workflow (`actions/deploy-pages`);
+independent of the release pipeline and of the binary-embedded bundle.
+
+- [x] **Demo build mode** — a second frontend build (`dist-demo/`, base
+  `/pg_lens/demo/`) whose entry stubs `EventSource`/`fetch` over committed
+  snapshot fixtures generated from `pg_lens --mock serve`. Must not alter the
+  production build embedded via rust-embed (absolute `/assets/` at site root).
+  Visible "demo — canned data" badge; POST actions no-op with a toast.
+- [x] **Landing page** — static HTML/CSS reusing the v0.13 design tokens
+  (dark/light, severity colors, inline SVG icons): hero with the demo gif,
+  CTAs (live demo / install / GitHub), feature tour, install tabs
+  (brew/cargo/binaries), docs links.
+- [x] **Docs pages** — render `docs/connection-user.md` and `CHANGELOG.md` to
+  styled HTML at build time (build-time devDependency only — never in the
+  embedded bundle).
+- [x] **`pages.yml` workflow** — build demo + landing, assemble `_site/`,
+  `upload-pages-artifact` + `deploy-pages` on push to main + manual dispatch.
+  Repo setting required: Settings → Pages → Source: GitHub Actions.
+
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
 - [ ] **I/O profile** — `pg_stat_io` (PG 16+ only), backend_type × context
