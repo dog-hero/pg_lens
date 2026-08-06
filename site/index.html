@@ -245,6 +245,21 @@
           <p class="lede">Every command below is the one from the project README.</p>
           <div class="install-grid">
             <article class="card">
+              <h3>One-liner (macOS / Linux)</h3>
+<pre><code>curl -fsSL https://dog-hero.github.io/pg_lens/install.sh | sh
+
+# or read it first:
+curl -fsSL https://dog-hero.github.io/pg_lens/install.sh -o install.sh
+less install.sh &amp;&amp; sh install.sh</code></pre>
+              <p>
+                Verifies the published SHA-256 checksum, installs into
+                <code>~/.local/bin</code>, needs no sudo. macOS (arm64/x86_64) and Linux musl
+                (x86_64/aarch64). Re-run it to upgrade;
+                <code>PG_LENS_VERSION</code>, <code>PG_LENS_INSTALL_DIR</code> and
+                <code>--dry-run</code> are supported.
+              </p>
+            </article>
+            <article class="card">
               <h3>Homebrew (macOS / Linux)</h3>
 <pre><code># macOS — cask (prebuilt binary, no Xcode/CLT required):
 brew install --cask dog-hero/tap/pg_lens
@@ -264,9 +279,13 @@ cargo binstall pg_lens_tui  # prebuilt binary, no compile</code></pre>
             </article>
             <article class="card">
               <h3>Prebuilt binaries</h3>
-<pre><code># replace v0.15.0 with the latest tag
-curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.15.0/pg_lens-v0.15.0-aarch64-apple-darwin.tar.gz | tar xz
-./pg_lens-v0.15.0-aarch64-apple-darwin/pg_lens --mock</code></pre>
+<pre><code># TAG = any tag from the releases page
+curl -L https://github.com/dog-hero/pg_lens/releases/download/$TAG/pg_lens-$TAG-aarch64-apple-darwin.tar.gz | tar xz
+./pg_lens-$TAG-aarch64-apple-darwin/pg_lens --mock</code></pre>
+              <p>
+                Or just use the one-liner above, which resolves the tag and checks the
+                checksum for you.
+              </p>
               <p>
                 Archives for macOS and Linux (amd64 + arm64) on the
                 <a href="https://github.com/dog-hero/pg_lens/releases">releases page</a>, plus

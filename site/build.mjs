@@ -165,6 +165,10 @@ async function main() {
   await cp(join(siteDir, "styles.css"), join(out, "styles.css"));
   await cp(join(siteDir, "theme.js"), join(out, "theme.js"));
 
+  // The `curl | sh` installer, served from /pg_lens/install.sh. A build-time
+  // copy of scripts/install.sh — never a second maintained copy.
+  await cp(join(repo, "scripts", "install.sh"), join(out, "install.sh"));
+
   // Images referenced by the landing page.
   for (const img of ["demo.gif", "web-dashboard.png"]) {
     await cp(join(repo, "docs", img), join(out, "assets", img));

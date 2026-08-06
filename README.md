@@ -166,6 +166,35 @@ Web Lens dashboard running on recorded data (no database required).
 
 ## Installation
 
+### One-liner (macOS / Linux)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dog-hero/pg_lens/main/scripts/install.sh | sh
+
+# or read it first — it is short and unminified on purpose:
+curl -fsSL https://raw.githubusercontent.com/dog-hero/pg_lens/main/scripts/install.sh -o install.sh && less install.sh && sh install.sh
+```
+
+It resolves the latest release, downloads the archive for your platform,
+**verifies it against the published SHA-256 checksum** (every release asset
+ships a `.sha256` sidecar) and installs the binary into `~/.local/bin` —
+**no sudo**, and it never edits your shell rc file (it prints the `export
+PATH=...` line for you to add). Re-running it is the upgrade path: it
+prints the old → new version.
+
+| Knob | Env var | Flag |
+| --- | --- | --- |
+| Pin a version | `PG_LENS_VERSION=v0.15.0` | `--version v0.15.0` |
+| Install elsewhere | `PG_LENS_INSTALL_DIR=/opt/bin` | `--dir /opt/bin` |
+| Preview only | — | `--dry-run` (prints the resolved version, URLs and target path, downloads nothing) |
+
+Covers macOS (arm64, x86_64) and Linux musl (x86_64, aarch64). On any
+other platform it exits with an error naming the detected os/arch — use
+[Homebrew](#homebrew-macos--linux), the [deb/rpm
+packages](#deb--rpm-linux-servers), [Cargo](#cargo-cratesio) or a [source
+build](#from-source) instead. The same script is also served from
+<https://dog-hero.github.io/pg_lens/install.sh>.
+
 ### Homebrew (macOS / Linux)
 
 ```sh
@@ -193,15 +222,20 @@ xattr -d com.apple.quarantine "$(brew --prefix)/bin/pg_lens"
 
 ### Prebuilt binaries (releases)
 
-Download the archive for your platform from the
-[releases page](https://github.com/dog-hero/pg_lens/releases). On macOS,
-prefer `curl` — browser downloads get the quarantine attribute and
+Prefer the [one-liner](#one-liner-macos--linux) — it picks the right
+archive, checks the checksum and installs it for you. To do it by hand,
+download the archive for your platform from the [releases
+page](https://github.com/dog-hero/pg_lens/releases). Assets are named
+`pg_lens-<tag>-<target>.tar.gz` (plus a `.sha256` sidecar) and unpack
+into a directory of the same name containing the `pg_lens` binary. On
+macOS prefer `curl` — browser downloads get the quarantine attribute and
 Gatekeeper will refuse to run the unsigned binary:
 
 ```sh
-# macOS (Apple Silicon) — replace v0.15.0 with the latest tag from the releases page
-curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.15.0/pg_lens-v0.15.0-aarch64-apple-darwin.tar.gz | tar xz
-./pg_lens-v0.15.0-aarch64-apple-darwin/pg_lens --mock
+# macOS (Apple Silicon); TAG is any tag from the releases page
+TAG=$(curl -fsSL https://api.github.com/repos/dog-hero/pg_lens/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+curl -L "https://github.com/dog-hero/pg_lens/releases/download/$TAG/pg_lens-$TAG-aarch64-apple-darwin.tar.gz" | tar xz
+"./pg_lens-$TAG-aarch64-apple-darwin/pg_lens" --mock
 ```
 
 If you already downloaded it with a browser and macOS says the app
