@@ -9,6 +9,13 @@
 node_modules/
 crates/pg_lens_web/frontend/dist/
 
+# --- GitHub Pages site (built by .github/workflows/pages.yml) ---
+# `demo.html` is generated from index.html by scripts/gen-demo-html.mjs;
+# `dist-demo/` is the demo bundle; `_site/` is the assembled Pages artifact.
+crates/pg_lens_web/frontend/demo.html
+crates/pg_lens_web/frontend/dist-demo/
+/_site/
+
 # --- Python tooling (e2e harnesses) ---
 __pycache__/
 *.pyc

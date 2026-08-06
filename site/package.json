@@ -1,0 +1,13 @@
+{
+  "name": "pg_lens-site",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "GitHub Pages site for pg_lens (landing page + rendered docs). Build-time only.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "marked": "^16.4.1"
+  }
+}

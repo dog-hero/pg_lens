@@ -1,0 +1,77 @@
+name: Pages
+
+# Builds and deploys the project site at https://dog-hero.github.io/pg_lens/
+#   - landing page + rendered docs   (site/)
+#   - the live Web Lens demo         (crates/pg_lens_web/frontend, `--mode demo`)
+#
+# Deliberately independent of ci.yml / release.yml: nothing here builds Rust,
+# and the demo build writes to `dist-demo/`, never the embedded `dist/`.
+#
+# One-time repo setup: Settings → Pages → "Build and deployment" → Source:
+# "GitHub Actions". Without that, `deploy-pages` fails.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "crates/pg_lens_web/frontend/**"
+      - "docs/**"
+      - "CHANGELOG.md"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            crates/pg_lens_web/frontend/package-lock.json
+            site/package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: crates/pg_lens_web/frontend
+
+      - name: Build the Web Lens demo bundle
+        run: npm run build:demo
+        working-directory: crates/pg_lens_web/frontend
+
+      - name: Install site build deps
+        run: npm ci
+        working-directory: site
+
+      - name: Assemble _site
+        run: npm run build
+        working-directory: site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

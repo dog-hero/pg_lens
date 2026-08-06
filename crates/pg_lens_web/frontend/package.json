@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test src/*.test.ts",
     "build": "tsc --noEmit && vite build",
+    "build:demo": "node scripts/gen-demo-html.mjs && tsc --noEmit && vite build --mode demo",
     "preview": "vite preview"
   },
   "dependencies": {

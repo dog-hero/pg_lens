@@ -13,6 +13,10 @@ and [btop](https://github.com/aristocratos/btop), built in Rust with
 [ratatui](https://ratatui.rs) for minimal overhead: a **~4 MiB static
 binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 
+**Project site:** <https://dog-hero.github.io/pg_lens/> — landing page, docs,
+and a [live interactive demo](https://dog-hero.github.io/pg_lens/demo/) of the
+Web Lens dashboard running on recorded data (no database required).
+
 ![pg_lens TUI demo](docs/demo.gif)
 
 <details>

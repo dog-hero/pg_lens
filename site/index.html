@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>pg_lens — a microscopic view into your PostgreSQL performance</title>
+    <meta
+      name="description"
+      content="pg_lens is a blazing-fast TUI and web dashboard for live PostgreSQL observability: activity, schema, indexes, statements, replication and vacuum health in a single static binary."
+    />
+    <meta property="og:title" content="pg_lens — live PostgreSQL observability" />
+    <meta
+      property="og:description"
+      content="A blazing-fast, modern TUI for PostgreSQL observability, with a matching web dashboard. Try the live demo."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="assets/web-dashboard.png" />
+    <link rel="stylesheet" href="styles.css" />
+    <script>
+      // Same storage key and dark-by-default rule as the dashboard
+      // (crates/pg_lens_web/frontend/src/theme.ts) so a visitor's choice
+      // carries across the landing page, the docs and the demo.
+      try {
+        var t = localStorage.getItem("pg_lens_theme");
+        document.documentElement.dataset.theme = t === "light" ? "light" : "dark";
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <svg aria-hidden="true" style="position: absolute; width: 0; height: 0; overflow: hidden">
+      <symbol id="icon-lens" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2" />
+        <line x1="16.2" y1="16.2" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
+      <symbol id="icon-activity" viewBox="0 0 24 24">
+        <polyline points="2,13 7,13 9.5,6 14.5,20 17,13 22,13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
+      <symbol id="icon-replication" viewBox="0 0 24 24">
+        <circle cx="6" cy="6" r="2.5" fill="none" stroke="currentColor" stroke-width="2" />
+        <circle cx="6" cy="18" r="2.5" fill="none" stroke="currentColor" stroke-width="2" />
+        <circle cx="18" cy="12" r="2.5" fill="none" stroke="currentColor" stroke-width="2" />
+        <path d="M8 7 L16 11 M8 17 L16 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
+      <symbol id="icon-schema" viewBox="0 0 24 24">
+        <ellipse cx="12" cy="5.5" rx="8" ry="3" fill="none" stroke="currentColor" stroke-width="2" />
+        <path d="M4 5.5 V12 C4 13.7 7.6 15 12 15 C16.4 15 20 13.7 20 12 V5.5" fill="none" stroke="currentColor" stroke-width="2" />
+        <path d="M4 12 V18.5 C4 20.2 7.6 21.5 12 21.5 C16.4 21.5 20 20.2 20 18.5 V12" fill="none" stroke="currentColor" stroke-width="2" />
+      </symbol>
+      <symbol id="icon-indexes" viewBox="0 0 24 24">
+        <circle cx="10" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="2" />
+        <line x1="14.5" y1="14.5" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
+      <symbol id="icon-queries" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+        <polyline points="7,9 10,12 7,15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        <line x1="12" y1="15" x2="17" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
+      <symbol id="icon-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2" />
+        <g stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <line x1="12" y1="1.5" x2="12" y2="4.5" /><line x1="12" y1="19.5" x2="12" y2="22.5" />
+          <line x1="1.5" y1="12" x2="4.5" y2="12" /><line x1="19.5" y1="12" x2="22.5" y2="12" />
+          <line x1="4.6" y1="4.6" x2="6.7" y2="6.7" /><line x1="17.3" y1="17.3" x2="19.4" y2="19.4" />
+          <line x1="4.6" y1="19.4" x2="6.7" y2="17.3" /><line x1="17.3" y1="6.7" x2="19.4" y2="4.6" />
+        </g>
+      </symbol>
+      <symbol id="icon-moon" viewBox="0 0 24 24">
+        <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.8 6.8 0 0 0 10.5 10.5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+      </symbol>
+      <symbol id="icon-github" viewBox="0 0 24 24">
+        <path fill="currentColor" d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.04 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75.12 3.04.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.4-5.25 5.69.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z" />
+      </symbol>
+      <symbol id="icon-play" viewBox="0 0 24 24">
+        <polygon points="7,4 20,12 7,20" fill="currentColor" />
+      </symbol>
+      <symbol id="icon-download" viewBox="0 0 24 24">
+        <path d="M12 3v11m0 0 4.5-4.5M12 14l-4.5-4.5M4 19h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
+    </svg>
+
+    <header class="site-top">
+      <div class="wrap">
+        <a class="brand" href="./">
+          <svg aria-hidden="true"><use href="#icon-lens"></use></svg>
+          pg_lens
+        </a>
+        <nav>
+          <a href="#features">Features</a>
+          <a href="#install">Install</a>
+          <a href="#docs">Docs</a>
+          <a href="./demo/">Live demo</a>
+          <a href="https://github.com/dog-hero/pg_lens">GitHub</a>
+          <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle light / dark theme" title="Toggle light / dark theme">
+            <svg aria-hidden="true"><use id="theme-icon" href="#icon-moon"></use></svg>
+          </button>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <div class="hero wrap">
+        <h1>pg_lens 🔬🐘</h1>
+        <p class="tagline">A blazing-fast, modern TUI for PostgreSQL observability.</p>
+        <p class="sub">
+          <em>A microscopic view into your PostgreSQL performance.</em> pg_lens connects to a
+          running PostgreSQL server (13+) and renders live activity in your terminal — or in a
+          browser, via the built-in Web Lens dashboard. Inspired by
+          <a href="https://github.com/dalibo/pg_activity">pg_activity</a> and
+          <a href="https://github.com/aristocratos/btop">btop</a>, built in Rust with
+          <a href="https://ratatui.rs">ratatui</a>.
+        </p>
+        <div class="badges">
+          <span class="pill">MIT licensed</span>
+          <span class="pill">PostgreSQL 13+</span>
+          <span class="pill">Rust 2024 edition</span>
+          <span class="pill">~4 MiB static binary</span>
+          <span class="pill">~7 MB RSS while monitoring</span>
+        </div>
+        <div class="cta-row">
+          <a class="btn primary" href="./demo/">
+            <svg aria-hidden="true"><use href="#icon-play"></use></svg>
+            Try the live demo
+          </a>
+          <a class="btn" href="#install">
+            <svg aria-hidden="true"><use href="#icon-download"></use></svg>
+            Install
+          </a>
+          <a class="btn" href="https://github.com/dog-hero/pg_lens">
+            <svg aria-hidden="true"><use href="#icon-github"></use></svg>
+            GitHub
+          </a>
+        </div>
+        <figure class="shot">
+          <img src="assets/demo.gif" alt="pg_lens TUI recording: live activity, vitals and lenses in a terminal" width="1200" />
+          <figcaption>The TUI: instance vitals, per-backend activity, and six lenses — all in a terminal.</figcaption>
+        </figure>
+      </div>
+
+      <section id="features">
+        <div class="wrap">
+          <h2>Six lenses over one connection</h2>
+          <p class="lede">
+            Every lens is a focused view over the same live snapshot. Press <code>1</code>–<code>6</code>
+            in the TUI to jump straight to one; the Web Lens merges Macro and Micro into a single
+            Activity tab.
+          </p>
+          <div class="grid">
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-activity"></use></svg> Macro Lens</h3>
+              <p>
+                Instance vitals at a glance: connection saturation gauge, TPS with scrolling
+                sparkline history, cache hit ratio, active sessions, deadlocks and temp-file
+                counters, server uptime — plus a lock-table pressure gauge that turns yellow/red
+                before you hit “out of shared memory”.
+              </p>
+            </article>
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-lens"></use></svg> Micro Lens</h3>
+              <p>
+                Per-backend activity: state, wait events, running duration, and a status marker for
+                <strong>blocked</strong> (<code>B</code>) and <strong>waiting</strong>
+                (<code>W</code>) sessions, powered by <code>pg_locks</code> +
+                <code>pg_blocking_pids()</code>. <code>Enter</code> opens the full SQL and the
+                blocking chain (<code>A→B→C</code>, root blocker highlighted).
+              </p>
+            </article>
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-schema"></use></svg> Schema Lens</h3>
+              <p>
+                Per-table <code>pg_stat_user_tables</code> counters and on-disk sizes on a separate
+                slow cadence (default 60s), an honest <code>N of M tables</code> count, partitioned
+                tables collapsed into one parent row, a <code>Δ1h</code> size-growth column, and
+                <code>Enter</code> for the full table structure — psql’s <code>\d</code>, in
+                pg_lens’s own style.
+              </p>
+              <p>Estimated bloat is on-demand only: the queries are heavy, so they run when you press <code>R</code>.</p>
+            </article>
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-queries"></use></svg> Query Lens</h3>
+              <p>
+                Top normalized statements from <code>pg_stat_statements</code>: calls, total/mean
+                time, rows, shared-buffer hit%, a temp-spill column and a full I/O breakdown in the
+                detail panel. When the extension is missing or older than 1.8, the lens shows the
+                exact <code>CREATE EXTENSION</code> steps instead of an error.
+              </p>
+            </article>
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-indexes"></use></svg> Index Lens</h3>
+              <p>
+                A severity-ranked advisor for unused, duplicate and prefix-redundant indexes, with
+                the verbatim <code>CREATE INDEX</code> as evidence and the stats-reset age in the
+                footer. Also flags <code>INVALID</code> indexes left behind by a failed
+                <code>CREATE INDEX CONCURRENTLY</code>.
+              </p>
+            </article>
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-replication"></use></svg> Replication Lens</h3>
+              <p>
+                Every WAL sender/receiver (<code>pg_stat_replication</code> state, sync mode, replay
+                lag in bytes and time) and every replication slot (active/inactive, retained WAL,
+                <code>wal_status</code>, safe WAL size), with tiered yellow/red severity.
+              </p>
+            </article>
+          </div>
+
+          <h2 style="margin-top: 2.5rem">And the things that catch incidents</h2>
+          <ul class="checks">
+            <li><strong>Problem-transaction hunting</strong> — transaction-age column and headline for the oldest <code>idle in transaction</code> session, blocking chains with deadlock-cycle warning, and an orphaned two-phase-commit watch: the usual causes of XID wraparound and lock pile-ups.</li>
+            <li><strong>Idle connection / connection-age census</strong> — the sessions the activity table normally filters out, ranked oldest-first: the diagnostic for the classic pool-exhaustion incident.</li>
+            <li><strong>Vacuum health &amp; XID wraparound</strong> — cluster and per-table vacuum age, live vacuum progress, and prepared-transaction watch.</li>
+            <li><strong>Vitals trend arrows</strong> — Connections, Cache hit and Lock table compare against ~5 minutes ago with a 5% deadband, tinted only when the direction is the concerning one.</li>
+            <li><strong>History time-scrubber</strong> (Web Lens) — hover the chart for that moment’s vitals, click to pin it, <code>←</code>/<code>→</code> to step tick-by-tick.</li>
+            <li><strong>Resilient by design</strong> — if the database goes down you get an error banner, the last known data stays on screen, and pg_lens reconnects with backoff. The UI never blocks on the database.</li>
+            <li><strong>Read-only mode</strong> — <code>--read-only</code> hard-disables cancel/terminate and the web admin endpoints server-side, not just in the UI.</li>
+            <li><strong>Version-aware queries</strong> — dedicated query sets for PostgreSQL 13, 14+ and 16+.</li>
+            <li><strong>Single static binary</strong> — no runtime, no dependencies; musl builds run on any Linux, including Alpine containers.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="web">
+        <div class="wrap">
+          <h2>The Web Lens dashboard</h2>
+          <p class="lede">
+            <code>pg_lens serve</code> starts an HTTP server that streams the same snapshots over
+            SSE to a browser: sidenav, database switcher, light/dark theme, full keyboard
+            navigation, and optional bearer-token auth. The dashboard is embedded in the binary —
+            nothing to deploy alongside it.
+          </p>
+          <figure class="shot">
+            <img src="assets/web-dashboard.png" alt="pg_lens Web Lens dashboard screenshot" width="1400" />
+            <figcaption>
+              The Web Lens dashboard. The
+              <a href="./demo/">live demo</a> is this exact frontend, replaying a recorded snapshot
+              sequence.
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="install">
+        <div class="wrap">
+          <h2>Install</h2>
+          <p class="lede">Every command below is the one from the project README.</p>
+          <div class="install-grid">
+            <article class="card">
+              <h3>Homebrew (macOS / Linux)</h3>
+<pre><code># macOS — cask (prebuilt binary, no Xcode/CLT required):
+brew install --cask dog-hero/tap/pg_lens
+
+# Linux (Homebrew on Linux) — formula:
+brew install dog-hero/tap/pg_lens</code></pre>
+              <p>
+                On macOS prefer the cask: plain formulas trip Homebrew’s source-build preflight, and
+                the cask clears the Gatekeeper quarantine attribute itself.
+              </p>
+            </article>
+            <article class="card">
+              <h3>Cargo (crates.io)</h3>
+<pre><code>cargo install pg_lens_tui   # compiles; installs the `pg_lens` binary
+cargo binstall pg_lens_tui  # prebuilt binary, no compile</code></pre>
+              <p>The published crate carries the built web dashboard, so <code>cargo install</code> needs no Node toolchain.</p>
+            </article>
+            <article class="card">
+              <h3>Prebuilt binaries</h3>
+<pre><code># replace v0.15.0 with the latest tag
+curl -L https://github.com/dog-hero/pg_lens/releases/download/v0.15.0/pg_lens-v0.15.0-aarch64-apple-darwin.tar.gz | tar xz
+./pg_lens-v0.15.0-aarch64-apple-darwin/pg_lens --mock</code></pre>
+              <p>
+                Archives for macOS and Linux (amd64 + arm64) on the
+                <a href="https://github.com/dog-hero/pg_lens/releases">releases page</a>, plus
+                <code>.deb</code> and <code>.rpm</code> packages (package name <code>pg-lens</code>).
+              </p>
+            </article>
+            <article class="card">
+              <h3>From source</h3>
+<pre><code>git clone git@github.com:dog-hero/pg_lens.git
+cd pg_lens
+cargo build --release -p pg_lens_tui
+./target/release/pg_lens --mock   # instant demo, no database needed</code></pre>
+              <p>Requires Rust, edition 2024.</p>
+            </article>
+          </div>
+
+          <h2 style="margin-top: 2.5rem">Run it</h2>
+          <div class="install-grid">
+            <article class="card">
+              <h3>Terminal</h3>
+<pre><code>pg_lens --dsn "host=localhost user=postgres dbname=postgres"
+pg_lens --mock            # no database needed</code></pre>
+            </article>
+            <article class="card">
+              <h3>Web dashboard</h3>
+<pre><code>pg_lens serve --listen 127.0.0.1:8080</code></pre>
+              <p>
+                pg_lens refuses to bind a non-loopback address without
+                <code>PG_LENS_AUTH_TOKEN</code> set.
+              </p>
+            </article>
+          </div>
+          <p class="note" style="margin-top: 1.2rem">
+            Docker images on GHCR exist, but image publishing is currently <strong>paused</strong>
+            during active development — prefer the binaries or packages above.
+          </p>
+        </div>
+      </section>
+
+      <section id="docs">
+        <div class="wrap">
+          <h2>Documentation</h2>
+          <p class="lede">
+            The README on GitHub is the full reference — flags, config file, services file,
+            read-only mode, the <code>psql</code> shell, keyboard bindings and architecture. These
+            pages mirror the two documents people reach for most.
+          </p>
+          <div class="grid">
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-schema"></use></svg> Least-privilege monitoring user</h3>
+              <p>How to create a dedicated PostgreSQL role for pg_lens, what each grant buys you, and what degrades without it.</p>
+              <p><a href="docs/connection-user.html">Read the guide →</a></p>
+            </article>
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-activity"></use></svg> Changelog</h3>
+              <p>Every release, what shipped in it, and the breaking changes.</p>
+              <p><a href="docs/changelog.html">Read the changelog →</a></p>
+            </article>
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-github"></use></svg> Full README</h3>
+              <p>Quickstart, every CLI flag, connection resolution order, remote services file, Docker, architecture and contributing.</p>
+              <p><a href="https://github.com/dog-hero/pg_lens#readme">Open on GitHub →</a></p>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <span>MIT licensed · PostgreSQL 13+ · built with Rust and ratatui</span>
+        <nav>
+          <a href="./demo/">Live demo</a>
+          <a href="https://github.com/dog-hero/pg_lens">GitHub</a>
+          <a href="https://github.com/dog-hero/pg_lens/releases">Releases</a>
+          <a href="https://github.com/dog-hero/pg_lens/blob/main/LICENSE">License</a>
+        </nav>
+      </div>
+    </footer>
+
+    <script src="theme.js"></script>
+  </body>
+</html>

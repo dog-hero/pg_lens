@@ -1,0 +1,355 @@
+/* pg_lens project site — landing + docs.
+   The palette is the SAME token set the Web Lens dashboard ships in
+   crates/pg_lens_web/frontend/src/style.css (dark default, light opt-in via
+   `html[data-theme="light"]`, semantic ok/warn/bad severity tokens), so the
+   site and the app read as one product. Kept deliberately small: this file
+   only styles the marketing/doc chrome, never the app. */
+
+:root {
+  --bg: #0d1117;
+  --bg-panel: #161b22;
+  --bg-raised: #1c2129;
+  --bg-sunken: #090c10;
+  --border: #30363d;
+  --fg: #e6edf3;
+  --fg-dim: #8b949e;
+  --accent: #4fc3f7;
+  --accent-contrast: #06232f;
+
+  --ok: #7ee787;
+  --warn: #ffb74d;
+  --bad: #f47067;
+
+  --ok-bg: rgba(126, 231, 135, 0.1);
+  --warn-bg: rgba(255, 183, 77, 0.09);
+  --info-bg: rgba(79, 195, 247, 0.08);
+
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.24);
+
+  font-size: 16px;
+  color-scheme: dark;
+}
+
+html[data-theme="light"] {
+  --bg: #f6f8fa;
+  --bg-panel: #ffffff;
+  --bg-raised: #eef1f4;
+  --bg-sunken: #e7ebef;
+  --border: #d0d7de;
+  --fg: #1f2328;
+  --fg-dim: #59636e;
+  --accent: #0969da;
+  --accent-contrast: #ffffff;
+
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+
+  --ok-bg: rgba(26, 127, 55, 0.08);
+  --warn-bg: rgba(154, 103, 0, 0.09);
+  --info-bg: rgba(9, 105, 218, 0.07);
+
+  --shadow: 0 1px 2px rgba(31, 35, 40, 0.06), 0 8px 24px rgba(31, 35, 40, 0.08);
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); }
+
+code, pre, kbd {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
+
+code {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+pre {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.wrap {
+  width: min(1080px, 100% - 2.5rem);
+  margin-inline: auto;
+}
+
+/* ── top bar ────────────────────────────────────────────────────────────── */
+
+.site-top {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+
+.site-top .wrap {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-height: 56px;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.brand svg { width: 22px; height: 22px; color: var(--accent); }
+
+.site-top nav {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 1.1rem;
+  font-size: 0.92rem;
+}
+
+.site-top nav a { color: var(--fg-dim); text-decoration: none; }
+.site-top nav a:hover { color: var(--accent); }
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+.theme-toggle svg { width: 17px; height: 17px; }
+
+/* ── hero ───────────────────────────────────────────────────────────────── */
+
+.hero { padding: 4rem 0 2.5rem; text-align: center; }
+
+.hero h1 {
+  font-size: clamp(2.4rem, 6vw, 3.6rem);
+  margin: 0 0 0.4rem;
+  letter-spacing: -0.02em;
+}
+
+.hero .tagline {
+  font-size: clamp(1.05rem, 2.4vw, 1.35rem);
+  color: var(--fg);
+  margin: 0 0 0.4rem;
+  font-weight: 600;
+}
+
+.hero .sub {
+  color: var(--fg-dim);
+  max-width: 62ch;
+  margin: 0 auto 1.6rem;
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-bottom: 1.6rem;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--fg-dim);
+  font-size: 0.8rem;
+}
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-bottom: 2.5rem;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.62rem 1.25rem;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-decoration: none;
+  transition: border-color 0.15s, transform 0.15s;
+}
+.btn:hover { border-color: var(--accent); transform: translateY(-1px); }
+.btn svg { width: 17px; height: 17px; }
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+.btn.primary:hover { filter: brightness(1.08); }
+
+figure.shot {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+}
+
+figure.shot img { display: block; width: 100%; height: auto; }
+
+figure.shot figcaption {
+  padding: 0.6rem 1rem;
+  border-top: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+  text-align: left;
+}
+
+/* ── sections ───────────────────────────────────────────────────────────── */
+
+section { padding: 3rem 0; border-top: 1px solid var(--border); }
+section h2 { font-size: 1.7rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+section > .wrap > p.lede { color: var(--fg-dim); margin: 0 0 1.8rem; max-width: 70ch; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-panel);
+  padding: 1.1rem 1.2rem;
+}
+
+.card h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.5rem;
+  font-size: 1.02rem;
+}
+.card h3 svg { width: 18px; height: 18px; color: var(--accent); flex: none; }
+.card p { margin: 0; color: var(--fg-dim); font-size: 0.92rem; }
+.card p + p { margin-top: 0.5rem; }
+
+ul.checks { margin: 0; padding-left: 1.1rem; color: var(--fg-dim); }
+ul.checks li { margin-bottom: 0.5rem; }
+ul.checks strong { color: var(--fg); }
+
+.install-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
+}
+
+.install-grid h3 { margin: 0 0 0.6rem; font-size: 1rem; }
+.install-grid .card pre { margin: 0; }
+.install-grid .card p { margin-top: 0.6rem; font-size: 0.85rem; }
+
+.note {
+  border-left: 3px solid var(--warn);
+  background: var(--warn-bg);
+  padding: 0.7rem 1rem;
+  border-radius: 0 8px 8px 0;
+  color: var(--fg-dim);
+  font-size: 0.9rem;
+}
+
+/* ── footer ─────────────────────────────────────────────────────────────── */
+
+footer {
+  border-top: 1px solid var(--border);
+  padding: 2rem 0 3rem;
+  color: var(--fg-dim);
+  font-size: 0.88rem;
+}
+footer .wrap { display: flex; flex-wrap: wrap; gap: 0.6rem 1.2rem; align-items: center; }
+footer nav { margin-left: auto; display: flex; gap: 1.1rem; flex-wrap: wrap; }
+footer a { color: var(--fg-dim); text-decoration: none; }
+footer a:hover { color: var(--accent); }
+
+/* ── rendered markdown (docs pages) ─────────────────────────────────────── */
+
+.doc { padding: 2.5rem 0 4rem; }
+.doc .wrap { width: min(820px, 100% - 2.5rem); }
+.doc h1 { font-size: 2rem; margin-top: 0; letter-spacing: -0.02em; }
+.doc h2 {
+  font-size: 1.4rem;
+  margin-top: 2.2rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--border);
+}
+.doc h3 { font-size: 1.1rem; margin-top: 1.6rem; }
+.doc table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.92rem; }
+.doc th, .doc td { border: 1px solid var(--border); padding: 0.45rem 0.7rem; text-align: left; }
+.doc th { background: var(--bg-raised); }
+.doc blockquote {
+  margin: 1rem 0;
+  padding: 0.6rem 1rem;
+  border-left: 3px solid var(--accent);
+  background: var(--info-bg);
+  border-radius: 0 8px 8px 0;
+  color: var(--fg-dim);
+}
+.doc img { max-width: 100%; }
+.doc hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+
+.doc-back {
+  display: inline-block;
+  margin-bottom: 1.2rem;
+  color: var(--fg-dim);
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+.doc-back:hover { color: var(--accent); }
