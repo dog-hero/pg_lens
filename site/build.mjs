@@ -119,10 +119,6 @@ ${body}
 `;
 }
 
-/** Point the docs' repo-relative markdown links at the right place: a link
- * from one rendered document to another becomes a sibling `.html` page,
- * everything else (the README) goes to GitHub — it does not exist in
- * `_site/`. */
 /** `marked` does not emit heading ids, so in-page anchors (`#some-heading`)
  * would dead-link. Inject GitHub-style slugs: lowercase, drop anything that
  * is not alphanumeric/space/hyphen, spaces to hyphens (consecutive spaces
@@ -143,6 +139,10 @@ function addHeadingIds(html) {
   );
 }
 
+/** Point the docs' repo-relative markdown links at the right place: a link
+ * from one rendered document to another becomes a sibling `.html` page,
+ * everything else (the README) goes to GitHub — it does not exist in
+ * `_site/`. */
 function rewriteLinks(md) {
   let text = md
     .replace(/\]\(\.\.\/README\.md/g, `](${REPO_BLOB}/README.md`)
