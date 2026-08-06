@@ -242,6 +242,45 @@ independent of the release pipeline and of the binary-embedded bundle.
   `upload-pages-artifact` + `deploy-pages` on push to main + manual dispatch.
   Repo setting required: Settings → Pages → Source: GitHub Actions.
 
+## v0.16 — "First impression" (in tree, unreleased — owner-selected 2026-08-06)
+
+Onboarding + the two adjacent stat views a fresh install benefits from
+immediately, plus two owner-requested UX items.
+
+- [x] **`curl | sh` install script** — `scripts/install.sh`: platform detection
+  (macOS arm64/x86_64, Linux musl x86_64/aarch64 — musl means no libc
+  detection), latest-version resolution via the GitHub API with
+  `PG_LENS_VERSION`/`--version` pinning, **SHA-256 verification against the
+  `.sha256` sidecars the release already publishes** (no release.yml change
+  needed), `~/.local/bin` default with no sudo and no rc-file editing,
+  `--dry-run`/`--help`, re-run-to-upgrade, loud failure on unpublished
+  platforms. Mirrored to the Pages site as a build-time copy.
+- [x] **Micro Lens row colors (pg_activity-style)** — whole-row color: one
+  color per session state (active/idle/idle-in-tx/aborted), overridden by
+  query duration (>30s red, >10s orange) **only for `active` rows** so an old
+  idle session is never mislabelled; blocked outranks both. Selection stays
+  unmistakable. SQL keyword highlighting moved out of the table row and kept
+  in the expanded detail. TUI + Web.
+- [x] **Copy to clipboard** — `y` copies the selected item (Micro: full query;
+  Query Lens: statement; Index Lens: `CREATE INDEX`; Schema: qualified name)
+  via **OSC 52**, which works over SSH and needs no dependency; the toast is
+  honest that the terminal may still refuse (Apple Terminal does not support
+  it). Web: copy buttons on the query details.
+- [x] **I/O profile — `pg_stat_io` (PG 16+)** — aggregated by
+  backend_type × context, all-zero rows filtered, per-second rates derived
+  from deltas with reset handling, timing `--` when `track_io_timing` is off.
+  Slow cadence; absent (not broken) on PG 13–15. Lives in the Macro Lens's
+  buffer/IO column, no seventh tab.
+- [x] **WAL generation rate (`pg_stat_wal`, PG 14+)** — WAL bytes/s and
+  records/s from deltas, plus `wal_buffers_full` tinted only while actively
+  climbing (a tuning nudge, not an incident). Fast tick (one tiny row, and the
+  rate is genuinely spiky). Replication Lens panel + a Macro Lens line;
+  absent on PG 13.
+- [x] **Shell completions** — `pg_lens completions <bash|zsh|fish|powershell|
+  elvish>` via `clap_complete`, handled before any DB/terminal work.
+  Documented in the README and suggested by the installer's post-install
+  banner.
+
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
 - [ ] **I/O profile** — `pg_stat_io` (PG 16+ only), backend_type × context
