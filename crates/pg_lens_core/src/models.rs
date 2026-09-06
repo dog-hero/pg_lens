@@ -76,6 +76,22 @@ pub struct DdlProgressRow {
     pub detail: String,
 }
 
+/// One in-flight maintenance or DDL operation (v0.17.1, Progress Lens).
+/// Unifies `pg_stat_progress_create_index`, `pg_stat_progress_vacuum`,
+/// `pg_stat_progress_cluster`, and `pg_stat_progress_analyze`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProgressUnifiedRow {
+    pub pid: i32,
+    pub command: String,
+    pub relation: String,
+    pub phase: String,
+    pub progress_pct: Option<f64>,
+    pub current_step: i64,
+    pub total_step: i64,
+    pub detail: String,
+    pub unit: String,
+}
+
 /// One blocked session from the blocking query (`pg_blocking_pids` based):
 /// which pid is blocked, by whom, and on what.
 #[derive(Clone, Debug, Serialize)]
@@ -434,7 +450,7 @@ pub struct DatabaseRow {
 
 /// One in-flight `pg_stat_progress_vacuum` row, F2. Collected on the FAST
 /// tick, best-effort (see [`DbSnapshot::vacuum_progress`]).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct VacuumProgressRow {
     pub pid: i32,
     /// Target relation name, or `"?"` if it was dropped mid-scan.
@@ -2559,11 +2575,73 @@ impl DbSnapshot {
             status: PollerStatus::Connecting,
         }
     }
+
+    /// Returns all in-flight maintenance and DDL operations from
+    /// `ddl_progress` and `vacuum_progress` as a unified, PID-sorted list (v0.17.1, Progress Lens).
+    pub fn unified_progress(&self) -> Vec<ProgressUnifiedRow> {
+        let mut out = Vec::new();
+        if let Some(ddl_list) = &self.ddl_progress {
+            for d in ddl_list {
+                out.push(ProgressUnifiedRow {
+                    pid: d.pid,
+                    command: d.command.clone(),
+                    relation: d.relation.clone(),
+                    phase: d.phase.clone(),
+                    progress_pct: d.progress_pct,
+                    current_step: d.current_step,
+                    total_step: d.total_step,
+                    detail: d.detail.clone(),
+                    unit: "steps".to_string(),
+                });
+            }
+        }
+        if let Some(vac_list) = &self.vacuum_progress {
+            for v in vac_list {
+                let pct = if v.heap_blks_total > 0 {
+                    Some((v.heap_blks_scanned as f64 / v.heap_blks_total as f64) * 100.0)
+                } else {
+                    None
+                };
+                let detail = if v.heap_blks_total > 0 {
+                    format!("heap blks: {} / {}", v.heap_blks_scanned, v.heap_blks_total)
+                } else {
+                    String::new()
+                };
+                out.push(ProgressUnifiedRow {
+                    pid: v.pid,
+                    command: "VACUUM".to_string(),
+                    relation: v.relation.clone(),
+                    phase: v.phase.clone(),
+                    progress_pct: pct,
+                    current_step: v.heap_blks_scanned,
+                    total_step: v.heap_blks_total,
+                    detail,
+                    unit: "blocks".to_string(),
+                });
+            }
+        }
+        out.sort_by_key(|r| r.pid);
+        out
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mock_snapshot_carries_unified_progress() {
+        let snapshot = DbSnapshot::mock();
+        let progress = snapshot.unified_progress();
+        assert_eq!(progress.len(), 2, "mock should contain vacuum and ddl progress");
+        // Sorted by PID: 4650 (VACUUM) and 4821 (CREATE INDEX CONCURRENTLY)
+        assert_eq!(progress[0].pid, 4650);
+        assert_eq!(progress[0].command, "VACUUM");
+        assert_eq!(progress[0].relation, "order_items");
+        assert_eq!(progress[1].pid, 4821);
+        assert_eq!(progress[1].command, "CREATE INDEX CONCURRENTLY");
+        assert_eq!(progress[1].relation, "orders");
+    }
 
     #[test]
     fn mock_snapshot_is_plausible() {

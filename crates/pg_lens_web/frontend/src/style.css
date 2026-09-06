@@ -1960,3 +1960,39 @@ td.actions {
   border-color: var(--accent);
   font-weight: 600;
 }
+
+/* Progress Lens (v0.17.1) */
+.progress-bar-wrap {
+  position: relative;
+  width: 140px;
+  height: 16px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.progress-bar-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--accent);
+  opacity: 0.6;
+  transition: width 0.2s ease;
+}
+
+.progress-bar-label {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  text-align: center;
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--fg);
+}
+

@@ -30,6 +30,7 @@ import { IndexAdvisor } from "./index-advisor";
 import { VacuumPanel } from "./vacuum-panel";
 import { StatementsLens } from "./statements";
 import { initBlocksLens } from "./blocks-lens";
+import { initProgressLens } from "./progress-lens";
 import { renderReplication } from "./replication";
 import { renderWaits, renderWaitsList } from "./waits";
 import { renderOldestXact } from "./xact_age";
@@ -244,6 +245,7 @@ const statementsLens = new StatementsLens(
 );
 
 const blocksLens = initBlocksLens(el<HTMLElement>("blocks-panel"));
+const progressLens = initProgressLens(el<HTMLElement>("progress-panel"));
 
 // Tab switcher (U1: top-level tabs, mirroring the TUI's lenses —
 // Macro/Micro stay merged into "Activity" here, vitals cards + chart stay
@@ -255,6 +257,7 @@ const tabs: Array<[HTMLButtonElement, HTMLElement]> = [
   [el<HTMLButtonElement>("tab-schema"), el<HTMLElement>("schema-panel")],
   [el<HTMLButtonElement>("tab-indexes"), el<HTMLElement>("indexes-panel")],
   [el<HTMLButtonElement>("tab-queries"), el<HTMLElement>("queries-panel")],
+  [el<HTMLButtonElement>("tab-progress"), el<HTMLElement>("progress-panel")],
 ];
 /** Switches to the tab whose button has `id === tabId` (no-op if unknown —
  * used by both the click handlers below and the `1`-`5` keyboard shortcuts). */
@@ -425,6 +428,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   vacuumPanel.update(snapshot.schema, snapshot.vacuum_progress, snapshot.prepared_xacts, snapshot.ddl_progress);
   statementsLens.update(snapshot.statements, snapshot.vitals.database);
   blocksLens.update(snapshot.blocking_tree, snapshot.active_locks);
+  progressLens.update(snapshot.ddl_progress, snapshot.vacuum_progress);
   announceAdmin(snapshot.last_admin_action);
   const v = snapshot.vitals;
   serverInfo.textContent = `PG ${v.server_version} · ${v.connections_total}/${v.max_connections} conns`;

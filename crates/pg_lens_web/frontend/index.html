@@ -116,6 +116,10 @@
           <rect x="7" y="13" width="10" height="2" />
         </g>
       </symbol>
+      <symbol id="icon-progress" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" />
+        <polyline points="12,7 12,12 15,15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
     </svg>
 
     <div id="app">
@@ -201,15 +205,20 @@
             <span class="nav-label">Queries</span>
             <span class="nav-key">6</span>
           </button>
+          <button id="tab-progress" class="nav-btn" role="tab" aria-selected="false" aria-controls="progress-panel">
+            <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-progress"></use></svg>
+            <span class="nav-label">Progress</span>
+            <span class="nav-key">7</span>
+          </button>
           <div class="sidenav-footer">
             <p class="legend">
               <span class="legend-item"><svg class="icon legend-dot ok" aria-hidden="true"><use href="#icon-dot"></use></svg>ok</span>
               <span class="legend-item"><svg class="icon legend-dot warn" aria-hidden="true"><use href="#icon-dot"></use></svg>warn</span>
               <span class="legend-item"><svg class="icon legend-dot bad" aria-hidden="true"><use href="#icon-dot"></use></svg>bad</span>
             </p>
-            <p class="kbd-hint" title="1-6 jump sections, / focuses the filter, Esc clears focus">
+            <p class="kbd-hint" title="1-7 jump sections, / focuses the filter, Esc clears focus">
               <svg class="icon" aria-hidden="true"><use href="#icon-keyboard"></use></svg>
-              <span><kbd>1</kbd>-<kbd>6</kbd> nav · <kbd>/</kbd> filter · <kbd>Esc</kbd> clear</span>
+              <span><kbd>1</kbd>-<kbd>7</kbd> nav · <kbd>/</kbd> filter · <kbd>Esc</kbd> clear</span>
             </p>
           </div>
         </nav>
@@ -371,6 +380,34 @@
             <div class="table-wrap">
               <table id="statements">
                 <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+          <section id="progress-panel" class="panel" role="tabpanel" hidden>
+            <h2>Progress <span class="panel-note">in-flight maintenance &amp; DDL</span></h2>
+            <input
+              id="progress-filter"
+              class="filter-input"
+              type="search"
+              placeholder="Filter by command, relation, phase or PID… (/)"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <p id="progress-placeholder" class="placeholder">No in-flight maintenance or DDL operations detected.</p>
+            <div class="table-wrap">
+              <table id="progress-table">
+                <thead>
+                  <tr>
+                    <th class="num">PID</th>
+                    <th>Command</th>
+                    <th>Relation</th>
+                    <th>Phase</th>
+                    <th>Progress</th>
+                    <th class="num">Step</th>
+                    <th>Detail</th>
+                  </tr>
+                </thead>
                 <tbody></tbody>
               </table>
             </div>

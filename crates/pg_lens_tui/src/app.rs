@@ -54,15 +54,18 @@ pub enum Tab {
     /// toggle into its own full-height tab.
     IndexLens,
     QueryLens,
+    /// In-flight maintenance and progress (v0.17.1): `pg_stat_progress_*`
+    /// (CREATE INDEX, VACUUM, CLUSTER, ANALYZE, REINDEX).
+    ProgressLens,
 }
 
 impl Tab {
     // v0.12: number-prefixed so the tab bar is self-documenting about the
-    // `1`-`7` direct-jump keys (see `handle_key`'s digit arm). The prefix is
+    // `1`-`8` direct-jump keys (see `handle_key`'s digit arm). The prefix is
     // additive on top of the original title text (never replaces it) so
     // every pre-existing `screen.contains("Macro Lens")`-style assertion
     // keeps matching unchanged.
-    pub const TITLES: [&'static str; 7] = [
+    pub const TITLES: [&'static str; 8] = [
         "1 Macro Lens",
         "2 Micro Lens",
         "3 Blocks & Locks Lens",
@@ -70,6 +73,7 @@ impl Tab {
         "5 Schema Lens",
         "6 Indexes",
         "7 Query Lens",
+        "8 Progress Lens",
     ];
 
     pub fn index(self) -> usize {
@@ -81,11 +85,12 @@ impl Tab {
             Tab::SchemaLens => 4,
             Tab::IndexLens => 5,
             Tab::QueryLens => 6,
+            Tab::ProgressLens => 7,
         }
     }
 
-    /// Inverse of [`Tab::index`] — used by the `1`-`7` direct-jump keys.
-    /// `None` for anything outside `0..7`.
+    /// Inverse of [`Tab::index`] — used by the `1`-`8` direct-jump keys.
+    /// `None` for anything outside `0..8`.
     pub fn from_index(index: usize) -> Option<Self> {
         match index {
             0 => Some(Tab::MacroLens),
@@ -95,6 +100,7 @@ impl Tab {
             4 => Some(Tab::SchemaLens),
             5 => Some(Tab::IndexLens),
             6 => Some(Tab::QueryLens),
+            7 => Some(Tab::ProgressLens),
             _ => None,
         }
     }
@@ -107,7 +113,8 @@ impl Tab {
             Tab::ReplicationLens => Tab::SchemaLens,
             Tab::SchemaLens => Tab::IndexLens,
             Tab::IndexLens => Tab::QueryLens,
-            Tab::QueryLens => Tab::MacroLens,
+            Tab::QueryLens => Tab::ProgressLens,
+            Tab::ProgressLens => Tab::MacroLens,
         }
     }
 
@@ -115,13 +122,14 @@ impl Tab {
     /// [`Tab::next`].
     pub fn prev(self) -> Self {
         match self {
-            Tab::MacroLens => Tab::QueryLens,
+            Tab::MacroLens => Tab::ProgressLens,
             Tab::MicroLens => Tab::MacroLens,
             Tab::BlocksLens => Tab::MicroLens,
             Tab::ReplicationLens => Tab::BlocksLens,
             Tab::SchemaLens => Tab::ReplicationLens,
             Tab::IndexLens => Tab::SchemaLens,
             Tab::QueryLens => Tab::IndexLens,
+            Tab::ProgressLens => Tab::QueryLens,
         }
     }
 }
@@ -555,6 +563,14 @@ pub struct App {
     pub blocks_locks_state: TableState,
     /// Blocks Lens active pane (v0.17: Tree vs Locks).
     pub blocks_active_pane: BlocksPane,
+    /// Progress Lens selection state (v0.17.1).
+    pub progress_table_state: TableState,
+    /// Filtered indices into `app.snapshot.unified_progress()` in display order (v0.17.1).
+    pub progress_row_order: Vec<usize>,
+    /// Search filter for the Progress Lens (v0.17.1, `/` edits, `\` clears).
+    pub progress_filter: String,
+    pub progress_filter_saved: String,
+    pub progress_filter_editing: bool,
     /// Whether the detail panel is open (Micro Lens: full query of the
     /// selected session; Schema Lens: full vacuum/analyze stats + index
     /// bloat of the selected table). While open: `j`/`k` still move the
@@ -753,6 +769,11 @@ impl App {
             blocks_tree_state: TableState::default().with_selected(0),
             blocks_locks_state: TableState::default().with_selected(0),
             blocks_active_pane: BlocksPane::default(),
+            progress_table_state: TableState::default().with_selected(0),
+            progress_row_order: Vec::new(),
+            progress_filter: String::new(),
+            progress_filter_saved: String::new(),
+            progress_filter_editing: false,
             detail_open: false,
             table_detail_scroll: 0,
             table_detail_request: None,
@@ -798,6 +819,7 @@ impl App {
         resort_indexes(&mut app);
         resort_replication(&mut app);
         resort_statements(&mut app);
+        resort_progress(&mut app);
         app
     }
 }
@@ -876,6 +898,14 @@ impl App {
         let idx = self.blocks_locks_state.selected()?;
         locks.get(idx)
     }
+
+    /// The Progress Lens row currently under the cursor (v0.17.1).
+    pub fn selected_progress_row(&self) -> Option<pg_lens_core::ProgressUnifiedRow> {
+        let display_idx = self.progress_table_state.selected()?;
+        let unified_idx = *self.progress_row_order.get(display_idx)?;
+        let items = self.snapshot.unified_progress();
+        items.get(unified_idx).cloned()
+    }
 }
 
 /// v0.16 (`y`): resolves the text `y` should copy for whatever the active
@@ -915,6 +945,14 @@ pub fn clipboard_text(app: &App) -> Option<String> {
                 app.selected_block_node().map(|n| n.query.clone())
             } else {
                 app.selected_active_lock().map(|l| l.query.clone())
+            }
+        }
+        Tab::ProgressLens => {
+            let row = app.selected_progress_row()?;
+            if let Some(session) = app.snapshot.activity.iter().find(|a| a.pid == row.pid) {
+                Some(session.query.clone())
+            } else {
+                Some(format!("{} on {}", row.command, row.relation))
             }
         }
         _ => None,
@@ -1005,6 +1043,7 @@ fn apply_snapshot(app: &mut App, snapshot: Arc<DbSnapshot>) {
     resort_indexes(app);
     resort_replication(app);
     resort_statements(app);
+    resort_progress(app);
     clamp_selection(app);
 }
 
@@ -1192,6 +1231,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 || (app.active_tab == Tab::QueryLens && app.selected_statement().is_some())
                 || (app.active_tab == Tab::BlocksLens
                     && (app.selected_block_node().is_some() || app.selected_active_lock().is_some()))
+                || (app.active_tab == Tab::ProgressLens && app.selected_progress_row().is_some())
             {
                 app.detail_open = true;
                 // v0.15: fires the on-demand `\d` request (Schema Lens Tables
@@ -1223,7 +1263,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // earlier in this function), so it can never hijack a digit typed
         // into the filter editor or a confirm-modal keystroke. A no-op if
         // already on that tab (nothing to remember as "previous").
-        KeyCode::Char(c @ '1'..='7') => {
+        KeyCode::Char(c @ '1'..='8') => {
             if let Some(tab) = Tab::from_index(c as usize - '1' as usize)
                 && tab != app.active_tab
             {
@@ -1269,13 +1309,17 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.statements_filter_saved = app.statements_filter.clone();
             app.statements_filter_editing = true;
         }
+        KeyCode::Char('/') if app.active_tab == Tab::ProgressLens => {
+            app.progress_filter_saved = app.progress_filter.clone();
+            app.progress_filter_editing = true;
+        }
         // v0.12: `\` clears the ACTIVE lens's committed filter in one key —
         // inert when there is nothing to clear (empty filter) or while
         // editing (Esc already reverts there). Chosen over `Esc` (already
         // overloaded: closes overlays, then arms the quit barrier — adding
         // a THIRD meaning would make a stray Esc unpredictable) and over a
         // digit/letter already claimed by v0.12's own navigation batch
-        // (`1`-`6`, `g`/`G`, Backspace, BackTab) or by an existing lens key
+        // (`1`-`8`, `g`/`G`, Backspace, BackTab) or by an existing lens key
         // (`c`/`d`/`s`/`v`/`w`/`I`/`R`/`K`/`!`/`?`). `\` is unused anywhere
         // in `handle_key` and reads naturally as "cancel/undo the slash".
         KeyCode::Char('\\') => match app.active_tab {
@@ -1296,6 +1340,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             Tab::QueryLens if !app.statements_filter.is_empty() => {
                 app.statements_filter.clear();
                 resort_statements(app);
+                clamp_selection(app);
+            }
+            Tab::ProgressLens if !app.progress_filter.is_empty() => {
+                app.progress_filter.clear();
+                resort_progress(app);
                 clamp_selection(app);
             }
             _ => {}
@@ -1550,6 +1599,16 @@ fn open_confirm(app: &mut App, terminate: bool) {
             let Some(lock) = app.selected_active_lock() else { return; };
             (lock.pid, lock.usename.clone(), app.snapshot.vitals.database.clone())
         }
+    } else if app.active_tab == Tab::ProgressLens {
+        let Some(progress) = app.selected_progress_row() else { return; };
+        let (username, database) = app
+            .snapshot
+            .activity
+            .iter()
+            .find(|a| a.pid == progress.pid)
+            .map(|a| (a.username.clone(), a.database.clone()))
+            .unwrap_or_else(|| ("postgres".to_string(), app.snapshot.vitals.database.clone()));
+        (progress.pid, username, database)
     } else {
         return;
     };
@@ -1699,11 +1758,12 @@ enum FilterLens {
     Micro,
     Schema,
     Query,
+    Progress,
 }
 
 /// `None` when no filter is being edited — defensive; `handle_key` only
 /// routes into [`handle_filter_key`] when at least one `*_filter_editing`
-/// flag is set, and the three flags are mutually exclusive by construction
+/// flag is set, and the flags are mutually exclusive by construction
 /// (only one `/` arm can fire per keypress, each setting exactly one).
 fn active_filter_lens(app: &App) -> Option<FilterLens> {
     if app.filter_editing {
@@ -1712,6 +1772,8 @@ fn active_filter_lens(app: &App) -> Option<FilterLens> {
         Some(FilterLens::Schema)
     } else if app.statements_filter_editing {
         Some(FilterLens::Query)
+    } else if app.progress_filter_editing {
+        Some(FilterLens::Progress)
     } else {
         None
     }
@@ -1725,11 +1787,12 @@ fn resort_for(app: &mut App, lens: FilterLens) {
         FilterLens::Micro => resort(app),
         FilterLens::Schema => resort_schema(app),
         FilterLens::Query => resort_statements(app),
+        FilterLens::Progress => resort_progress(app),
     }
 }
 
 /// Keymap while editing ANY lens's filter (`app.filter_editing` /
-/// `schema_filter_editing` / `statements_filter_editing` — exactly one is
+/// `schema_filter_editing` / `statements_filter_editing` / `progress_filter_editing` — exactly one is
 /// true when this is reached): every printable char edits that lens's own
 /// filter live (its table re-filters on each keystroke), Backspace deletes,
 /// Enter commits (keeps the text, stops editing), Esc reverts to what the
@@ -1749,6 +1812,7 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
             FilterLens::Micro => app.filter_editing = false,
             FilterLens::Schema => app.schema_filter_editing = false,
             FilterLens::Query => app.statements_filter_editing = false,
+            FilterLens::Progress => app.progress_filter_editing = false,
         },
         KeyCode::Esc => {
             match lens {
@@ -1763,6 +1827,10 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
                 FilterLens::Query => {
                     app.statements_filter = std::mem::take(&mut app.statements_filter_saved);
                     app.statements_filter_editing = false;
+                }
+                FilterLens::Progress => {
+                    app.progress_filter = std::mem::take(&mut app.progress_filter_saved);
+                    app.progress_filter_editing = false;
                 }
             }
             resort_for(app, lens);
@@ -1779,6 +1847,9 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
                 FilterLens::Query => {
                     app.statements_filter.pop();
                 }
+                FilterLens::Progress => {
+                    app.progress_filter.pop();
+                }
             }
             resort_for(app, lens);
             clamp_selection(app);
@@ -1789,6 +1860,7 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
                 FilterLens::Micro => app.filter.push(c),
                 FilterLens::Schema => app.schema_filter.push(c),
                 FilterLens::Query => app.statements_filter.push(c),
+                FilterLens::Progress => app.progress_filter.push(c),
             }
             resort_for(app, lens);
             clamp_selection(app);
@@ -1927,6 +1999,10 @@ fn selection_target(app: &mut App) -> (&mut TableState, usize) {
             &mut app.statements_table_state,
             app.statements_row_order.len(),
         ),
+        Tab::ProgressLens => (
+            &mut app.progress_table_state,
+            app.progress_row_order.len(),
+        ),
         // v0.11: the idle census keeps its own cursor over its own row set.
         Tab::MicroLens if app.micro_view == MicroView::Idle => (
             &mut app.idle_table_state,
@@ -2047,6 +2123,22 @@ fn clamp_selection(app: &mut App) {
             .unwrap_or(0)
             .min(statements_len - 1);
         app.statements_table_state.select(Some(clamped));
+    }
+
+    // Progress Lens (v0.17.1): clamps progress rows.
+    let progress_len = app.progress_row_order.len();
+    if progress_len == 0 {
+        app.progress_table_state.select(None);
+        if app.active_tab == Tab::ProgressLens {
+            app.detail_open = false;
+        }
+    } else {
+        let clamped = app
+            .progress_table_state
+            .selected()
+            .unwrap_or(0)
+            .min(progress_len - 1);
+        app.progress_table_state.select(Some(clamped));
     }
 
     // v0.11: the idle census has no detail panel to clear, just a cursor to
@@ -2328,6 +2420,24 @@ fn resort_statements(app: &mut App) {
         }),
     }
     app.statements_row_order = order;
+}
+
+fn progress_row_matches(row: &pg_lens_core::ProgressUnifiedRow, needle: &str) -> bool {
+    row.pid.to_string().contains(needle)
+        || row.command.to_lowercase().contains(needle)
+        || row.relation.to_lowercase().contains(needle)
+        || row.phase.to_lowercase().contains(needle)
+        || row.detail.to_lowercase().contains(needle)
+}
+
+/// Recomputes `progress_row_order` from current snapshot's unified progress + filter (v0.17.1).
+fn resort_progress(app: &mut App) {
+    let rows = app.snapshot.unified_progress();
+    let needle = app.progress_filter.to_lowercase();
+    let order: Vec<usize> = (0..rows.len())
+        .filter(|&i| needle.is_empty() || progress_row_matches(&rows[i], &needle))
+        .collect();
+    app.progress_row_order = order;
 }
 
 #[cfg(test)]
@@ -2842,7 +2952,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_the_seven_lenses() {
+    fn tab_cycles_the_eight_lenses() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::MacroLens);
         update(&mut app, press(KeyCode::Tab));
@@ -2858,6 +2968,8 @@ mod tests {
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::QueryLens);
         update(&mut app, press(KeyCode::Tab));
+        assert_eq!(app.active_tab, Tab::ProgressLens);
+        update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::MacroLens);
         assert!(!app.should_quit);
     }
@@ -2865,9 +2977,11 @@ mod tests {
     // --- v0.12: navigation & scroll polish ----------------------------------
 
     #[test]
-    fn back_tab_cycles_the_seven_lenses_backward() {
+    fn back_tab_cycles_the_eight_lenses_backward() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::MacroLens);
+        update(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.active_tab, Tab::ProgressLens);
         update(&mut app, press(KeyCode::BackTab));
         assert_eq!(app.active_tab, Tab::QueryLens);
         update(&mut app, press(KeyCode::BackTab));
@@ -2896,6 +3010,7 @@ mod tests {
             ('5', Tab::SchemaLens),
             ('6', Tab::IndexLens),
             ('7', Tab::QueryLens),
+            ('8', Tab::ProgressLens),
         ] {
             update(&mut app, press(KeyCode::Char(digit)));
             assert_eq!(app.active_tab, tab, "digit {digit}");

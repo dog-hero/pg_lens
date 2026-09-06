@@ -201,6 +201,12 @@ def main():
         # Enter: statement detail with the highlighted full query + queryid.
         send("\r"); pump(0.6); snaps["q4_query_detail"] = screen.snapshot()
         send("\r"); pump(0.6); snaps["q5_detail_closed"] = screen.snapshot()
+    # v0.17.1: Progress Lens (in-flight maintenance & DDL): seventh Tab reaches it (also in BASIC).
+    send("\t"); pump(0.9); snaps["pr1_progress_lens"] = screen.snapshot()
+    if not BASIC:
+        # Enter: opens detail panel on selected row, Enter closes it.
+        send("\r"); pump(0.6); snaps["pr2_progress_detail"] = screen.snapshot()
+        send("\r"); pump(0.6); snaps["pr3_detail_closed"] = screen.snapshot()
     # v0.9: `?` opens the keyboard help overlay (static, works at any grid
     # size); Esc closes it again without disturbing the dashboard underneath.
     send("?"); pump(0.6); snaps["h1_help_open"] = screen.snapshot()
@@ -369,6 +375,16 @@ def main():
               and "pg_sleep" in snaps["q4_query_detail"])
         check("Enter closed the statement detail again",
               "Statement — queryid" not in snaps["q5_detail_closed"])
+    # --- v0.17.1: Progress Lens --------------------------------------------
+    check("Tab x7 reached the Progress Lens (Progress tab & columns)",
+          "Progress" in snaps["pr1_progress_lens"]
+          and ("Command" in snaps["pr1_progress_lens"] or "CREATE INDEX" in snaps["pr1_progress_lens"]))
+    if not BASIC:
+        check("Enter opened the progress detail panel",
+              "Detail" in snaps["pr2_progress_detail"]
+              and "Enter/Esc: close" in snaps["pr2_progress_detail"])
+        check("Enter closed the progress detail panel again",
+              "Enter/Esc: close" not in snaps["pr3_detail_closed"])
     # --- v0.9: keyboard help overlay (`?`) ----------------------------------
     check("? opened the keyboard help overlay (known bindings visible)",
           "keyboard help" in snaps["h1_help_open"]

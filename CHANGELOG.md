@@ -4,6 +4,19 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.17.1] — 2026-09-06 — "Progress Lens"
+
+### Added
+- **Progress Lens (`8 Progress Lens`)** — dedicated lens for real-time monitoring of all in-flight PostgreSQL maintenance and DDL operations (`pg_stat_progress_create_index`, `pg_stat_progress_vacuum`, `pg_stat_progress_cluster`, and `pg_stat_progress_analyze`):
+  - TUI Tab 8 (`8 Progress Lens`, direct jump `8`): unified table displaying PID, command, target relation, phase, ASCII progress gauge (`[=====>    ] 50%`), step counters (`current / total`), and operational detail.
+  - Interactive selection (`j`/`k`, `g`/`G`), detail popup on `Enter`, search filter (`/` and `\`), and direct query cancel (`c`) or backend terminate (`K`) with confirmation modals.
+  - Web Lens Tab 7 (`tab-progress`, `#progress-panel`, shortcut `7`): dedicated Progress panel with live progress bars, search filtering (`/`), and clean empty/collected states.
+  - Unified data model in `pg_lens_core` (`DbSnapshot::unified_progress` and `ProgressUnifiedRow`) unifying DDL progress and autovacuum progress sorted deterministically by PID.
+
+### Changed
+- **Tab consistency & naming** — Tab 3 is titled `"3 Blocks & Locks Lens"` across TUI and Web Lens for naming consistency.
+- **Tab count & navigation** — TUI now features 8 tabs (`1`..=`8` direct jump), and Web Lens features 7 section tabs (`1`..=`7` direct jump). Keyboard help overlay (`?`) and documentation updated.
+
 ## [0.17.0] — 2026-09-06 — "Blocks & Locks Lens"
 
 ### Added

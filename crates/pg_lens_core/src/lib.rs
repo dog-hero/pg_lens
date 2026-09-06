@@ -41,6 +41,7 @@ pub use models::{
     SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
     StatementsStatus, TableDetail, TableDetailColumn, TableDetailConstraint, TableDetailIndex,
     TableDetailRequest, TableStatRow, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
+    ProgressUnifiedRow,
     WalReceiverRow, WalSenderRow, WalStats,
 };
 pub use idle_sessions::{

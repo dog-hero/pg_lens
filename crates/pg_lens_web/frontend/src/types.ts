@@ -70,6 +70,19 @@ export interface DdlProgressRow {
   detail: string;
 }
 
+/** Unified in-flight maintenance & DDL operation (v0.17.1, Tab 8 Progress Lens). */
+export interface ProgressUnifiedRow {
+  pid: number;
+  command: string;
+  relation: string;
+  phase: string;
+  progress_pct: number | null;
+  current_step: number;
+  total_step: number;
+  detail: string;
+  unit: string;
+}
+
 export interface LockRow {
   pid: number;
   blocked_by: number[];

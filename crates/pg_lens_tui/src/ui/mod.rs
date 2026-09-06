@@ -17,6 +17,7 @@ mod sql;
 mod style;
 mod vacuum;
 mod blocks_lens;
+mod progress_lens;
 
 use pg_lens_core::PollerStatus;
 use ratatui::{
@@ -76,11 +77,12 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     match app.active_tab {
         Tab::MacroLens => macro_lens::draw(app, frame, body_area),
         Tab::MicroLens => micro_lens::draw(app, frame, body_area),
+        Tab::BlocksLens => blocks_lens::draw(app, frame, body_area),
         Tab::ReplicationLens => replication_lens::draw(app, frame, body_area),
         Tab::SchemaLens => schema_lens::draw(app, frame, body_area),
         Tab::IndexLens => index_lens::draw(app, frame, body_area),
         Tab::QueryLens => query_lens::draw(app, frame, body_area),
-        Tab::BlocksLens => blocks_lens::draw(app, frame, body_area),
+        Tab::ProgressLens => progress_lens::draw(app, frame, body_area),
     }
     draw_statusbar(app, frame, statusbar_area);
     // Overlays draw over everything else, last — mutually exclusive by
@@ -268,6 +270,12 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             let len = app.snapshot.active_locks.as_deref().map_or(0, |l| l.len());
             (app.blocks_locks_state.selected(), len, None, false)
         }
+        Tab::ProgressLens => (
+            app.progress_table_state.selected(),
+            app.progress_row_order.len(),
+            None,
+            false,
+        ),
         // Micro Lens counts the FILTERED display order (`row_order`), so the
         // `row X/N` indicator matches what an active filter shows.
         _ => (
@@ -283,8 +291,13 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     };
     // Filter editing takes over the whole statusbar with a focused keymap —
     // the lens hints are inert while typing anyway.
-    if app.filter_editing {
-        let [k, d] = style::hint("/", format!("{}\u{2588}", app.filter));
+    if app.filter_editing || app.progress_filter_editing {
+        let needle = if app.progress_filter_editing {
+            &app.progress_filter
+        } else {
+            &app.filter
+        };
+        let [k, d] = style::hint("/", format!("{}\u{2588}", needle));
         let sep = Span::styled(" \u{2502} ", style::label_style());
         let [ek, ed] = style::hint("Enter", ": apply");
         let [xk, xd] = style::hint("Esc", ": cancel");
@@ -518,7 +531,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     fn render(app: &mut App) -> String {
-        let backend = TestBackend::new(120, 36);
+        let backend = TestBackend::new(140, 36);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal.draw(|frame| draw(app, frame)).expect("draw");
         terminal
@@ -546,9 +559,9 @@ mod tests {
         assert!(screen.contains("pressure"), "{screen}");
     }
 
-    /// U1: all six tabs render in the tab bar, in the documented order.
+    /// U1: all eight tabs render in the tab bar, in the documented order.
     #[test]
-    fn six_lens_titles_render_in_the_tab_bar() {
+    fn eight_lens_titles_render_in_the_tab_bar() {
         let mut app = App::new();
         let screen = render(&mut app);
         for title in Tab::TITLES {
@@ -556,14 +569,14 @@ mod tests {
         }
     }
 
-    /// v0.12: the tab bar carries `1`-`6` number hints so the direct-jump
+    /// v0.12: the tab bar carries `1`-`8` number hints so the direct-jump
     /// keys are self-documenting — each `Tab::TITLES` entry already starts
     /// with its digit (see `Tab::TITLES`'s doc comment).
     #[test]
     fn tab_bar_shows_the_direct_jump_number_hints() {
         let mut app = App::new();
         let screen = render(&mut app);
-        for (digit, title) in ["1", "2", "3", "4", "5", "6"].into_iter().zip(Tab::TITLES) {
+        for (digit, title) in ["1", "2", "3", "4", "5", "6", "7", "8"].into_iter().zip(Tab::TITLES) {
             assert!(
                 title.starts_with(digit),
                 "Tab::TITLES entry {title:?} must start with {digit}"

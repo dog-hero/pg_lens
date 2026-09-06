@@ -313,6 +313,12 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.17.1** — "Progress Lens": dedicated Progress Lens (`8 Progress Lens` in TUI,
+  `7 Progress` in Web Lens) for real-time monitoring of all in-flight PostgreSQL maintenance
+  and DDL operations (`pg_stat_progress_create_index`, `pg_stat_progress_vacuum`,
+  `pg_stat_progress_cluster`, and `pg_stat_progress_analyze`) with visual progress gauges,
+  step counters, operational details, selection, and admin cancellation/termination; and
+  renamed Tab 3 to "3 Blocks & Locks Lens" for naming consistency across TUI and Web.
 - **v0.17.0** — "Blocks & Locks Lens": dedicated Blocks tab (wait-for tree +
   active locks) in position 3 between Micro Lens and Replication; in-flight DDL &
   maintenance progress (`pg_stat_progress_*`); and SSL/TLS connection security
