@@ -1,8 +1,6 @@
-// Unit tests for the Micro Lens activity table's pure row-color decision
-// (v0.16, Part A) — mirrors the TUI's `row_severity_style`/`state_row_color`
-// tests in crates/pg_lens_tui/src/ui/micro_lens.rs so both implementations
-// stay in lockstep (same runner setup as statements.test.ts: node:test, no
-// framework, no DOM).
+// Unit tests for the Micro Lens activity table's column color system
+// and duration-only time coloring — mirrors the TUI's tests in
+// crates/pg_lens_tui/src/ui/micro_lens.rs so both stay in lockstep.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -10,7 +8,9 @@ import assert from "node:assert/strict";
 import {
   ROW_DURATION_BAD_SECS,
   ROW_DURATION_WARN_SECS,
-  activityRowClass,
+  stateColorClass,
+  durationSeverityClass,
+  waitEventClass,
 } from "./table.ts";
 import type { ActivityRow } from "./types.ts";
 
@@ -35,56 +35,48 @@ function row(state: string, duration_secs: number): ActivityRow {
   };
 }
 
-test("state base color maps every known state, neutral default for unknown", () => {
-  assert.equal(activityRowClass(row("active", 0), false, false), "row-state-active");
-  assert.equal(activityRowClass(row("idle", 0), false, false), "row-state-idle");
+test("stateColorClass maps every known state, neutral default for unknown", () => {
+  assert.equal(stateColorClass("active"), "state-active");
+  assert.equal(stateColorClass("idle"), "state-idle");
+  assert.equal(stateColorClass("idle in transaction"), "state-idle-txn");
   assert.equal(
-    activityRowClass(row("idle in transaction", 0), false, false),
-    "row-state-idle-txn",
+    stateColorClass("idle in transaction (aborted)"),
+    "state-idle-txn-aborted",
   );
-  assert.equal(
-    activityRowClass(row("idle in transaction (aborted)", 0), false, false),
-    "row-state-idle-txn-aborted",
-  );
-  assert.equal(activityRowClass(row("fastpath function call", 0), false, false), "");
-  assert.equal(activityRowClass(row("disabled", 0), false, false), "");
+  assert.equal(stateColorClass("fastpath function call"), "");
+  assert.equal(stateColorClass("disabled"), "");
 });
 
-test("duration override only fires for active sessions, past the exact thresholds", () => {
+test("durationSeverityClass applies time-based coloring only to active sessions", () => {
   assert.equal(
-    activityRowClass(row("active", ROW_DURATION_BAD_SECS + 0.1), false, false),
-    "row-duration-bad",
+    durationSeverityClass("active", ROW_DURATION_BAD_SECS + 0.1),
+    "duration-bad",
   );
   assert.equal(
-    activityRowClass(row("active", ROW_DURATION_WARN_SECS + 0.1), false, false),
-    "row-duration-warn",
+    durationSeverityClass("active", ROW_DURATION_WARN_SECS + 0.1),
+    "duration-warn",
   );
-  // At/below warn: no override, plain active color.
+  // At/below warn: duration-ok
   assert.equal(
-    activityRowClass(row("active", ROW_DURATION_WARN_SECS), false, false),
-    "row-state-active",
+    durationSeverityClass("active", ROW_DURATION_WARN_SECS),
+    "duration-ok",
   );
-  // Same duration on an idle(-in-transaction) session must NOT turn
-  // red/yellow — the owner's explicit "idle stays its state color
-  // regardless of age" requirement.
+  // Same duration on an idle(-in-transaction) session stays dim/idle
   assert.equal(
-    activityRowClass(row("idle", ROW_DURATION_BAD_SECS + 10_000), false, false),
-    "row-state-idle",
+    durationSeverityClass("idle", ROW_DURATION_BAD_SECS + 10_000),
+    "duration-idle",
   );
   assert.equal(
-    activityRowClass(row("idle in transaction", ROW_DURATION_BAD_SECS + 10_000), false, false),
-    "row-state-idle-txn",
+    durationSeverityClass("idle in transaction", ROW_DURATION_BAD_SECS + 10_000),
+    "duration-idle",
   );
 });
 
-test("blocked wins over the duration override and over waiting", () => {
-  const r = row("active", ROW_DURATION_BAD_SECS + 1);
-  assert.equal(activityRowClass(r, true, false), "blocked");
-  assert.equal(activityRowClass(r, true, true), "blocked");
-});
-
-test("waiting tints when nothing stronger applies", () => {
-  assert.equal(activityRowClass(row("active", 1), false, true), "waiting");
+test("waitEventClass highlights locks and other wait events", () => {
+  assert.equal(waitEventClass("Lock:relation"), "wait-lock");
+  assert.equal(waitEventClass("IO:DataFileRead"), "wait-other");
+  assert.equal(waitEventClass("Client:ClientRead"), "wait-other");
+  assert.equal(waitEventClass(null), "wait-none");
 });
 
 test("ActivityRow supports SSL encryption flags", () => {

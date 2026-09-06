@@ -313,6 +313,11 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.17.2** — "Column Colors & Duration Severity": replaced whole-row tinting in
+  the Micro Lens activity table with a dedicated column-specific color system
+  inspired by pg_activity (semantic colors per column); and restricted time-based
+  coloring strictly to the Duration column (>30s red bold, >10s yellow bold, <=10s
+  calm green for active; idle stays calm dark gray).
 - **v0.17.1** — "Progress Lens": dedicated Progress Lens (`8 Progress Lens` in TUI,
   `7 Progress` in Web Lens) for real-time monitoring of all in-flight PostgreSQL maintenance
   and DDL operations (`pg_stat_progress_create_index`, `pg_stat_progress_vacuum`,

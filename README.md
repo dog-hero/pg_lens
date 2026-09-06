@@ -34,14 +34,14 @@ Web Lens dashboard running on recorded data (no database required).
 - **Micro Lens** — per-backend activity table: state, wait events, running
   duration, and a status marker for **blocked** (`B`, red) and **waiting**
   (`W`, yellow) sessions, powered by `pg_locks` + `pg_blocking_pids()`.
-  **pg_activity-style row colors**: the whole row is tinted by session state
-  (active green, idle dim, idle-in-transaction yellow, aborted red, unknown
-  neutral); for `active` rows only, a long-running query overrides that
-  color (orange past 10s, red past 30s) so a merely-idle session never gets
-  mislabelled as a problem, and a live `wait_event` tints the row yellow
-  immediately regardless of duration. A **blocked** row always outranks
-  every other tint. SQL keyword highlighting lives in the `Enter` detail
-  panel, not the table row. TUI + Web.
+  **pg_activity-style column colors**: each column carries dedicated semantic
+  coloring (Status `B`/`W`, Cyan PIDs and DBs, White Users, DarkGray Clients,
+  semantic State colors, Wait event lock highlights, and neutral query text).
+  Time-based severity coloring applies strictly to the **Duration** column for active
+  queries (orange past 10s, red past 30s) so an idle session never gets
+  mislabelled as a problem. A **blocked** PID highlights in bold red.
+  SQL keyword highlighting lives in the `Enter` detail panel, not the table row.
+  TUI + Web.
 - **Blocks & Locks Lens (`3 Blocks & Locks Lens`)** — dedicated lens positioned between
   Micro Lens and Replication with a dual-pane split view:
   - Upper pane: hierarchical blocking wait-tree (`root blocker -> waiting PID -> waiting PID`)
@@ -956,8 +956,9 @@ a `pg_stat_wal` WAL generation rate panel, and shell completions), and
 v0.17 "Blocks & Locks Lens" (dedicated Blocks & Locks lens in position 3
 between Micro Lens and Replication with wait-for tree and active locks table,
 in-flight DDL & maintenance progress, and SSL/TLS connection security indicators),
-and v0.17.1 "Progress Lens" (dedicated Progress Lens for live maintenance & DDL
-tracking, ASCII progress gauges, and tab consistency).
+v0.17.1 "Progress Lens" (dedicated Progress Lens for live maintenance & DDL
+tracking, ASCII progress gauges, and tab consistency), and v0.17.2 "Column Colors &
+Duration Severity" (pg_activity-style column color system, time coloring strictly on Duration).
 See [ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Changelog

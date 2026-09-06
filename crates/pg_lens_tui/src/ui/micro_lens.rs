@@ -366,35 +366,22 @@ fn draw_empty(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(para, inner);
 }
 
-/// Above this running-query duration the row's color overrides the state
-/// base color with bad-tier red; below it but above [`ROW_DURATION_WARN_SECS`]
-/// it overrides with warn-tier yellow/orange; below both, the state's own
-/// color (see [`state_row_color`]) applies untouched. The override keys on
-/// [`pg_lens_core::ActivityRow::duration_secs`] — the age of the RUNNING
-/// QUERY — and only ever fires for `state == "active"` sessions: an idle (or
-/// idle-in-transaction) session sitting still for 40s is not the same signal
-/// as a query still executing after 40s, and idle-in-transaction risk
-/// already has its own story (the state color itself, plus the v0.9 xact-age
-/// column/headline) — painting an old idle row red here would just be noise
-/// on top of a signal that already exists.
+/// Above this running-query duration the Duration column's color indicates
+/// bad-tier red; below it but above [`ROW_DURATION_WARN_SECS`]
+/// it indicates warn-tier yellow/orange; below both, calm green is used.
+/// The styling keys on [`pg_lens_core::ActivityRow::duration_secs`] — the age of the RUNNING
+/// QUERY — and only ever fires for `state == "active"` sessions: idle sessions
+/// remain calm dark gray regardless of age.
 const ROW_DURATION_BAD_SECS: f64 = 30.0;
 const ROW_DURATION_WARN_SECS: f64 = 10.0;
 
-/// pg_activity-style base row color, one per session state (v0.16) — applied
-/// to the WHOLE row (not just a marker column) so a scan of the table reads
-/// at a glance:
-/// - `active`: green — the calm, expected state (nothing wrong YET; see the
-///   duration override above for when it runs long);
-/// - `idle`: dim gray — the least interesting state, deliberately quiet;
-/// - `idle in transaction`: yellow — a standing risk (holds snapshot/locks,
-///   ages the xmin horizon) even at duration zero, so it never dims;
-/// - `idle in transaction (aborted)`: red — a leaked, doomed transaction
-///   that will never commit; strictly worse than a live idle-in-transaction;
-/// - anything else PostgreSQL reports (`fastpath function call`, `disabled`,
-///   or a future addition never listed here): a neutral default rather than
-///   guessing at a severity that was never verified — same "never invent
-///   data" instinct as `PollerStatus`'s explicit states.
-fn state_row_color(state: &str) -> Color {
+/// Maps PostgreSQL `pg_stat_activity.state` string to a semantic color:
+/// - `active`: green — working on a query right now;
+/// - `idle`: dark gray — connection open, doing nothing;
+/// - `idle in transaction`: yellow — holds locks and snapshot;
+/// - `idle in transaction (aborted)`: red — a leaked, doomed transaction;
+/// - anything else: neutral reset.
+fn state_color(state: &str) -> Color {
     match state {
         "active" => Color::Green,
         "idle" => Color::DarkGray,
@@ -404,32 +391,39 @@ fn state_row_color(state: &str) -> Color {
     }
 }
 
-/// The full row-color decision, in precedence order:
-/// 1. blocked (red bold) — wins over everything else. It is the single most
-///    actionable signal on screen (see the module doc's "captures prove the
-///    state without relying on color" — the `B` marker already proves it in
-///    text; the row color makes it impossible to miss at a glance too);
-/// 2. the duration override (bad/warn red/yellow, active sessions only —
-///    see [`ROW_DURATION_BAD_SECS`]/[`ROW_DURATION_WARN_SECS`]);
-/// 3. plain waiting (yellow, unbolded) — kept for parity with the
-///    pre-existing `W` marker on a non-blocked, non-long-running session;
-/// 4. the state's own base color ([`state_row_color`]).
-fn row_severity_style(row: &pg_lens_core::ActivityRow, is_blocked: bool, is_waiting: bool) -> Style {
-    if is_blocked {
-        return Style::new().fg(Color::Red).bold();
-    }
-    if row.state == "active" {
-        if row.duration_secs > ROW_DURATION_BAD_SECS {
-            return Style::new().fg(Color::Red).bold();
+/// Pure time-based severity color for query duration (applied ONLY to the Duration column):
+/// - active sessions:
+///   - > 30s (`ROW_DURATION_BAD_SECS`): Red bold
+///   - > 10s (`ROW_DURATION_WARN_SECS`): Yellow bold
+///   - <= 10s: Green (calm ok execution)
+/// - idle / non-active sessions:
+///   - DarkGray (idle duration is not a running query)
+fn duration_style(state: &str, duration_secs: f64) -> Style {
+    if state == "active" {
+        if duration_secs > ROW_DURATION_BAD_SECS {
+            Style::new().fg(Color::Red).bold()
+        } else if duration_secs > ROW_DURATION_WARN_SECS {
+            Style::new().fg(Color::Yellow).bold()
+        } else {
+            Style::new().fg(Color::Green)
         }
-        if row.duration_secs > ROW_DURATION_WARN_SECS {
-            return Style::new().fg(Color::Yellow).bold();
-        }
+    } else {
+        Style::new().fg(Color::DarkGray)
     }
-    if is_waiting {
-        return Style::new().fg(Color::Yellow);
+}
+
+/// Wait event column style:
+/// - `Lock:*` (relation, transactionid, etc.): Red bold (lock contention)
+/// - `IO:*`: Yellow (storage pressure)
+/// - Other wait events: Yellow
+/// - None: Dim dash
+fn wait_event_style(wait_event: Option<&str>) -> Style {
+    match wait_event {
+        Some(w) if w.starts_with("Lock:") => Style::new().fg(Color::Red).bold(),
+        Some(w) if w.starts_with("IO:") => Style::new().fg(Color::Yellow),
+        Some(_) => Style::new().fg(Color::Yellow),
+        None => style::label_style(),
     }
-    Style::new().fg(state_row_color(&row.state))
 }
 
 fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
@@ -451,24 +445,49 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
         .map(|row| {
             let is_blocked = blocked.contains(&row.pid);
             let is_waiting = row.wait_event.is_some();
-            let status = if is_blocked {
-                "B"
+
+            // Status cell: "B" (red bold), "W" (yellow bold), or empty
+            let status_cell = if is_blocked {
+                Cell::from(Span::styled("B", Style::new().fg(Color::Red).bold()))
             } else if is_waiting {
-                "W"
+                Cell::from(Span::styled("W", Style::new().fg(Color::Yellow).bold()))
             } else {
-                " "
+                Cell::from(Span::raw(" "))
             };
-            let style = row_severity_style(row, is_blocked, is_waiting);
-            // Truncate FIRST (char-safe). v0.16 (Part B): the row's own
-            // severity/state color IS the signal for this cell — keyword
-            // SQL highlighting moved to the Enter detail panel only (see
-            // `draw_detail`), never the table row (owner decision: syntax
-            // highlighting belongs in the expanded view, not a scanning
-            // table where every row now carries a meaningful color).
-            let query_cell = Cell::from(format::truncate_with_ellipsis(&row.query, query_width));
-            // Xact column: age of the open transaction (`—` when none),
-            // tinted by the same severity the headline uses — idle in
-            // transaction reads worse than an equally-old active query.
+
+            // PID cell: red bold when blocked, otherwise cyan identifier
+            let pid_style = if is_blocked {
+                Style::new().fg(Color::Red).bold()
+            } else {
+                Style::new().fg(Color::Cyan)
+            };
+            let pid_cell = Cell::from(Span::styled(row.pid.to_string(), pid_style));
+
+            // DB cell: cyan / blue
+            let db_cell = Cell::from(Span::styled(row.database.clone(), Style::new().fg(Color::Cyan)));
+
+            // User cell: white / light
+            let user_cell = Cell::from(Span::styled(row.username.clone(), Style::new().fg(Color::White)));
+
+            // Client cell: dark gray
+            let client_cell = Cell::from(Span::styled(row.client.clone(), Style::new().fg(Color::DarkGray)));
+
+            // State cell: state-specific color
+            let state_cell = Cell::from(Span::styled(row.state.clone(), Style::new().fg(state_color(&row.state))));
+
+            // Wait cell: Lock (red bold), IO (yellow), other (yellow), none (dim dash)
+            let wait_cell = match &row.wait_event {
+                Some(w) => Cell::from(Span::styled(w.clone(), wait_event_style(Some(w)))),
+                None => Cell::from(Span::styled("\u{2014}", style::label_style())),
+            };
+
+            // Duration cell: strictly time-based coloring
+            let duration_cell = Cell::from(Span::styled(
+                format::human_duration(row.duration_secs),
+                duration_style(&row.state, row.duration_secs),
+            ));
+
+            // Xact column: age of the open transaction (`—` when none)
             let xact_cell = match row.xact_age_secs {
                 Some(age) => {
                     let color = xact_severity_color(xact_age_severity(age, &row.state));
@@ -476,19 +495,25 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
                 }
                 None => Cell::from(Span::styled("\u{2014}", style::label_style())),
             };
+
+            // Query cell: clean, neutral readable SQL text
+            let query_cell = Cell::from(Span::styled(
+                format::truncate_with_ellipsis(&row.query, query_width),
+                Style::new().fg(Color::Reset),
+            ));
+
             Row::new(vec![
-                Cell::from(status.to_string()),
-                Cell::from(row.pid.to_string()),
-                Cell::from(row.database.clone()),
-                Cell::from(row.username.clone()),
-                Cell::from(row.client.clone()),
-                Cell::from(row.state.clone()),
-                Cell::from(row.wait_event.clone().unwrap_or_default()),
-                Cell::from(format::human_duration(row.duration_secs)),
+                status_cell,
+                pid_cell,
+                db_cell,
+                user_cell,
+                client_cell,
+                state_cell,
+                wait_cell,
+                duration_cell,
                 xact_cell,
                 query_cell,
             ])
-            .style(style)
         });
 
     let widths = [
@@ -734,8 +759,8 @@ fn wait_bar(count: usize, max: usize, width: usize) -> String {
 mod tests {
     use super::{
         ROW_DURATION_BAD_SECS, ROW_DURATION_WARN_SECS, WAITS_TOP_N, blocking_chain_lines,
-        idle_headline, oldest_xact_headline, query_column_width, row_severity_style,
-        state_row_color, wait_bar, wait_percent, waits_strip,
+        duration_style, idle_headline, oldest_xact_headline, query_column_width, state_color,
+        wait_bar, wait_event_style, wait_percent, waits_strip,
     };
     use pg_lens_core::waits::WaitSummary;
     use pg_lens_core::xact_age::{OldestXact, Severity as XactSeverity};
@@ -1089,93 +1114,69 @@ mod tests {
         assert_eq!(age_span.style.fg, Some(Color::Red));
     }
 
-    // --- v0.16: per-row pg_activity-style color system (Part A) ----------
-
-    fn row(state: &str, duration_secs: f64) -> pg_lens_core::ActivityRow {
-        pg_lens_core::ActivityRow {
-            pid: 1,
-            application_name: "app".to_string(),
-            database: "db".to_string(),
-            client: "10.0.0.1".to_string(),
-            duration_secs,
-            xact_age_secs: None,
-            wait_event: None,
-            username: "u".to_string(),
-            state: state.to_string(),
-            query: "SELECT 1".to_string(),
-            query_leader_pid: 1,
-            is_parallel_worker: false,
-            query_id: None,
-            ssl: false,
-            ssl_version: None,
-            ssl_cipher: None,
-        }
-    }
+    // --- v0.16/v0.17: column color system & duration-only time coloring ----------
 
     #[test]
-    fn state_row_color_maps_every_known_state_and_defaults_neutral_for_unknown() {
-        assert_eq!(state_row_color("active"), Color::Green);
-        assert_eq!(state_row_color("idle"), Color::DarkGray);
-        assert_eq!(state_row_color("idle in transaction"), Color::Yellow);
-        assert_eq!(state_row_color("idle in transaction (aborted)"), Color::Red);
+    fn state_color_maps_every_known_state_and_defaults_neutral_for_unknown() {
+        assert_eq!(state_color("active"), Color::Green);
+        assert_eq!(state_color("idle"), Color::DarkGray);
+        assert_eq!(state_color("idle in transaction"), Color::Yellow);
+        assert_eq!(state_color("idle in transaction (aborted)"), Color::Red);
         // Unknown/rare states (fastpath function call, disabled, or any
         // future addition) must never invent a severity — neutral default.
-        assert_eq!(state_row_color("fastpath function call"), Color::Reset);
-        assert_eq!(state_row_color("disabled"), Color::Reset);
-        assert_eq!(state_row_color("something new in a future PG"), Color::Reset);
+        assert_eq!(state_color("fastpath function call"), Color::Reset);
+        assert_eq!(state_color("disabled"), Color::Reset);
+        assert_eq!(state_color("something new in a future PG"), Color::Reset);
     }
 
     #[test]
-    fn duration_override_only_fires_for_active_sessions() {
+    fn duration_style_applies_time_based_coloring_only_to_active_sessions() {
         // An active query past the bad threshold: red, bold.
-        let r = row("active", ROW_DURATION_BAD_SECS + 0.1);
         assert_eq!(
-            row_severity_style(&r, false, false),
+            duration_style("active", ROW_DURATION_BAD_SECS + 0.1),
             Style::new().fg(Color::Red).bold()
         );
         // Past the warn threshold only: yellow, bold.
-        let r = row("active", ROW_DURATION_WARN_SECS + 0.1);
         assert_eq!(
-            row_severity_style(&r, false, false),
+            duration_style("active", ROW_DURATION_WARN_SECS + 0.1),
             Style::new().fg(Color::Yellow).bold()
         );
-        // At/below warn: plain active green, override does not fire.
-        let r = row("active", ROW_DURATION_WARN_SECS);
-        assert_eq!(row_severity_style(&r, false, false), Style::new().fg(Color::Green));
+        // At/below warn: plain active green.
+        assert_eq!(
+            duration_style("active", ROW_DURATION_WARN_SECS),
+            Style::new().fg(Color::Green)
+        );
 
         // The exact same duration on an IDLE session must NOT turn red/
-        // yellow — idle-in-transaction risk already has its own story (the
-        // state color itself + the xact-age column), and a merely-idle
-        // session sitting still is not urgent the way a still-running query
-        // is. This is the owner's explicit "idle stays its state color
-        // regardless of age" requirement.
-        let r = row("idle", ROW_DURATION_BAD_SECS + 10_000.0);
-        assert_eq!(row_severity_style(&r, false, false), Style::new().fg(Color::DarkGray));
-        let r = row("idle in transaction", ROW_DURATION_BAD_SECS + 10_000.0);
-        assert_eq!(row_severity_style(&r, false, false), Style::new().fg(Color::Yellow));
-    }
-
-    #[test]
-    fn blocked_wins_over_the_duration_override_and_over_waiting() {
-        // A blocked session that ALSO has a long-running active query stays
-        // red-bold via the blocked path (same visual result here, but this
-        // locks in the precedence — blocked is checked first).
-        let r = row("active", ROW_DURATION_BAD_SECS + 1.0);
+        // yellow — it stays dark gray.
         assert_eq!(
-            row_severity_style(&r, true, false),
-            Style::new().fg(Color::Red).bold()
+            duration_style("idle", ROW_DURATION_BAD_SECS + 10_000.0),
+            Style::new().fg(Color::DarkGray)
         );
-        // Blocked wins over waiting too.
         assert_eq!(
-            row_severity_style(&r, true, true),
-            Style::new().fg(Color::Red).bold()
+            duration_style("idle in transaction", ROW_DURATION_BAD_SECS + 10_000.0),
+            Style::new().fg(Color::DarkGray)
         );
     }
 
     #[test]
-    fn waiting_tints_yellow_when_nothing_stronger_applies() {
-        let r = row("active", 1.0);
-        assert_eq!(row_severity_style(&r, false, true), Style::new().fg(Color::Yellow));
+    fn wait_event_style_highlights_locks_and_io() {
+        assert_eq!(
+            wait_event_style(Some("Lock:relation")),
+            Style::new().fg(Color::Red).bold()
+        );
+        assert_eq!(
+            wait_event_style(Some("IO:DataFileRead")),
+            Style::new().fg(Color::Yellow)
+        );
+        assert_eq!(
+            wait_event_style(Some("Client:ClientRead")),
+            Style::new().fg(Color::Yellow)
+        );
+        assert_eq!(
+            wait_event_style(None),
+            Style::new().fg(Color::DarkGray)
+        );
     }
 
     /// Render proof: a >30s active row renders red, AND the selected row

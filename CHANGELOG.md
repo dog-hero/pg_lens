@@ -4,6 +4,20 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.17.2] — 2026-09-06 — "Column Colors & Duration Severity"
+
+### Changed
+- **Column-specific color system (`pg_activity`-style)** — replaced whole-row tinting in the Micro Lens activity table with dedicated semantic colors per column in both TUI and Web Lens:
+  - `S` (Status): `B` in bold red (blocked sessions), `W` in bold yellow (waiting).
+  - `PID`: Cyan, or bold red if the session is blocked.
+  - `DB`: Cyan.
+  - `User`: Clean readable white/default text.
+  - `Client`: Calm dark gray (plus SSL `🔒` badge if encrypted).
+  - `State`: `active` (green), `idle` (dark gray), `idle in transaction` (yellow), `idle in transaction (aborted)` (bold red).
+  - `Wait`: `Lock:*` events highlighted in bold red, `IO:*` and other wait events in yellow, none in dark gray.
+  - `Query`: Clean, readable neutral text in the table row, keeping SQL syntax highlighting reserved for the expanded detail panel (`Enter`).
+- **Duration-only time coloring** — duration-based severity colors (red bold past 30s, yellow bold past 10s, calm green at or below 10s) are now applied **strictly to the `Duration` column** for active queries, eliminating whole-row background flooding and text color overrides. Idle and non-active sessions remain calm dark gray regardless of age (transaction-age risk continues to be isolated in the `Xact` column).
+
 ## [0.17.1] — 2026-09-06 — "Progress Lens"
 
 ### Added

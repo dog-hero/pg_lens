@@ -20,54 +20,54 @@ import { blockingChain, renderBlockingChain } from "./blocking.ts";
 import { renderCopyButton } from "./clipboard.ts";
 import type { AdminKind } from "./actions";
 
-/** Above this running-query duration the row's color overrides the state
- * base color — bad (red) past this, warn (yellow) past `ROW_DURATION_WARN_SECS`
+/** Above this running-query duration the Duration column's color indicates
+ * severity — bad (red) past this, warn (yellow) past `ROW_DURATION_WARN_SECS`
  * — mirroring the TUI's `ROW_DURATION_BAD_SECS`/`ROW_DURATION_WARN_SECS`
  * exactly. Only ever applies to `state === "active"` sessions: an idle (or
- * idle-in-transaction) session's AGE is a different signal, already carried
- * by its own state color and the Xact column — see `activityRowClass`. */
+ * idle-in-transaction) session stays dim/idle color. */
 export const ROW_DURATION_BAD_SECS = 30;
 export const ROW_DURATION_WARN_SECS = 10;
 
-/** The full row-color decision, precedence order (mirrors the TUI's
- * `row_severity_style` 1:1):
- * 1. `"blocked"` — wins over everything (the single most actionable signal);
- * 2. the duration override — active sessions only;
- * 3. `"waiting"` — kept for parity with the pre-existing `W` marker;
- * 4. the session state's own base color (`"row-state-*"`), or `""` (neutral
- *    default) for any state pg_lens does not recognize. */
-export function activityRowClass(
-  row: ActivityRow,
-  isBlocked: boolean,
-  isWaiting: boolean,
-): string {
-  if (isBlocked) return "blocked";
-  if (row.state === "active") {
-    if (row.duration_secs > ROW_DURATION_BAD_SECS) return "row-duration-bad";
-    if (row.duration_secs > ROW_DURATION_WARN_SECS) return "row-duration-warn";
-  }
-  if (isWaiting) return "waiting";
-  return stateRowClass(row.state);
-}
-
-/** pg_activity-style base row color, one CSS class per session state —
- * mirrors the TUI's `state_row_color` mapping exactly (see its doc comment
- * for the full reasoning). Unknown/rare states (`fastpath function call`,
- * `disabled`, or any future addition) intentionally map to `""` (no class,
- * neutral default) rather than guessing at a severity. */
-function stateRowClass(state: string): string {
+/** pg_activity-style per-column state color class —
+ * mirrors the TUI's `state_color` mapping exactly. Unknown/rare states
+ * (`fastpath function call`, `disabled`, or any future addition)
+ * map to `""` (neutral default). */
+export function stateColorClass(state: string): string {
   switch (state) {
     case "active":
-      return "row-state-active";
+      return "state-active";
     case "idle":
-      return "row-state-idle";
+      return "state-idle";
     case "idle in transaction":
-      return "row-state-idle-txn";
+      return "state-idle-txn";
     case "idle in transaction (aborted)":
-      return "row-state-idle-txn-aborted";
+      return "state-idle-txn-aborted";
     default:
       return "";
   }
+}
+
+/** Severity class applied strictly to the Duration column:
+ * active sessions turn bad (>30s), warn (>10s), or ok (<=10s).
+ * Idle sessions remain calm/dim. */
+export function durationSeverityClass(
+  state: string,
+  durationSecs: number,
+): string {
+  if (state === "active") {
+    if (durationSecs > ROW_DURATION_BAD_SECS) return "duration-bad";
+    if (durationSecs > ROW_DURATION_WARN_SECS) return "duration-warn";
+    return "duration-ok";
+  }
+  return "duration-idle";
+}
+
+/** Color class for wait events: Lock events are highlighted as red/bold,
+ * other wait events are yellow, and empty is dim. */
+export function waitEventClass(waitEvent: string | null): string {
+  if (!waitEvent) return "wait-none";
+  if (waitEvent.startsWith("Lock:")) return "wait-lock";
+  return "wait-other";
 }
 
 type SortKey =
@@ -273,40 +273,80 @@ export class ActivityTable {
       const isBlocked = this.blocked.has(row.pid);
       const isWaiting = row.wait_event !== null;
       const tr = document.createElement("tr");
-      // v0.16 (Part A): the whole row carries a pg_activity-style severity/
-      // state color — see `activityRowClass`'s doc comment for the exact
-      // precedence (mirrors the TUI 1:1).
-      const rowClass = activityRowClass(row, isBlocked, isWaiting);
-      if (rowClass !== "") tr.classList.add(rowClass);
+
+      // Status column
+      const statusTd = document.createElement("td");
+      statusTd.classList.add("col-status");
       const marker = isBlocked ? "B" : isWaiting ? "W" : "";
-      const cells: Array<[string, boolean, boolean]> = [
-        [marker, false, false],
-        [String(row.pid), true, false],
-        [row.database, false, false],
-        [row.username, false, false],
-        [row.client, false, true],
-        [row.state, false, false],
-        [row.wait_event ?? "", false, false],
-        [humanDuration(row.duration_secs), true, false],
-      ];
-      for (const [text, numeric, isClient] of cells) {
-        const td = document.createElement("td");
-        if (isClient && row.ssl) {
-          const badge = document.createElement("span");
-          badge.className = "ssl-badge";
-          badge.title = `SSL: ${row.ssl_version ?? "TLS"} (${row.ssl_cipher ?? "encrypted"})`;
-          badge.textContent = "🔒 ";
-          td.append(badge);
-        }
-        td.append(document.createTextNode(text));
-        if (numeric) td.classList.add("num");
-        tr.append(td);
+      if (isBlocked) {
+        statusTd.classList.add("status-blocked");
+      } else if (isWaiting) {
+        statusTd.classList.add("status-waiting");
       }
+      statusTd.textContent = marker;
+      tr.append(statusTd);
+
+      // PID column
+      const pidTd = document.createElement("td");
+      pidTd.classList.add("col-pid", "num");
+      if (isBlocked) {
+        pidTd.classList.add("pid-blocked");
+      }
+      pidTd.textContent = String(row.pid);
+      tr.append(pidTd);
+
+      // Database column
+      const dbTd = document.createElement("td");
+      dbTd.classList.add("col-db");
+      dbTd.textContent = row.database;
+      tr.append(dbTd);
+
+      // Username column
+      const userTd = document.createElement("td");
+      userTd.classList.add("col-user");
+      userTd.textContent = row.username;
+      tr.append(userTd);
+
+      // Client column
+      const clientTd = document.createElement("td");
+      clientTd.classList.add("col-client");
+      if (row.ssl) {
+        const badge = document.createElement("span");
+        badge.className = "ssl-badge";
+        badge.title = `SSL: ${row.ssl_version ?? "TLS"} (${row.ssl_cipher ?? "encrypted"})`;
+        badge.textContent = "🔒 ";
+        clientTd.append(badge);
+      }
+      clientTd.append(document.createTextNode(row.client));
+      tr.append(clientTd);
+
+      // State column
+      const stateTd = document.createElement("td");
+      stateTd.classList.add("col-state");
+      const sClass = stateColorClass(row.state);
+      if (sClass) stateTd.classList.add(sClass);
+      stateTd.textContent = row.state;
+      tr.append(stateTd);
+
+      // Wait column
+      const waitTd = document.createElement("td");
+      waitTd.classList.add("col-wait");
+      waitTd.classList.add(waitEventClass(row.wait_event));
+      waitTd.textContent = row.wait_event ?? "—";
+      tr.append(waitTd);
+
+      // Duration column: time-based coloring applied strictly to this column
+      const durationTd = document.createElement("td");
+      durationTd.classList.add("col-duration", "num");
+      durationTd.classList.add(durationSeverityClass(row.state, row.duration_secs));
+      durationTd.textContent = humanDuration(row.duration_secs);
+      tr.append(durationTd);
+
       // Xact column: age of the open transaction ("—" when none), tinted
       // by the same severity the oldest-xact headline uses —
       // idle-in-transaction reads worse than an equally-old active query.
       const xactTd = document.createElement("td");
-      xactTd.classList.add("num");
+      xactTd.classList.add("col-xact", "num");
       if (row.xact_age_secs !== null) {
         xactTd.textContent = humanDuration(row.xact_age_secs);
         const severity = xactAgeSeverity(row.xact_age_secs, row.state);
@@ -317,12 +357,11 @@ export class ActivityTable {
         xactTd.classList.add("xact-none");
       }
       tr.append(xactTd);
-      // Query cell (v0.16, Part B): PLAIN text — the row's own severity/
-      // state color IS the signal here; SQL keyword highlighting only shows
-      // in the expanded detail row below (tooltip still carries the full
-      // text for a quick hover).
+
+      // Query cell: neutral plain text — SQL keyword highlighting
+      // is kept in the expanded detail row below.
       const query = document.createElement("td");
-      query.classList.add("query");
+      query.classList.add("col-query", "query");
       query.title = row.query;
       query.textContent = row.query;
       tr.append(query);

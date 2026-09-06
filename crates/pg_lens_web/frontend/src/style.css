@@ -786,68 +786,89 @@ html[data-theme="light"] .sql-num {
   opacity: 0.7;
 }
 
-/* v0.16 (Part A): pg_activity-style whole-row severity/state color, mirrors
-   the TUI's `row_severity_style`/`state_row_color` 1:1 — precedence order
-   is blocked > duration override > waiting > state (see
-   `table.ts::activityRowClass`). `color` cascades to every cell in the row
-   (including the query cell, which no longer overrides it — see
-   `td.query` above) EXCEPT cells with their own more specific rule (the
-   Xact column's `.xact-warn`/`.xact-bad`, which must keep signalling
-   idle-in-transaction risk independently of the row's own color). */
-#activity tr.waiting {
-  background: var(--warn-bg);
-  color: var(--warn);
-}
-
-#activity tr.waiting td:first-child {
+/* Column-specific color system (pg_activity style) & time-based coloring on Duration only */
+#activity td.col-status.status-blocked {
+  color: var(--bad);
   font-weight: 700;
 }
 
-#activity tr.blocked {
-  background: var(--bad-bg);
-  color: var(--bad);
-}
-
-#activity tr.blocked td:first-child {
+#activity td.col-status.status-waiting {
+  color: var(--warn);
   font-weight: 700;
 }
 
-/* Duration override (active sessions only): bad past 30s, warn past 10s —
-   mirrors `ROW_DURATION_BAD_SECS`/`ROW_DURATION_WARN_SECS`. Checked before
-   `waiting`/state in `activityRowClass`, so these classes never co-occur
-   with `.waiting`/a `.row-state-*` class on the same row. */
-#activity tr.row-duration-bad {
-  background: var(--bad-bg);
+#activity td.col-pid {
+  color: var(--accent);
+}
+
+#activity td.col-pid.pid-blocked {
   color: var(--bad);
-  font-weight: 600;
+  font-weight: 700;
 }
 
-#activity tr.row-duration-warn {
-  background: var(--warn-bg);
-  color: var(--warn);
-  font-weight: 600;
+#activity td.col-db {
+  color: var(--accent);
 }
 
-/* Base per-state color (see `stateRowClass`): `active` reads calm ok-green,
-   `idle` dims out, `idle in transaction` is a standing risk even at
-   duration zero, `idle in transaction (aborted)` is worse still. Any state
-   pg_lens does not recognize gets no class at all (plain `--fg`, the
-   table's own default) rather than guessing. */
-#activity tr.row-state-active {
-  color: var(--ok);
+#activity td.col-user {
+  color: var(--fg);
 }
 
-#activity tr.row-state-idle {
+#activity td.col-client {
   color: var(--fg-dim);
 }
 
-#activity tr.row-state-idle-txn {
+#activity td.col-state.state-active {
+  color: var(--ok);
+}
+
+#activity td.col-state.state-idle {
+  color: var(--fg-dim);
+}
+
+#activity td.col-state.state-idle-txn {
   color: var(--warn);
 }
 
-#activity tr.row-state-idle-txn-aborted {
+#activity td.col-state.state-idle-txn-aborted {
   color: var(--bad);
-  font-weight: 600;
+  font-weight: 700;
+}
+
+#activity td.col-wait.wait-lock {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+#activity td.col-wait.wait-other {
+  color: var(--warn);
+}
+
+#activity td.col-wait.wait-none {
+  color: var(--fg-dim);
+}
+
+/* Time-based coloring applied strictly to the Duration column */
+#activity td.col-duration.duration-bad {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+#activity td.col-duration.duration-warn {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+#activity td.col-duration.duration-ok {
+  color: var(--ok);
+}
+
+#activity td.col-duration.duration-idle {
+  color: var(--fg-dim);
+}
+
+#activity td.col-query {
+  color: var(--fg);
 }
 
 /* Xact column (v0.9): age of each session's open transaction, tinted by
