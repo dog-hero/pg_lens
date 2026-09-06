@@ -43,6 +43,8 @@ pub enum Tab {
     #[default]
     MacroLens,
     MicroLens,
+    /// Blocks & Locks Lens (v0.17): hierarchical wait-for tree + active locks.
+    BlocksLens,
     /// The full replication view (U1): all senders/receiver + every slot as
     /// a scrollable table. The Macro Lens keeps its own compact, capped
     /// summary — this lens is where nothing clips.
@@ -56,40 +58,43 @@ pub enum Tab {
 
 impl Tab {
     // v0.12: number-prefixed so the tab bar is self-documenting about the
-    // `1`-`6` direct-jump keys (see `handle_key`'s digit arm). The prefix is
+    // `1`-`7` direct-jump keys (see `handle_key`'s digit arm). The prefix is
     // additive on top of the original title text (never replaces it) so
     // every pre-existing `screen.contains("Macro Lens")`-style assertion
     // keeps matching unchanged.
-    pub const TITLES: [&'static str; 6] = [
+    pub const TITLES: [&'static str; 7] = [
         "1 Macro Lens",
         "2 Micro Lens",
-        "3 Replication",
-        "4 Schema Lens",
-        "5 Indexes",
-        "6 Query Lens",
+        "3 Blocks",
+        "4 Replication",
+        "5 Schema Lens",
+        "6 Indexes",
+        "7 Query Lens",
     ];
 
     pub fn index(self) -> usize {
         match self {
             Tab::MacroLens => 0,
             Tab::MicroLens => 1,
-            Tab::ReplicationLens => 2,
-            Tab::SchemaLens => 3,
-            Tab::IndexLens => 4,
-            Tab::QueryLens => 5,
+            Tab::BlocksLens => 2,
+            Tab::ReplicationLens => 3,
+            Tab::SchemaLens => 4,
+            Tab::IndexLens => 5,
+            Tab::QueryLens => 6,
         }
     }
 
-    /// Inverse of [`Tab::index`] — used by the `1`-`6` direct-jump keys.
-    /// `None` for anything outside `0..6` (there is no seventh tab).
+    /// Inverse of [`Tab::index`] — used by the `1`-`7` direct-jump keys.
+    /// `None` for anything outside `0..7`.
     pub fn from_index(index: usize) -> Option<Self> {
         match index {
             0 => Some(Tab::MacroLens),
             1 => Some(Tab::MicroLens),
-            2 => Some(Tab::ReplicationLens),
-            3 => Some(Tab::SchemaLens),
-            4 => Some(Tab::IndexLens),
-            5 => Some(Tab::QueryLens),
+            2 => Some(Tab::BlocksLens),
+            3 => Some(Tab::ReplicationLens),
+            4 => Some(Tab::SchemaLens),
+            5 => Some(Tab::IndexLens),
+            6 => Some(Tab::QueryLens),
             _ => None,
         }
     }
@@ -97,7 +102,8 @@ impl Tab {
     pub fn next(self) -> Self {
         match self {
             Tab::MacroLens => Tab::MicroLens,
-            Tab::MicroLens => Tab::ReplicationLens,
+            Tab::MicroLens => Tab::BlocksLens,
+            Tab::BlocksLens => Tab::ReplicationLens,
             Tab::ReplicationLens => Tab::SchemaLens,
             Tab::SchemaLens => Tab::IndexLens,
             Tab::IndexLens => Tab::QueryLens,
@@ -111,10 +117,30 @@ impl Tab {
         match self {
             Tab::MacroLens => Tab::QueryLens,
             Tab::MicroLens => Tab::MacroLens,
-            Tab::ReplicationLens => Tab::MicroLens,
+            Tab::BlocksLens => Tab::MicroLens,
+            Tab::ReplicationLens => Tab::BlocksLens,
             Tab::SchemaLens => Tab::ReplicationLens,
             Tab::IndexLens => Tab::SchemaLens,
             Tab::QueryLens => Tab::IndexLens,
+        }
+    }
+}
+
+/// Active pane of the Blocks Lens (v0.17).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BlocksPane {
+    /// Wait-for tree with root blockers.
+    #[default]
+    Tree,
+    /// Active locks table (`pg_locks`).
+    Locks,
+}
+
+impl BlocksPane {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Tree => Self::Locks,
+            Self::Locks => Self::Tree,
         }
     }
 }
@@ -523,6 +549,12 @@ pub struct App {
     pub statements_sort_mode: StatementsSortMode,
     /// Query Lens selection, independent like the schema one.
     pub statements_table_state: TableState,
+    /// Blocks Lens tree selection (v0.17).
+    pub blocks_tree_state: TableState,
+    /// Blocks Lens locks table selection (v0.17).
+    pub blocks_locks_state: TableState,
+    /// Blocks Lens active pane (v0.17: Tree vs Locks).
+    pub blocks_active_pane: BlocksPane,
     /// Whether the detail panel is open (Micro Lens: full query of the
     /// selected session; Schema Lens: full vacuum/analyze stats + index
     /// bloat of the selected table). While open: `j`/`k` still move the
@@ -718,6 +750,9 @@ impl App {
             statements_row_order: Vec::new(),
             statements_sort_mode: StatementsSortMode::default(),
             statements_table_state: TableState::default().with_selected(0),
+            blocks_tree_state: TableState::default().with_selected(0),
+            blocks_locks_state: TableState::default().with_selected(0),
+            blocks_active_pane: BlocksPane::default(),
             detail_open: false,
             table_detail_scroll: 0,
             table_detail_request: None,
@@ -814,6 +849,33 @@ impl App {
         let snapshot_idx = *self.statements_row_order.get(display_idx)?;
         statements.statements.get(snapshot_idx)
     }
+
+    /// The Blocks Lens tree node currently under the cursor (v0.17).
+    pub fn selected_block_node(&self) -> Option<&pg_lens_core::BlockTreeNode> {
+        let tree = self.snapshot.blocking_tree.as_deref()?;
+        let idx = self.blocks_tree_state.selected()?;
+        fn find<'a>(nodes: &'a [pg_lens_core::BlockTreeNode], curr: &mut usize, target: usize) -> Option<&'a pg_lens_core::BlockTreeNode> {
+            for node in nodes {
+                if *curr == target {
+                    return Some(node);
+                }
+                *curr += 1;
+                if let Some(found) = find(&node.children, curr, target) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let mut curr = 0;
+        find(tree, &mut curr, idx)
+    }
+
+    /// The Blocks Lens active lock currently under the cursor (v0.17).
+    pub fn selected_active_lock(&self) -> Option<&pg_lens_core::ActiveLockRow> {
+        let locks = self.snapshot.active_locks.as_deref()?;
+        let idx = self.blocks_locks_state.selected()?;
+        locks.get(idx)
+    }
 }
 
 /// v0.16 (`y`): resolves the text `y` should copy for whatever the active
@@ -847,6 +909,13 @@ pub fn clipboard_text(app: &App) -> Option<String> {
                 return Some(schema_column_list(detail));
             }
             Some(format!("{}.{}", table.schema, table.name))
+        }
+        Tab::BlocksLens => {
+            if app.blocks_active_pane == BlocksPane::Tree {
+                app.selected_block_node().map(|n| n.query.clone())
+            } else {
+                app.selected_active_lock().map(|l| l.query.clone())
+            }
         }
         _ => None,
     }
@@ -1121,6 +1190,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                     && app.selected_table().is_some())
                 || (app.active_tab == Tab::IndexLens && app.selected_index().is_some())
                 || (app.active_tab == Tab::QueryLens && app.selected_statement().is_some())
+                || (app.active_tab == Tab::BlocksLens
+                    && (app.selected_block_node().is_some() || app.selected_active_lock().is_some()))
             {
                 app.detail_open = true;
                 // v0.15: fires the on-demand `\d` request (Schema Lens Tables
@@ -1152,7 +1223,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // earlier in this function), so it can never hijack a digit typed
         // into the filter editor or a confirm-modal keystroke. A no-op if
         // already on that tab (nothing to remember as "previous").
-        KeyCode::Char(c @ '1'..='6') => {
+        KeyCode::Char(c @ '1'..='7') => {
             if let Some(tab) = Tab::from_index(c as usize - '1' as usize)
                 && tab != app.active_tab
             {
@@ -1261,6 +1332,17 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.schema_show_partitions = !app.schema_show_partitions;
             resort_schema(app);
             clamp_selection(app);
+        }
+        // `p` or `o` (v0.17): toggles between Tree and Locks panes in Blocks Lens.
+        KeyCode::Char('p') | KeyCode::Char('o') if app.active_tab == Tab::BlocksLens => {
+            app.blocks_active_pane = app.blocks_active_pane.toggle();
+        }
+        // `b` (v0.17, mnemonic "blocks"): jumps directly to Blocks & Locks Lens.
+        KeyCode::Char('b') if app.active_tab != Tab::BlocksLens => {
+            app.previous_tab = Some(app.active_tab);
+            app.detail_open = false;
+            app.waits_open = false;
+            app.active_tab = Tab::BlocksLens;
         }
         // `x` (v0.15, mnemonic "cross-reference"): jumps from the selected
         // Schema Lens table to the Query Lens with `statements_filter`
@@ -1457,18 +1539,21 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 /// keys in a view module would not be enforcement (the model is the only
 /// place state mutates); this early return is it.
 fn open_confirm(app: &mut App, terminate: bool) {
-    // The idle census (v0.11) has its own cursor (`idle_table_state`), not
-    // `table_state` — `c`/`K` reading `selected_row()` here would silently
-    // act on whatever the Activity table's cursor last pointed at, not the
-    // idle row the operator is actually looking at. Out of scope for this
-    // census (a future "kill this idle connection" action would need its
-    // own selected-row lookup), so both keys stay inert there.
-    if app.active_tab != Tab::MicroLens || app.micro_view != MicroView::Activity {
-        return;
-    }
-    let Some(row) = app.selected_row() else {
+    let (pid, username, database) = if app.active_tab == Tab::MicroLens && app.micro_view == MicroView::Activity {
+        let Some(row) = app.selected_row() else { return; };
+        (row.pid, row.username.clone(), row.database.clone())
+    } else if app.active_tab == Tab::BlocksLens {
+        if app.blocks_active_pane == BlocksPane::Tree {
+            let Some(node) = app.selected_block_node() else { return; };
+            (node.pid, node.usename.clone(), app.snapshot.vitals.database.clone())
+        } else {
+            let Some(lock) = app.selected_active_lock() else { return; };
+            (lock.pid, lock.usename.clone(), app.snapshot.vitals.database.clone())
+        }
+    } else {
         return;
     };
+
     if app.read_only {
         app.admin_feedback = Some(AdminFeedback {
             text: "read-only mode — action disabled".to_string(),
@@ -1478,14 +1563,14 @@ fn open_confirm(app: &mut App, terminate: bool) {
         return;
     }
     let command = if terminate {
-        AdminCommand::TerminateBackend(row.pid)
+        AdminCommand::TerminateBackend(pid)
     } else {
-        AdminCommand::CancelBackend(row.pid)
+        AdminCommand::CancelBackend(pid)
     };
     app.confirm = Some(ConfirmState {
         command,
-        username: row.username.clone(),
-        database: row.database.clone(),
+        username,
+        database,
     });
 }
 
@@ -1807,6 +1892,19 @@ fn move_selection_to_inner(app: &mut App, target: i64) {
 /// out of this single routing table for free.
 fn selection_target(app: &mut App) -> (&mut TableState, usize) {
     match app.active_tab {
+        Tab::BlocksLens if app.blocks_active_pane == BlocksPane::Tree => {
+            let len = app.snapshot.blocking_tree.as_deref().map_or(0, |tree| {
+                fn count(nodes: &[pg_lens_core::BlockTreeNode]) -> usize {
+                    nodes.iter().map(|n| 1 + count(&n.children)).sum()
+                }
+                count(tree)
+            });
+            (&mut app.blocks_tree_state, len)
+        }
+        Tab::BlocksLens => {
+            let len = app.snapshot.active_locks.as_deref().map_or(0, |l| l.len());
+            (&mut app.blocks_locks_state, len)
+        }
         Tab::IndexLens => (&mut app.index_table_state, app.index_row_order.len()),
         Tab::ReplicationLens => (
             &mut app.replication_table_state,
@@ -1963,6 +2061,36 @@ fn clamp_selection(app: &mut App) {
             .unwrap_or(0)
             .min(idle_len - 1);
         app.idle_table_state.select(Some(clamped));
+    }
+
+    // Blocks Lens (v0.17): clamps tree selection and active locks selection.
+    let blocks_tree_len = app.snapshot.blocking_tree.as_deref().map_or(0, |tree| {
+        fn count(nodes: &[pg_lens_core::BlockTreeNode]) -> usize {
+            nodes.iter().map(|n| 1 + count(&n.children)).sum()
+        }
+        count(tree)
+    });
+    if blocks_tree_len == 0 {
+        app.blocks_tree_state.select(None);
+    } else {
+        let clamped = app
+            .blocks_tree_state
+            .selected()
+            .unwrap_or(0)
+            .min(blocks_tree_len - 1);
+        app.blocks_tree_state.select(Some(clamped));
+    }
+
+    let blocks_locks_len = app.snapshot.active_locks.as_deref().map_or(0, |l| l.len());
+    if blocks_locks_len == 0 {
+        app.blocks_locks_state.select(None);
+    } else {
+        let clamped = app
+            .blocks_locks_state
+            .selected()
+            .unwrap_or(0)
+            .min(blocks_locks_len - 1);
+        app.blocks_locks_state.select(Some(clamped));
     }
 }
 
@@ -2714,11 +2842,13 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_the_six_lenses() {
+    fn tab_cycles_the_seven_lenses() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::MacroLens);
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::MicroLens);
+        update(&mut app, press(KeyCode::Tab));
+        assert_eq!(app.active_tab, Tab::BlocksLens);
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::ReplicationLens);
         update(&mut app, press(KeyCode::Tab));
@@ -2735,7 +2865,7 @@ mod tests {
     // --- v0.12: navigation & scroll polish ----------------------------------
 
     #[test]
-    fn back_tab_cycles_the_six_lenses_backward() {
+    fn back_tab_cycles_the_seven_lenses_backward() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::MacroLens);
         update(&mut app, press(KeyCode::BackTab));
@@ -2746,6 +2876,8 @@ mod tests {
         assert_eq!(app.active_tab, Tab::SchemaLens);
         update(&mut app, press(KeyCode::BackTab));
         assert_eq!(app.active_tab, Tab::ReplicationLens);
+        update(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.active_tab, Tab::BlocksLens);
         update(&mut app, press(KeyCode::BackTab));
         assert_eq!(app.active_tab, Tab::MicroLens);
         update(&mut app, press(KeyCode::BackTab));
@@ -2759,10 +2891,11 @@ mod tests {
         for (digit, tab) in [
             ('1', Tab::MacroLens),
             ('2', Tab::MicroLens),
-            ('3', Tab::ReplicationLens),
-            ('4', Tab::SchemaLens),
-            ('5', Tab::IndexLens),
-            ('6', Tab::QueryLens),
+            ('3', Tab::BlocksLens),
+            ('4', Tab::ReplicationLens),
+            ('5', Tab::SchemaLens),
+            ('6', Tab::IndexLens),
+            ('7', Tab::QueryLens),
         ] {
             update(&mut app, press(KeyCode::Char(digit)));
             assert_eq!(app.active_tab, tab, "digit {digit}");
@@ -2777,7 +2910,7 @@ mod tests {
         update(&mut app, press(KeyCode::Enter));
         assert!(app.detail_open);
         update(&mut app, press(KeyCode::Char('4')));
-        assert_eq!(app.active_tab, Tab::SchemaLens);
+        assert_eq!(app.active_tab, Tab::ReplicationLens);
         assert!(!app.detail_open);
     }
 
@@ -2814,7 +2947,7 @@ mod tests {
         update(&mut app, press(KeyCode::Backspace));
         assert_eq!(app.active_tab, Tab::MacroLens);
 
-        update(&mut app, press(KeyCode::Char('5'))); // → Index Lens
+        update(&mut app, press(KeyCode::Char('6'))); // → Index Lens
         assert_eq!(app.active_tab, Tab::IndexLens);
         update(&mut app, press(KeyCode::Backspace)); // → back to Macro Lens
         assert_eq!(app.active_tab, Tab::MacroLens);
@@ -3424,7 +3557,7 @@ mod tests {
         // Tab closes the panel and switches lens.
         update(&mut app, press(KeyCode::Tab));
         assert!(!app.detail_open);
-        assert_eq!(app.active_tab, Tab::ReplicationLens);
+        assert_eq!(app.active_tab, Tab::BlocksLens);
     }
 
     /// Rows of the Schema Lens in display order, projected by `field`.
@@ -3442,7 +3575,7 @@ mod tests {
     #[test]
     fn schema_sort_cycles_and_reorders_rows() {
         let mut app = App::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             update(&mut app, press(KeyCode::Tab));
         }
         assert_eq!(app.active_tab, Tab::SchemaLens);
@@ -3601,7 +3734,7 @@ mod tests {
     #[test]
     fn schema_lens_has_its_own_selection_and_detail() {
         let mut app = App::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             update(&mut app, press(KeyCode::Tab));
         }
         assert_eq!(app.active_tab, Tab::SchemaLens);
@@ -3637,7 +3770,7 @@ mod tests {
         assert_eq!(app.schema_refresh_requests, 1);
 
         // Schema Lens: R keeps counting; lowercase r does nothing.
-        for _ in 0..3 {
+        for _ in 0..4 {
             update(&mut app, press(KeyCode::Tab));
         }
         assert_eq!(app.active_tab, Tab::SchemaLens);
@@ -3712,11 +3845,11 @@ mod tests {
 
     // --- Query Lens (pg_stat_statements) --------------------------------------
 
-    /// App on the Query Lens (five Tabs from Macro: Micro, Replication,
-    /// Schema, Index, Query).
+    /// App on the Query Lens (six Tabs from Macro: Micro, Blocks,
+    /// Replication, Schema, Index, Query).
     fn query_lens_app() -> App {
         let mut app = App::new();
-        for _ in 0..5 {
+        for _ in 0..6 {
             update(&mut app, press(KeyCode::Tab));
         }
         assert_eq!(app.active_tab, Tab::QueryLens);
@@ -4157,9 +4290,8 @@ mod tests {
         update(&mut app, press(KeyCode::Char('c')));
         assert!(app.confirm.is_none());
 
-        // Schema Lens: inert too.
-        update(&mut app, press(KeyCode::Tab));
-        update(&mut app, press(KeyCode::Tab));
+        // Replication Lens: inert too.
+        app.active_tab = Tab::ReplicationLens;
         update(&mut app, press(KeyCode::Char('c')));
         assert!(app.confirm.is_none());
 

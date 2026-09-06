@@ -95,6 +95,9 @@ mod tests {
             query_leader_pid: pid,
             is_parallel_worker: false,
             query_id: None,
+            ssl: false,
+            ssl_version: None,
+            ssl_cipher: None,
         }
     }
 

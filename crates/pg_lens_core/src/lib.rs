@@ -5,6 +5,7 @@
 //! no knowledge of any frontend's internal message types.
 
 pub mod blocking;
+pub mod blocks;
 pub mod db;
 pub mod history;
 pub mod history_store;
@@ -27,14 +28,15 @@ pub mod xact_age;
 pub use tokio_postgres;
 
 pub use blocking::{BlockingChain, blocking_chain};
+pub use blocks::{BlockTreeNode, build_blocking_tree};
 pub use history::{
     HistoryPoint, SnapshotHistory, TREND_DEADBAND, TREND_LOOKBACK_TICKS, Trend, trend,
 };
 pub use index_advisor::{IndexCatalogRow, classify as classify_indexes};
 pub use models::{
-    ActivityRow, AdminActionResult, AdminCommand, AdminKind, AdminOutcome, BloatRow,
-    CheckpointerStats, DatabaseRow, DbSnapshot, IdleSessionRow, IndexFinding, IndexRow,
-    IoStatRow, LockCapacity, LockRow, PollerStatus, PreparedXactRow, ReplicationInfo,
+    ActiveLockRow, ActivityRow, AdminActionResult, AdminCommand, AdminKind, AdminOutcome, BloatRow,
+    CheckpointerStats, DatabaseRow, DbSnapshot, DdlProgressRow, IdleSessionRow, IndexFinding,
+    IndexRow, IoStatRow, LockCapacity, LockRow, PollerStatus, PreparedXactRow, ReplicationInfo,
     ReplicationSlotRow,
     SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow, StatementsSnapshot,
     StatementsStatus, TableDetail, TableDetailColumn, TableDetailConstraint, TableDetailIndex,

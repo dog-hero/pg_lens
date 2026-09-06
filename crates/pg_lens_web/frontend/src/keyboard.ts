@@ -2,13 +2,14 @@
 // dispatch-mapping helpers, kept DOM-free so they're plain node:test units —
 // main.ts's `keydown` listener is the only place that touches the DOM.
 
-/** `1`–`5` jump to the nav tabs, same order as the sidenav / #tabs buttons. */
+/** `1`–`6` jump to the nav tabs, same order as the sidenav / #tabs buttons. */
 const KEY_TO_TAB_ID: Record<string, string> = {
   "1": "tab-activity",
-  "2": "tab-replication",
-  "3": "tab-schema",
-  "4": "tab-indexes",
-  "5": "tab-queries",
+  "2": "tab-blocks",
+  "3": "tab-replication",
+  "4": "tab-schema",
+  "5": "tab-indexes",
+  "6": "tab-queries",
 };
 
 /** The tab button id a digit key jumps to, or null for any other key. */

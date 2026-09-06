@@ -23,6 +23,9 @@ function row(state: string, xactAgeSecs: number | null, pid = 1): ActivityRow {
     query_leader_pid: pid,
     is_parallel_worker: false,
     query_id: null,
+    ssl: false,
+    ssl_version: null,
+    ssl_cipher: null,
   };
 }
 

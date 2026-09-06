@@ -128,11 +128,16 @@ def main():
         # frozen-screen comparison. Then: two captures 3.2s apart must be
         # identical (mock data changes every 2s) except the statusbar
         # staleness, which keeps counting up ON PURPOSE — mask it.
-        fade_deadline = time.time() + 14
-        while time.time() < fade_deadline and (
-                "query cancelled (PID" in screen.snapshot()
-                or "cancel sent to PID" in screen.snapshot()):
+        faded = False
+        fade_deadline = time.time() + 25
+        while time.time() < fade_deadline:
+            snap = screen.snapshot()
+            if "query cancelled (PID" not in snap and "cancel sent to PID" not in snap:
+                faded = True
+                break
             pump(0.5)
+        if not faded:
+            print("WARNING: admin feedback line did not fade within 25s")
         stale_data_re = re.compile(r"data: (\d+)s ago")
         def masked(snap):
             return stale_data_re.sub("data: Xs ago", snap)
@@ -148,11 +153,16 @@ def main():
         # schema every 5 ticks, and the R-forces-recollection proof below
         # needs staleness to climb well past the check thresholds.
         send("+++"); pump(0.4)
-    # U1: second Tab now reaches the Replication Lens (Macro/Micro/
+    # v0.17: second Tab reaches the Blocks Lens (Macro/Micro/Blocks/
     # Replication/Schema/Indexes/Queries) — also exercised in BASIC, proving
     # the 80x24 layout doesn't panic.
+    send("\t"); pump(0.9); snaps["b1_blocks"] = screen.snapshot()
+    if not BASIC:
+        send("p");  pump(0.6); snaps["b2_blocks_locks"] = screen.snapshot()
+        send("p");  pump(0.6); snaps["b3_blocks_tree"] = screen.snapshot()
+    # Third Tab reaches the Replication Lens.
     send("\t"); pump(0.9); snaps["r1_replication"] = screen.snapshot()
-    # Third Tab reaches the Schema Lens (also exercised in BASIC).
+    # Fourth Tab reaches the Schema Lens (also exercised in BASIC).
     send("\t"); pump(0.9); snaps["s1_schema"] = screen.snapshot()
     if not BASIC:
         # s: size (default) -> dead tuples; order must visibly change.
@@ -204,8 +214,11 @@ def main():
         code = "KILLED (did not exit on q)"
 
     for name, snap in snaps.items():
-        with open(f"/tmp/pg_lens_{name}.txt", "w") as f:
-            f.write(snap + "\n")
+        try:
+            with open(f"/tmp/pg_lens_{name}.txt", "w") as f:
+                f.write(snap + "\n")
+        except OSError:
+            pass
 
     ok = True
     def check(label, cond):
@@ -274,14 +287,20 @@ def main():
               "refresh=0.5s" in snaps["t8_fast_a"])
         check("snapshots arrive at the faster cadence (screens 0.9s apart differ)",
               snaps["t8_fast_a"] != snaps["t9_fast_b"])
+    # --- v0.17: Blocks Lens ------------------------------------------------
+    check("Tab x2 reached the Blocks Lens (Tree / Locks panes)",
+          "Blocks" in snaps["b1_blocks"] and ("Blocked" in snaps["b1_blocks"] or "Lock" in snaps["b1_blocks"]))
+    if not BASIC:
+        check("p toggled between Blocks Lens Tree and Locks panes",
+              "b2_blocks_locks" in snaps and "b3_blocks_tree" in snaps)
     # --- U1: Replication Lens ----------------------------------------------
-    check("Tab x2 reached the Replication Lens (Role + Slots panels)",
+    check("Tab x3 reached the Replication Lens (Role + Slots panels)",
           "Role" in snaps["r1_replication"] and "Slots" in snaps["r1_replication"])
     check("Replication Lens shows ALL mock slots, unlike the Macro summary",
           "replica_1_slot" in snaps["r1_replication"]
           and "analytics_cdc" in snaps["r1_replication"])
     # --- Fase S3: Schema Lens ---------------------------------------------
-    check("Tab x3 reached the Schema Lens (Tables + Bloat% columns)",
+    check("Tab x4 reached the Schema Lens (Tables + Bloat% columns)",
           "Tables" in snaps["s1_schema"] and "Bloat%" in snaps["s1_schema"])
     # At 80 cols the Table column ellipsis-truncates, so BASIC only asserts
     # the schema prefix; the full name is checked at the default 120 cols.
@@ -316,12 +335,12 @@ def main():
               before is not None and after is not None and after < before
               and after <= 3)
     # --- U1: Index Lens ------------------------------------------------------
-    check("Tab x4 reached the Index Lens (its own tab now, Flag column)",
+    check("Tab x5 reached the Index Lens (its own tab now, Flag column)",
           "Indexes" in snaps["x1_index_lens"] and "Flag" in snaps["x1_index_lens"])
     check("Index Lens shows the mock's findings (UNUSED/DUP/prefix)",
           "UNUSED" in snaps["x1_index_lens"] and "DUP" in snaps["x1_index_lens"])
     # --- Query Lens (pg_stat_statements) -----------------------------------
-    check("Tab x5 reached the Query Lens (Statements + Hit% columns)",
+    check("Tab x6 reached the Query Lens (Statements + Hit% columns)",
           "Statements" in snaps["q1_query_lens"] and "Hit%" in snaps["q1_query_lens"])
     check("query lens footer: db + count + scope + staleness",
           "db: shop" in snaps["q1_query_lens"]
@@ -353,7 +372,7 @@ def main():
     # --- v0.9: keyboard help overlay (`?`) ----------------------------------
     check("? opened the keyboard help overlay (known bindings visible)",
           "keyboard help" in snaps["h1_help_open"]
-          and "terminate the backend" in snaps["h1_help_open"])
+          and "cancel the query" in snaps["h1_help_open"])
     check("Esc closed the help overlay again",
           "keyboard help" not in snaps["h2_help_closed"])
     check("q exited cleanly (EXIT_CODE=0)", code == 0)

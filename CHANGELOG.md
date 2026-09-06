@@ -4,6 +4,36 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.17.0] — 2026-09-06 — "Blocks & Locks Lens"
+
+### Added
+- **Blocks & Locks Lens (`3 Blocks`)** — dedicated lens positioned between Micro
+  Lens and Replication, featuring a dual-pane split view:
+  - Upper pane: hierarchical blocking wait-tree (`root blocker -> waiting PID -> waiting PID`)
+    identifying root blockers, blocked session count, lock modes, target relations, and wait age.
+  - Lower pane: complete active locks table (`pg_locks`) showing all granted and waiting
+    locks with target relation, lock type, lock mode, status (`GRANT`/`WAIT`), age, user, and query text.
+  - Quick pane-switching with `p` / `o`, interactive detail panel on `Enter`, and direct
+    query cancellation (`c`) or backend termination (`K`) with confirmation modals from either pane.
+  - Direct jump via key `3` or mnemonic `b`. Web Lens mirrors with an interactive
+    blocking tree, active locks table, and search filter on tab `2 Blocks`.
+- **In-flight DDL & maintenance progress (`pg_stat_progress_*`)** — monitors live progress
+  from `pg_stat_progress_create_index`, `pg_stat_progress_analyze`, and
+  `pg_stat_progress_basebackup`. Surfaced directly in the Micro Lens session detail panel (`Enter`)
+  and in the Web Lens Maintenance panel alongside autovacuum operations.
+- **SSL / TLS connection security indicator (`pg_stat_ssl`)** — integrates `pg_stat_ssl`
+  into activity and idle session tracking:
+  - Visual lock badge (`🔒 `) on client address columns in the activity table.
+  - Connection security status in the session detail overlay: shows cipher and protocol version
+    (e.g., `TLSv1.3 (TLS_AES_256_GCM_SHA384)`) or flags unencrypted connections (`Plaintext`).
+  - SSL status badge on idle connection census in both TUI and Web Lens.
+
+### Changed
+- **Tab ordering & numbering** — Blocks Lens is positioned as Tab 3 (`3 Blocks`), shifting
+  Replication to 4, Schema Lens to 5, Indexes to 6, and Query Lens to 7 (`1`-`7` direct jumps).
+  Web Lens side navigation updated to Activity (1), Blocks (2), Replication (3), Schema (4),
+  Indexes (5), and Queries (6).
+
 ## [0.16.0] — 2026-08-06 — "First impression"
 
 ### Added

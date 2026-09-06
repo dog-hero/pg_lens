@@ -3,16 +3,17 @@ import assert from "node:assert/strict";
 
 import { filterInputIdForPanel, isEditableTag, tabIdForKey } from "./keyboard.ts";
 
-test("tabIdForKey maps 1-5 to the five nav tabs in order", () => {
+test("tabIdForKey maps 1-6 to the six nav tabs in order", () => {
   assert.equal(tabIdForKey("1"), "tab-activity");
-  assert.equal(tabIdForKey("2"), "tab-replication");
-  assert.equal(tabIdForKey("3"), "tab-schema");
-  assert.equal(tabIdForKey("4"), "tab-indexes");
-  assert.equal(tabIdForKey("5"), "tab-queries");
+  assert.equal(tabIdForKey("2"), "tab-blocks");
+  assert.equal(tabIdForKey("3"), "tab-replication");
+  assert.equal(tabIdForKey("4"), "tab-schema");
+  assert.equal(tabIdForKey("5"), "tab-indexes");
+  assert.equal(tabIdForKey("6"), "tab-queries");
 });
 
-test("tabIdForKey is null for anything outside 1-5", () => {
-  assert.equal(tabIdForKey("6"), null);
+test("tabIdForKey is null for anything outside 1-6", () => {
+  assert.equal(tabIdForKey("7"), null);
   assert.equal(tabIdForKey("a"), null);
   assert.equal(tabIdForKey("/"), null);
 });

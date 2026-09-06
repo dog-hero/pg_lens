@@ -30,9 +30,14 @@ SELECT
       a.query AS query,
       coalesce(a.leader_pid, a.pid) AS query_leader_pid,
       coalesce(a.backend_type = 'parallel worker', false) AS is_parallel_worker,
-      a.query_id AS query_id
+      a.query_id AS query_id,
+      coalesce(s.ssl, false) AS ssl,
+      s.version::text AS ssl_version,
+      s.cipher::text AS ssl_cipher
  FROM
       pg_stat_activity a
+ LEFT JOIN
+      pg_stat_ssl s ON s.pid = a.pid
  WHERE
       a.state <> 'idle'
   AND a.pid <> pg_catalog.pg_backend_pid()

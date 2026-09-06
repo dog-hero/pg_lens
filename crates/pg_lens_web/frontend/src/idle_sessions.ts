@@ -62,10 +62,12 @@ export function renderIdleSessions(
     const sev = idleSessionSeverity(row.idle_age_secs);
     const li = document.createElement("li");
     li.className = sev ? `vacuum-table ${sev}` : "vacuum-table";
+    const sslIndicator = row.ssl ? " · 🔒 SSL" : "";
     li.textContent =
       `pid ${row.pid} — ${humanDuration(row.idle_age_secs)} idle · ` +
       `${row.username}@${row.database} · ${row.application_name || "(no app name)"} · ` +
-      row.client;
+      row.client +
+      sslIndicator;
     return li;
   });
   list.replaceChildren(...items);

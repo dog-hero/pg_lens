@@ -31,11 +31,11 @@ use crate::history::{DEFAULT_CAP, HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::history_store::HistoryStore;
 use crate::index_advisor::{self, IndexCatalogRow};
 use crate::models::{
-    AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats, DatabaseRow,
-    DbSnapshot, IdleSessionRow, IndexRow, IoStatRow, LockCapacity, PollerStatus, PreparedXactRow,
-    ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus, ServerVitals, StatementRow,
-    StatementsSnapshot, StatementsStatus, TableDetail, TableDetailRequest, VacuumClusterAge,
-    VacuumProgressRow, VacuumTableRow, WalStats,
+    ActiveLockRow, AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats, DatabaseRow,
+    DbSnapshot, DdlProgressRow, IdleSessionRow, IndexRow, IoStatRow, LockCapacity, PollerStatus,
+    PreparedXactRow, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus,
+    ServerVitals, StatementRow, StatementsSnapshot, StatementsStatus, TableDetail,
+    TableDetailRequest, VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalStats,
 };
 use crate::schema_growth::{GROWTH_LOOKBACK_MS, SchemaGrowthTracker};
 use crate::services::{self, PasswordSource};
@@ -1383,6 +1383,19 @@ async fn poll_once(
         None => None,
     };
 
+    // Active locks in current database (v0.17, Blocks Lens) — best-effort.
+    let active_locks = collect_active_locks(client, q).await;
+
+    // In-flight DDL & maintenance progress (v0.17) — best-effort.
+    let ddl_progress = collect_ddl_progress(client, q).await;
+
+    // Hierarchical blocking tree (v0.17, Blocks Lens) — derived in-memory.
+    let blocking_tree = Some(crate::blocks::build_blocking_tree(
+        &locks,
+        &activity,
+        idle_sessions.as_deref(),
+    ));
+
     let now = Instant::now();
     let xact_total = info.xact_commit + info.xact_rollback;
     let cumulative_ratio = hit_ratio(info.blks_hit, info.blks_read);
@@ -1495,6 +1508,9 @@ async fn poll_once(
             lock_capacity,
             idle_sessions,
             wal,
+            active_locks,
+            blocking_tree,
+            ddl_progress,
             status: PollerStatus::Ok,
         },
         relation_locks,
@@ -1992,6 +2008,44 @@ async fn collect_idle_sessions(
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(db::idle_session_from_row(row).ok()?);
+    }
+    tx.commit().await.ok()?;
+    Some(out)
+}
+
+/// Active locks in current database (v0.17, Blocks Lens,
+/// `queries/locks_active.sql`), refreshed every fast tick. Best-effort: returns
+/// `None` on ANY query or parse failure, never fails the poll.
+async fn collect_active_locks(
+    client: &mut Client,
+    q: &queries::QuerySet,
+) -> Option<Vec<ActiveLockRow>> {
+    let tx = begin_read(client).await.ok()?;
+    let rows = tx.query(q.active_locks, &[]).await.ok()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        if let Ok(lock) = db::active_lock_from_row(row) {
+            out.push(lock);
+        }
+    }
+    tx.commit().await.ok()?;
+    Some(out)
+}
+
+/// In-flight DDL & maintenance progress (v0.17, `queries/progress_ddl.sql`),
+/// refreshed every fast tick. Best-effort: returns `None` on ANY query or parse
+/// failure, never fails the poll.
+async fn collect_ddl_progress(
+    client: &mut Client,
+    q: &queries::QuerySet,
+) -> Option<Vec<DdlProgressRow>> {
+    let tx = begin_read(client).await.ok()?;
+    let rows = tx.query(q.progress_ddl, &[]).await.ok()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        if let Ok(p) = db::ddl_progress_from_row(row) {
+            out.push(p);
+        }
     }
     tx.commit().await.ok()?;
     Some(out)

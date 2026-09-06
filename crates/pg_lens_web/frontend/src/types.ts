@@ -50,6 +50,24 @@ export interface ActivityRow {
   query_leader_pid: number;
   is_parallel_worker: boolean;
   query_id: number | null;
+  /** Connection encryption state (v0.17, pg_stat_ssl.ssl). */
+  ssl: boolean;
+  /** SSL protocol version (e.g. TLSv1.3), null if plain/local. */
+  ssl_version: string | null;
+  /** SSL cipher name, null if plain/local. */
+  ssl_cipher: string | null;
+}
+
+/** In-flight DDL & maintenance operation (v0.17, pg_stat_progress_*). */
+export interface DdlProgressRow {
+  pid: number;
+  command: string;
+  relation: string;
+  phase: string;
+  progress_pct: number | null;
+  current_step: number;
+  total_step: number;
+  detail: string;
 }
 
 export interface LockRow {
@@ -60,6 +78,35 @@ export interface LockRow {
   relation: string | null;
   duration_secs: number;
   query: string;
+}
+
+export interface ActiveLockRow {
+  pid: number;
+  locktype: string;
+  database: string;
+  relation: string;
+  schema: string;
+  mode: string;
+  granted: boolean;
+  duration_secs: number;
+  usename: string;
+  query: string;
+}
+
+export interface BlockTreeNode {
+  pid: number;
+  usename: string;
+  application_name: string;
+  state: string;
+  query: string;
+  duration_secs: number;
+  wait_event: string | null;
+  mode: string | null;
+  relation: string | null;
+  is_root: boolean;
+  num_descendants: number;
+  is_deadlock: boolean;
+  children: BlockTreeNode[];
 }
 
 export interface HistoryPoint {
@@ -242,6 +289,12 @@ export interface IdleSessionRow {
   username: string;
   /** `EXTRACT(epoch FROM (now() - state_change))`. */
   idle_age_secs: number;
+  /** Connection encryption state (v0.17, pg_stat_ssl.ssl). */
+  ssl: boolean;
+  /** SSL protocol version (e.g. TLSv1.3), null if plain/local. */
+  ssl_version: string | null;
+  /** SSL cipher name, null if plain/local. */
+  ssl_cipher: string | null;
 }
 
 /**
@@ -655,6 +708,12 @@ export interface DbSnapshot {
    * collection failed this tick.
    */
   wal: WalStats | null;
+  /** Active locks in database (v0.17). */
+  active_locks: ActiveLockRow[] | null;
+  /** Wait-for dependency tree (v0.17). */
+  blocking_tree: BlockTreeNode[] | null;
+  /** In-flight DDL & maintenance progress (v0.17). */
+  ddl_progress: DdlProgressRow[] | null;
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
 }

@@ -122,6 +122,10 @@ pub struct QuerySet {
     /// live, unlike `io_stats`'s slow cadence. See
     /// `poller::collect_wal_stats`.
     pub wal_stats: Option<&'static str>,
+    /// Active locks in current database (v0.17, Blocks Lens).
+    pub active_locks: &'static str,
+    /// In-flight DDL & maintenance progress (v0.17).
+    pub progress_ddl: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -250,6 +254,10 @@ const IO_STATS_POST_160000: &str = include_str!("../queries/io_post_160000.sql")
 // pair, since there is no pre-14 variant to fall back to (the field is
 // `None` instead).
 const WAL_STATS_POST_140000: &str = include_str!("../queries/wal_stats_post_140000.sql");
+// Active locks in current database (v0.17, Blocks Lens).
+const LOCKS_ACTIVE: &str = include_str!("../queries/locks_active.sql");
+// In-flight DDL & maintenance progress (v0.17).
+const PROGRESS_DDL: &str = include_str!("../queries/progress_ddl.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -303,6 +311,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             table_detail_indexdefs: TABLE_DETAIL_INDEXDEFS,
             io_stats,
             wal_stats,
+            active_locks: LOCKS_ACTIVE,
+            progress_ddl: PROGRESS_DDL,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -336,6 +346,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             table_detail_indexdefs: TABLE_DETAIL_INDEXDEFS,
             io_stats,
             wal_stats,
+            active_locks: LOCKS_ACTIVE,
+            progress_ddl: PROGRESS_DDL,
         })
     } else {
         Err(format!(

@@ -26,9 +26,14 @@ SELECT
       a.datname AS database,
       a.client_addr::text AS client,
       a.usename AS usename,
-      EXTRACT(epoch FROM (now() - a.state_change))::float8 AS idle_age_seconds
+      EXTRACT(epoch FROM (now() - a.state_change))::float8 AS idle_age_seconds,
+      coalesce(s.ssl, false) AS ssl,
+      s.version::text AS ssl_version,
+      s.cipher::text AS ssl_cipher
  FROM
       pg_stat_activity a
+ LEFT JOIN
+      pg_stat_ssl s ON s.pid = a.pid
  WHERE
       a.state = 'idle'
   AND a.pid <> pg_catalog.pg_backend_pid()

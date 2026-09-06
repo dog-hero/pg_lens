@@ -242,7 +242,7 @@ independent of the release pipeline and of the binary-embedded bundle.
   `upload-pages-artifact` + `deploy-pages` on push to main + manual dispatch.
   Repo setting required: Settings → Pages → Source: GitHub Actions.
 
-## v0.16 — "First impression" (in tree, unreleased — owner-selected 2026-08-06)
+## v0.16 — "First impression" (shipped — see Shipped section)
 
 Onboarding + the two adjacent stat views a fresh install benefits from
 immediately, plus two owner-requested UX items.
@@ -281,20 +281,23 @@ immediately, plus two owner-requested UX items.
   Documented in the README and suggested by the installer's post-install
   banner.
 
+## v0.17 — "Blocks & Locks Lens" (shipped — see Shipped section)
+
+Dedicated locks inspection lens plus adjacent connection security and maintenance progress tracking.
+
+- [x] **Blocks & Locks Lens** — wait-for tree + active locks table (`pg_locks`),
+  session cancellation/termination directly from tree or table, positioned in
+  tab 3 between Micro Lens and Replication. TUI + Web.
+- [x] **DDL progress** — `pg_stat_progress_create_index`, `_analyze`, `_basebackup`
+  monitoring in session detail and Web maintenance panel.
+- [x] **SSL/TLS connection security** — `pg_stat_ssl` cipher and protocol
+  version in activity tables, idle census, and session detail.
+
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
-- [ ] **I/O profile** — `pg_stat_io` (PG 16+ only), backend_type × context
-  reads/writes/hits with timing; best-effort absent panel on 13–15. Needs
-  `track_io_timing` grace (`--` for missing timing, never an error).
-- [ ] **DDL progress** — `pg_stat_progress_create_index` / `_cluster` /
-  `_analyze` joined into the Micro Lens detail panel (progress bar + phase
-  for the selected PID).
-- [ ] **SSL/connection security column** — `pg_stat_ssl` marker in the
-  activity table ("who's connecting in plaintext"); silent-blank when the
-  view is not visible — must never break the hot 2s path.
 - [ ] **Snapshot export / incident bookmark** — write the current (paused)
   `DbSnapshot` to `~/.local/state/pg_lens/exports/*.json` (TUI keybinding)
-  and a download button (web) for postmortems.
+  and a download button (web) for postmortems (in backlog).
 
 ## Backlog (deliberately deprioritized — owner decision 2026-07-15)
 
@@ -309,6 +312,15 @@ immediately, plus two owner-requested UX items.
   protocol rewrite; session pooling and direct connections work today)
 
 ## Shipped
+
+- **v0.17.0** — "Blocks & Locks Lens": dedicated Blocks tab (wait-for tree +
+  active locks) in position 3 between Micro Lens and Replication; in-flight DDL &
+  maintenance progress (`pg_stat_progress_*`); and SSL/TLS connection security
+  indicators (`pg_stat_ssl`).
+- **v0.16.0** — "First impression": curl | sh installer (`scripts/install.sh`);
+  whole-row activity colors (pg_activity-style); copy-to-clipboard (`y`, OSC 52);
+  `pg_stat_io` profile (PG 16+); `pg_stat_wal` generation rate (PG 14+); and shell
+  completions subcommand.
 
 - **v0.15.0** — "Schema Lens completo": honest `N of M tables` counts with
   a configurable, perf-bounded `--schema-table-limit` (bug fix for a

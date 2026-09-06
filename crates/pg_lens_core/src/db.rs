@@ -8,10 +8,10 @@ use tokio::task::JoinHandle;
 use tokio_postgres::{Client, Config, NoTls, Row, Transaction};
 
 use crate::models::{
-    ActivityRow, BloatRow, DatabaseRow, IdleSessionRow, LockRow, PreparedXactRow,
-    ReplicationSlotRow, StatementRow, TableDetailColumn, TableDetailConstraint, TableDetailIndex,
-    TableStatRow, VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalReceiverRow,
-    WalSenderRow,
+    ActiveLockRow, ActivityRow, BloatRow, DatabaseRow, DdlProgressRow, IdleSessionRow, LockRow,
+    PreparedXactRow, ReplicationSlotRow, StatementRow, TableDetailColumn, TableDetailConstraint,
+    TableDetailIndex, TableStatRow, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
+    WalReceiverRow, WalSenderRow,
 };
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
@@ -75,6 +75,23 @@ pub fn activity_from_row(row: &Row) -> Result<ActivityRow, tokio_postgres::Error
         query_leader_pid: row.try_get("query_leader_pid")?,
         is_parallel_worker: row.try_get("is_parallel_worker")?,
         query_id: row.try_get("query_id")?,
+        ssl: row.try_get::<_, Option<bool>>("ssl")?.unwrap_or(false),
+        ssl_version: row.try_get("ssl_version")?,
+        ssl_cipher: row.try_get("ssl_cipher")?,
+    })
+}
+
+/// Maps one row of `queries/progress_ddl.sql` onto [`DdlProgressRow`].
+pub fn ddl_progress_from_row(row: &Row) -> Result<DdlProgressRow, tokio_postgres::Error> {
+    Ok(DdlProgressRow {
+        pid: row.try_get("pid")?,
+        command: opt_text(row, "command")?,
+        relation: opt_text(row, "relation")?,
+        phase: opt_text(row, "phase")?,
+        progress_pct: row.try_get("progress_pct")?,
+        current_step: row.try_get::<_, Option<i64>>("current_step")?.unwrap_or(0),
+        total_step: row.try_get::<_, Option<i64>>("total_step")?.unwrap_or(0),
+        detail: opt_text(row, "detail")?,
     })
 }
 
@@ -90,6 +107,23 @@ pub fn lock_from_row(row: &Row) -> Result<LockRow, tokio_postgres::Error> {
         relation: row.try_get("relation")?,
         duration_secs: row.try_get::<_, Option<f64>>("duration")?.unwrap_or(0.0),
         query: opt_text(row, "query")?,
+    })
+}
+
+/// Maps one row of `queries/locks_active.sql` onto [`ActiveLockRow`].
+pub fn active_lock_from_row(row: &Row) -> Result<ActiveLockRow, tokio_postgres::Error> {
+    Ok(ActiveLockRow {
+        pid: row.try_get("pid")?,
+        locktype: row.try_get("locktype")?,
+        relation: row.try_get("relation")?,
+        schema: row.try_get("schema")?,
+        mode: row.try_get("mode")?,
+        granted: row.try_get("granted")?,
+        fastpath: row.try_get("fastpath")?,
+        duration_secs: row.try_get::<_, Option<f64>>("duration_secs")?.unwrap_or(0.0),
+        usename: row.try_get("usename")?,
+        application_name: row.try_get("application_name")?,
+        query: row.try_get("query")?,
     })
 }
 
@@ -608,6 +642,9 @@ pub fn idle_session_from_row(row: &Row) -> Result<IdleSessionRow, tokio_postgres
             .unwrap_or_else(|| "local".to_string()),
         username: opt_text(row, "usename")?,
         idle_age_secs: row.try_get("idle_age_seconds")?,
+        ssl: row.try_get::<_, Option<bool>>("ssl")?.unwrap_or(false),
+        ssl_version: row.try_get("ssl_version")?,
+        ssl_cipher: row.try_get("ssl_cipher")?,
     })
 }
 

@@ -29,6 +29,7 @@ import { SchemaLens } from "./schema";
 import { IndexAdvisor } from "./index-advisor";
 import { VacuumPanel } from "./vacuum-panel";
 import { StatementsLens } from "./statements";
+import { initBlocksLens } from "./blocks-lens";
 import { renderReplication } from "./replication";
 import { renderWaits, renderWaitsList } from "./waits";
 import { renderOldestXact } from "./xact_age";
@@ -242,11 +243,14 @@ const statementsLens = new StatementsLens(
   (ok, chars) => onCopyResult(ok, chars),
 );
 
-// Tab switcher (U1: five top-level tabs, mirroring the TUI's six lenses —
+const blocksLens = initBlocksLens(el<HTMLElement>("blocks-panel"));
+
+// Tab switcher (U1: top-level tabs, mirroring the TUI's lenses —
 // Macro/Micro stay merged into "Activity" here, vitals cards + chart stay
 // visible on all of them; only the bottom panel swaps).
 const tabs: Array<[HTMLButtonElement, HTMLElement]> = [
   [el<HTMLButtonElement>("tab-activity"), el<HTMLElement>("activity-panel")],
+  [el<HTMLButtonElement>("tab-blocks"), el<HTMLElement>("blocks-panel")],
   [el<HTMLButtonElement>("tab-replication"), el<HTMLElement>("replication-panel")],
   [el<HTMLButtonElement>("tab-schema"), el<HTMLElement>("schema-panel")],
   [el<HTMLButtonElement>("tab-indexes"), el<HTMLElement>("indexes-panel")],
@@ -415,11 +419,12 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   // v0.9: oldest open transaction, hidden on calm snapshots — the same
   // "quiet unless something's wrong" contract as the waits strip.
   renderOldestXact(xactHeadline, xactHeadlineAge, xactHeadlineMeta, xactHeadlineState, snapshot.activity);
-  table.update(snapshot.activity, snapshot.locks);
+  table.update(snapshot.activity, snapshot.locks, snapshot.ddl_progress);
   schemaLens.update(snapshot.schema, snapshot.vitals.database, snapshot.table_detail);
   indexAdvisor.update(snapshot.schema, snapshot.vitals.database);
-  vacuumPanel.update(snapshot.schema, snapshot.vacuum_progress, snapshot.prepared_xacts);
+  vacuumPanel.update(snapshot.schema, snapshot.vacuum_progress, snapshot.prepared_xacts, snapshot.ddl_progress);
   statementsLens.update(snapshot.statements, snapshot.vitals.database);
+  blocksLens.update(snapshot.blocking_tree, snapshot.active_locks);
   announceAdmin(snapshot.last_admin_action);
   const v = snapshot.vitals;
   serverInfo.textContent = `PG ${v.server_version} · ${v.connections_total}/${v.max_connections} conns`;

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { navIconId, severityIconId } from "./icons.ts";
 
 test("navIconId maps every nav section to a distinct symbol id", () => {
-  const sections = ["activity", "replication", "schema", "indexes", "queries"] as const;
+  const sections = ["activity", "blocks", "replication", "schema", "indexes", "queries"] as const;
   const ids = sections.map(navIconId);
   assert.equal(new Set(ids).size, ids.length, "ids must be distinct");
   for (const id of ids) {

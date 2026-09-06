@@ -16,6 +16,7 @@ mod splash;
 mod sql;
 mod style;
 mod vacuum;
+mod blocks_lens;
 
 use pg_lens_core::PollerStatus;
 use ratatui::{
@@ -79,6 +80,7 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         Tab::SchemaLens => schema_lens::draw(app, frame, body_area),
         Tab::IndexLens => index_lens::draw(app, frame, body_area),
         Tab::QueryLens => query_lens::draw(app, frame, body_area),
+        Tab::BlocksLens => blocks_lens::draw(app, frame, body_area),
     }
     draw_statusbar(app, frame, statusbar_area);
     // Overlays draw over everything else, last — mutually exclusive by
@@ -253,6 +255,19 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             Some(app.statements_sort_mode.label()),
             true,
         ),
+        Tab::BlocksLens if app.blocks_active_pane == crate::app::BlocksPane::Tree => {
+            let len = app.snapshot.blocking_tree.as_deref().map_or(0, |tree| {
+                fn count(nodes: &[pg_lens_core::BlockTreeNode]) -> usize {
+                    nodes.iter().map(|n| 1 + count(&n.children)).sum()
+                }
+                count(tree)
+            });
+            (app.blocks_tree_state.selected(), len, None, false)
+        }
+        Tab::BlocksLens => {
+            let len = app.snapshot.active_locks.as_deref().map_or(0, |l| l.len());
+            (app.blocks_locks_state.selected(), len, None, false)
+        }
         // Micro Lens counts the FILTERED display order (`row_order`), so the
         // `row X/N` indicator matches what an active filter shows.
         _ => (
@@ -290,7 +305,7 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     // Keybinding letters in accent, descriptions dim (style::hint), the
     // separators dim — same text as ever, only the styling changed.
     let sep = Span::styled(" \u{2502} ", style::label_style());
-    let mut spans: Vec<Span> = vec![Span::raw(" ")];
+    let mut spans: Vec<Span> = Vec::new();
     let push_hint = |spans: &mut Vec<Span<'static>>, key: &str, desc: String, lead: bool| {
         if lead {
             spans.push(sep.clone());
@@ -301,17 +316,25 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     };
     push_hint(&mut spans, "q/Esc", ": quit".into(), false);
     push_hint(&mut spans, "?", ": help".into(), true);
-    push_hint(&mut spans, "Tab", ": lens".into(), true);
+    push_hint(&mut spans, "Tab", ": tab".into(), true);
     push_hint(&mut spans, "j/k", format!(": row {row}"), true);
     // The Micro Lens trades the Enter hint for the admin keys (the open
     // panel titles itself "Enter/Esc: close") — the bar must fit 120 cols.
     if app.active_tab == Tab::MicroLens {
-        push_hint(&mut spans, "/", ": filter".into(), true);
+        push_hint(&mut spans, "c", ": cancel".into(), true);
+        spans.push(Span::styled(", ", style::label_style()));
+        let [k, d] = style::hint("K", ": kill");
+        spans.push(k);
+        spans.push(d);
+    } else if app.active_tab == Tab::BlocksLens {
+        push_hint(&mut spans, "p/o", ": pane".into(), true);
         push_hint(&mut spans, "c", ": cancel".into(), true);
         spans.push(Span::styled(" \u{b7} ", style::label_style()));
         let [k, d] = style::hint("K", ": kill");
         spans.push(k);
         spans.push(d);
+        push_hint(&mut spans, "Enter", ": detail".into(), true);
+        push_hint(&mut spans, "y", ": copy".into(), true);
     } else {
         push_hint(&mut spans, "Enter", ": detail".into(), true);
     }
@@ -385,12 +408,11 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             spans.push(id);
         }
     }
-    // v0.12: `/` filters the Schema Lens's Tables view and the Query Lens —
-    // the Micro Lens already advertises its own `/` unconditionally inside
-    // its admin block above, so this only fires for the other two lenses,
-    // "where width allows" like `w`/`I` (both already-crowded bars: sort +
-    // R + refresh + d/! competing for the same budget).
-    if (app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables)
+    // v0.12: `/` filters Micro Lens, Schema Lens's Tables view, and Query Lens —
+    // "where width allows" like `w`/`I` (already-crowded bars competing for
+    // the budget so data staleness is never pushed off screen).
+    if app.active_tab == Tab::MicroLens
+        || (app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables)
         || app.active_tab == Tab::QueryLens
     {
         let [fk, fd] = style::hint("/", ": filter");
@@ -1668,8 +1690,8 @@ mod tests {
         // content. v0.12 added two more rows (`/`'s updated description,
         // `\`'s new clear-filter row), so the terminal grew again. v0.15
         // added the `x` cross-lens-jump row, one more. v0.16 added the `y`
-        // copy-to-clipboard row, one more still.
-        let backend = TestBackend::new(120, 44);
+        // copy-to-clipboard row, one more still. v0.17 added `b` and `p`.
+        let backend = TestBackend::new(120, 48);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
         let screen: String = terminal

@@ -76,6 +76,9 @@ mod tests {
             client: "10.0.0.1".to_string(),
             username: "app_rw".to_string(),
             idle_age_secs,
+            ssl: false,
+            ssl_version: None,
+            ssl_cipher: None,
         }
     }
 

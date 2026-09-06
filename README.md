@@ -42,6 +42,24 @@ Web Lens dashboard running on recorded data (no database required).
   immediately regardless of duration. A **blocked** row always outranks
   every other tint. SQL keyword highlighting lives in the `Enter` detail
   panel, not the table row. TUI + Web.
+- **Blocks & Locks Lens (`3 Blocks`)** — dedicated lens positioned between
+  Micro Lens and Replication with a dual-pane split view:
+  - Upper pane: hierarchical blocking wait-tree (`root blocker -> waiting PID -> waiting PID`)
+    identifying root blockers, blocked session counts, lock modes, target relations, and wait age.
+  - Lower pane: complete active locks table (`pg_locks`) showing all granted and waiting
+    locks with target relation, lock type, lock mode, status (`GRANT`/`WAIT`), age, user, and query text.
+  - Quick pane-switching with `p` / `o`, interactive detail panel on `Enter`, and direct
+    query cancellation (`c`) or backend termination (`K`) with confirmation modals from either pane.
+  - Direct jump via key `3` or mnemonic `b`. Web Lens mirrors with an interactive
+    blocking tree, active locks table, and search filter on tab `2 Blocks`.
+- **In-flight DDL & maintenance progress (`pg_stat_progress_*`)** — live progress
+  monitoring for `CREATE INDEX` (and reindex), `ANALYZE`, and `pg_basebackup`.
+  Surfaced inside the Micro Lens detail panel (`Enter`) and in the Web Lens Maintenance
+  panel alongside autovacuum operations.
+- **SSL / TLS connection security indicator (`pg_stat_ssl`)** — identifies encrypted
+  vs plaintext connections: a visual lock badge (`🔒 `) in activity tables, cipher suite
+  and TLS version in the session detail overlay (e.g. `TLSv1.3 (TLS_AES_256_GCM_SHA384)`),
+  and an SSL status badge on the idle connection census. TUI + Web.
 - **Query detail panel** — press `Enter` on any row to read the full SQL.
 - **Resilient by design** — if the database goes down, pg_lens shows an
   error banner, keeps the last known data on screen, and reconnects with
@@ -135,10 +153,10 @@ Web Lens dashboard running on recorded data (no database required).
 - **`psql` shell launch** (`!`, TUI-only) — jump straight from the session
   you're inspecting into an interactive `psql` shell on the same
   connection; see [The `psql` shell](#the-psql-shell).
-- **Direct tab jump & fast scroll** — `1`–`6` jump straight to a lens,
-  `Shift+Tab` cycles backward, `Backspace` returns to the previously active
-  lens, and `Home`/`g`, `End`/`G`, `PageUp`/`PageDown` fast-scroll every
-  selectable table.
+- **Direct tab jump & fast scroll** — `1`–`7` jump straight to a lens,
+  `b` jumps directly to Blocks & Locks Lens, `Shift+Tab` cycles backward,
+  `Backspace` returns to the previously active lens, and `Home`/`g`,
+  `End`/`G`, `PageUp`/`PageDown` fast-scroll every selectable table.
 - **Schema and Query Lens filters** — the `/` filter, previously
   Micro-Lens-only, now also narrows the Schema Lens Tables view (by
   schema/table name) and the Query Lens (by query text), each with
@@ -204,7 +222,7 @@ prints the old → new version.
 
 | Knob | Env var | Flag |
 | --- | --- | --- |
-| Pin a version | `PG_LENS_VERSION=v0.16.0` | `--version v0.16.0` |
+| Pin a version | `PG_LENS_VERSION=v0.17.0` | `--version v0.17.0` |
 | Install elsewhere | `PG_LENS_INSTALL_DIR=/opt/bin` | `--dir /opt/bin` |
 | Preview only | — | `--dry-run` (prints the resolved version, URLs and target path, downloads nothing) |
 
@@ -345,13 +363,13 @@ forbids `_` in package names); it installs `/usr/bin/pg_lens` plus docs
 and has no dependencies.
 
 ```sh
-# Debian / Ubuntu (pick amd64 or arm64) — replace 0.16.0 with the latest release
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.16.0/pg-lens_0.16.0_amd64.deb
-sudo dpkg -i pg-lens_0.16.0_amd64.deb
+# Debian / Ubuntu (pick amd64 or arm64) — replace 0.17.0 with the latest release
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.17.0/pg-lens_0.17.0_amd64.deb
+sudo dpkg -i pg-lens_0.17.0_amd64.deb
 
 # RHEL / Fedora / SUSE (x86_64 or aarch64)
-curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.16.0/pg-lens-0.16.0-1.x86_64.rpm
-sudo rpm -i pg-lens-0.16.0-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.16.0-1.x86_64.rpm
+curl -LO https://github.com/dog-hero/pg_lens/releases/download/v0.17.0/pg-lens-0.17.0-1.x86_64.rpm
+sudo rpm -i pg-lens-0.17.0-1.x86_64.rpm    # or: sudo dnf install ./pg-lens-0.17.0-1.x86_64.rpm
 ```
 
 ### Cargo (crates.io)
@@ -628,33 +646,34 @@ they ever drift, trust the overlay.
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift+Tab` | Cycle lenses forward / backward (Macro → Micro → Replication → Schema → Indexes → Queries → Macro) |
-| `1`–`6` | Jump directly to a lens (numbers shown in the tab bar) |
+| `Tab` / `Shift+Tab` | Cycle lenses forward / backward (Macro → Micro → Blocks → Replication → Schema → Indexes → Queries → Macro) |
+| `1`–`7` | Jump directly to a lens (numbers shown in the tab bar) |
+| `b` | Jump directly to Blocks & Locks Lens |
 | `Backspace` | Jump back to the previously active lens (browser-back style) |
 | `j` / `↓` | Move selection down |
 | `k` / `↑` | Move selection up |
 | `g` / `Home` | Jump selection to the first row |
 | `G` / `End` | Jump selection to the last row |
 | `PgUp` / `PgDn` | Move selection by a page |
-| `Enter` | Open/close the selected row's detail panel — on the Schema Lens Tables view this also fetches and shows the table's structure (columns, constraints, referencing FKs, index definitions), fetched on demand; `j`/`k` scroll *inside* an open detail overlay once it's taller than the screen |
+| `Enter` | Open/close the selected row's detail panel — on the Schema Lens Tables view this also fetches and shows the table's structure (columns, constraints, referencing FKs, index definitions), fetched on demand; on the Blocks Lens this shows full lock and blocking details; `j`/`k` scroll *inside* an open detail overlay once it's taller than the screen |
 | `/` | Filter the current table — Micro Lens (pid, database, user, application, client, state, wait or query text), Schema Lens Tables view (schema/table name), or Query Lens (query text); each lens keeps its own filter state; `Enter` applies, `Esc` reverts |
 | `\` | Clear the active lens's committed filter |
 | `w` | Full waits panel (Micro Lens only) |
 | `I` | Idle-connection census (Micro Lens only) — swaps the body to a list of idle sessions ranked oldest-first; `Esc` closes it |
 | `v` | Vacuum sub-view (Schema Lens only) |
-| `p` | Show/hide leaf partitions of a collapsed partitioned table (Schema Lens Tables view only) |
+| `p` / `o` | Switch active pane between wait-for tree and active locks table (Blocks Lens); show/hide leaf partitions of a collapsed partitioned table (Schema Lens Tables view only) |
 | `x` | Jump to the Query Lens filtered (substring match) to statements mentioning the selected table (Schema Lens Tables view only); `Backspace` returns, `\` clears the seeded filter |
 | `d` | Database picker (any lens) — reconnects the poller to the chosen database |
 | `!` | Open a `psql` shell on the same connection (any lens) — see [The `psql` shell](#the-psql-shell) |
-| `y` | Copy the current selection to the clipboard via OSC 52 — the Micro Lens's full selected query, the Query Lens's full statement, the Index Lens's `CREATE INDEX` definition, or the Schema Lens's selected table's qualified name (its column list instead, once the structure detail overlay is open); see [Copy to clipboard](#copy-to-clipboard) |
+| `y` | Copy the current selection to the clipboard via OSC 52 — the Micro Lens's full selected query, the Query Lens's full statement, the Index Lens's `CREATE INDEX` definition, the Blocks Lens's selected query, or the Schema Lens's selected table's qualified name (its column list instead, once the structure detail overlay is open); see [Copy to clipboard](#copy-to-clipboard) |
 | `?` | Keyboard help overlay — lists every binding |
 | `R` | Force schema/query-stats refresh (any lens) |
 | `s` | Cycle sort column (Micro Lens / Schema Lens tables / Query Lens; inert on Index, Replication, and the Vacuum sub-view) |
 | `+` / `=` | Increase the poll interval |
 | `-` | Decrease the poll interval |
 | `Space` | Pause / resume the display refresh (freeze for point-in-time analysis) |
-| `c` | Cancel the selected session's query (`pg_cancel_backend`, Micro Lens) — asks for confirmation first |
-| `K` | Terminate the selected session's backend (`pg_terminate_backend`, kills the connection, Micro Lens) — asks for confirmation first (uppercase on purpose; `k` stays navigation) |
+| `c` | Cancel the selected session's query (`pg_cancel_backend`, Micro / Blocks Lens) — asks for confirmation first |
+| `K` | Terminate the selected session's backend (`pg_terminate_backend`, kills the connection, Micro / Blocks Lens) — asks for confirmation first (uppercase on purpose; `k` stays navigation) |
 | `y` / `n` | Confirm / abort — only while a confirm modal is open |
 | `q` | Quit immediately |
 | `Ctrl+C` | Quit immediately (works everywhere) |
@@ -924,11 +943,14 @@ Lens temp-spill/I/O profile, an interactive `serve` service picker), v0.15
 "Schema Lens completo" (honest `N of M` table counts with a configurable
 `--schema-table-limit`, on-demand table structure detail, partition
 collapsing with drill-down, a per-table lock indicator, and a Query Lens
-cross-lens jump), and v0.16 "First impression" (a `curl | sh` install
+cross-lens jump), v0.16 "First impression" (a `curl | sh` install
 script with checksum verification, pg_activity-style Micro Lens row
 colors, `y` copy-to-clipboard via OSC 52, a `pg_stat_io` I/O profile panel,
-a `pg_stat_wal` WAL generation rate panel, and shell completions). See
-[ROADMAP.md](ROADMAP.md) for what's next.
+a `pg_stat_wal` WAL generation rate panel, and shell completions), and
+v0.17 "Blocks & Locks Lens" (dedicated Blocks & Locks lens in position 3
+between Micro Lens and Replication with wait-for tree and active locks table,
+in-flight DDL & maintenance progress, and SSL/TLS connection security indicators).
+See [ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Changelog
 

@@ -24,6 +24,9 @@ function row(wait: string | null): ActivityRow {
     query_leader_pid: 1,
     is_parallel_worker: false,
     query_id: null,
+    ssl: false,
+    ssl_version: null,
+    ssl_cipher: null,
   };
 }
 

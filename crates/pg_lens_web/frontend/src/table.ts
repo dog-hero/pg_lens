@@ -12,7 +12,7 @@
 // keyword highlighting moved into the expanded detail row only (Part B),
 // which also carries a copy-to-clipboard button (Part C).
 
-import type { ActivityRow, LockRow } from "./types";
+import type { ActivityRow, DdlProgressRow, LockRow } from "./types";
 import { humanDuration } from "./format.ts";
 import { renderSqlInto } from "./sql.ts";
 import { xactAgeSeverity } from "./xact_age.ts";
@@ -121,6 +121,7 @@ export class ActivityTable {
   private rows: ActivityRow[] = [];
   private blocked = new Set<number>();
   private locks: LockRow[] = [];
+  private ddlProgress: DdlProgressRow[] = [];
   /** pid of the row whose expanded detail (full highlighted query + copy
    * button, plus the wait-for chain when blocked) is open, if any — v0.9's
    * blocked-only chain toggle generalized (v0.16) to every row, mirroring
@@ -163,10 +164,11 @@ export class ActivityTable {
     this.renderHead();
   }
 
-  update(activity: ActivityRow[], locks: LockRow[]): void {
+  update(activity: ActivityRow[], locks: LockRow[], ddlProgress?: DdlProgressRow[] | null): void {
     this.rows = activity;
     this.locks = locks;
     this.blocked = new Set(locks.map((lock) => lock.pid));
+    this.ddlProgress = ddlProgress ?? [];
     // A pid can stop being on screen between polls (query finished, session
     // gone) — drop a stale expansion rather than pointing at nothing.
     if (this.expandedPid !== null && !this.rows.some((r) => r.pid === this.expandedPid)) {
@@ -277,19 +279,26 @@ export class ActivityTable {
       const rowClass = activityRowClass(row, isBlocked, isWaiting);
       if (rowClass !== "") tr.classList.add(rowClass);
       const marker = isBlocked ? "B" : isWaiting ? "W" : "";
-      const cells: Array<[string, boolean]> = [
-        [marker, false],
-        [String(row.pid), true],
-        [row.database, false],
-        [row.username, false],
-        [row.client, false],
-        [row.state, false],
-        [row.wait_event ?? "", false],
-        [humanDuration(row.duration_secs), true],
+      const cells: Array<[string, boolean, boolean]> = [
+        [marker, false, false],
+        [String(row.pid), true, false],
+        [row.database, false, false],
+        [row.username, false, false],
+        [row.client, false, true],
+        [row.state, false, false],
+        [row.wait_event ?? "", false, false],
+        [humanDuration(row.duration_secs), true, false],
       ];
-      for (const [text, numeric] of cells) {
+      for (const [text, numeric, isClient] of cells) {
         const td = document.createElement("td");
-        td.textContent = text;
+        if (isClient && row.ssl) {
+          const badge = document.createElement("span");
+          badge.className = "ssl-badge";
+          badge.title = `SSL: ${row.ssl_version ?? "TLS"} (${row.ssl_cipher ?? "encrypted"})`;
+          badge.textContent = "🔒 ";
+          td.append(badge);
+        }
+        td.append(document.createTextNode(text));
         if (numeric) td.classList.add("num");
         tr.append(td);
       }
@@ -348,6 +357,37 @@ export class ActivityTable {
     tr.classList.add("activity-detail");
     const td = document.createElement("td");
     td.colSpan = colCount;
+
+    const metaWrap = document.createElement("div");
+    metaWrap.classList.add("activity-detail-meta");
+
+    const secSpan = document.createElement("span");
+    secSpan.classList.add("meta-item", "meta-security");
+    if (row.ssl) {
+      const ver = row.ssl_version ?? "TLS";
+      const cipher = row.ssl_cipher ? ` (${row.ssl_cipher})` : "";
+      secSpan.textContent = `Security: 🔒 ${ver}${cipher} (encrypted)`;
+      secSpan.classList.add("sec-ssl");
+    } else if (row.client === "local") {
+      secSpan.textContent = "Security: unix-socket (local)";
+      secSpan.classList.add("sec-local");
+    } else {
+      secSpan.textContent = "Security: ⚠️ plain (unencrypted)";
+      secSpan.classList.add("sec-plain");
+    }
+    metaWrap.append(secSpan);
+
+    const ddl = this.ddlProgress.find((d) => d.pid === row.pid);
+    if (ddl) {
+      const ddlSpan = document.createElement("span");
+      ddlSpan.classList.add("meta-item", "meta-ddl");
+      const pct = ddl.progress_pct !== null ? `${ddl.progress_pct.toFixed(1)}%` : "in progress";
+      const detailSuffix = ddl.detail ? ` [${ddl.detail}]` : "";
+      ddlSpan.textContent = `⚙️ DDL: ${ddl.command} on ${ddl.relation} — ${ddl.phase} (${ddl.current_step}/${ddl.total_step}) | ${pct}${detailSuffix}`;
+      metaWrap.append(ddlSpan);
+    }
+    td.append(metaWrap);
+
     const pre = document.createElement("pre");
     renderSqlInto(pre, row.query);
     td.append(pre);

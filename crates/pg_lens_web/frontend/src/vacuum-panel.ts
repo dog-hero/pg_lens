@@ -9,7 +9,7 @@
 // room, so it renders the COMPLETE worst-tables list (all
 // `VACUUM_TABLES_LIMIT` rows the query ships) — no toggle needed here.
 
-import type { PreparedXactRow, SchemaSnapshot, VacuumProgressRow } from "./types";
+import type { DdlProgressRow, PreparedXactRow, SchemaSnapshot, VacuumProgressRow } from "./types";
 import { humanCount, humanDuration } from "./format";
 import { ageSeverity } from "./vacuum";
 import { preparedXactSeverity } from "./prepared_xacts";
@@ -31,10 +31,11 @@ export class VacuumPanel {
     schema: SchemaSnapshot | null,
     vacuumProgress: VacuumProgressRow[] | null,
     preparedXacts: PreparedXactRow[] | null,
+    ddlProgress?: DdlProgressRow[] | null,
   ): void {
     this.renderCluster(schema);
     this.renderTables(schema);
-    this.renderProgress(vacuumProgress);
+    this.renderProgress(vacuumProgress, ddlProgress);
     this.renderPreparedXacts(preparedXacts);
   }
 
@@ -73,29 +74,36 @@ export class VacuumPanel {
     this.tables.replaceChildren(...items);
   }
 
-  private renderProgress(rows: VacuumProgressRow[] | null): void {
-    if (rows === null) {
-      this.progress.textContent = "vacuum progress: unavailable";
+  private renderProgress(
+    rows: VacuumProgressRow[] | null,
+    ddlRows?: DdlProgressRow[] | null,
+  ): void {
+    const parts: string[] = [];
+    if (rows && rows.length > 0) {
+      for (const row of rows) {
+        const pct =
+          row.heap_blks_total > 0
+            ? (100 * row.heap_blks_scanned) / row.heap_blks_total
+            : 0;
+        parts.push(`vacuuming ${row.relation} — ${row.phase} (${pct.toFixed(0)}%)`);
+      }
+    }
+    if (ddlRows && ddlRows.length > 0) {
+      for (const d of ddlRows) {
+        const pct = d.progress_pct !== null ? `${d.progress_pct.toFixed(0)}%` : "in progress";
+        parts.push(`${d.command} on ${d.relation} — ${d.phase} (${pct})`);
+      }
+    }
+    if (parts.length === 0) {
+      if (rows === null && (!ddlRows || ddlRows.length === 0)) {
+        this.progress.textContent = "vacuum / maintenance: unavailable";
+      } else {
+        this.progress.textContent = "no vacuum running";
+      }
       this.progress.className = "vacuum-progress dim";
       return;
     }
-    if (rows.length === 0) {
-      this.progress.textContent = "no vacuum running";
-      this.progress.className = "vacuum-progress dim";
-      return;
-    }
-    const row = rows[0];
-    if (row === undefined) {
-      this.progress.textContent = "no vacuum running";
-      this.progress.className = "vacuum-progress dim";
-      return;
-    }
-    const pct =
-      row.heap_blks_total > 0
-        ? (100 * row.heap_blks_scanned) / row.heap_blks_total
-        : 0;
-    this.progress.textContent =
-      `vacuuming ${row.relation} — ${row.phase} (${pct.toFixed(0)}%)`;
+    this.progress.textContent = parts.join(" · ");
     this.progress.className = "vacuum-progress";
   }
 

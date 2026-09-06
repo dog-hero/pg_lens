@@ -1807,3 +1807,156 @@ td.actions {
 .token-error {
   color: var(--bad) !important;
 }
+
+/* ── blocks & locks panel (v0.17) ────────────────────────────────────── */
+
+.blocks-section {
+  margin-bottom: 24px;
+}
+
+.blocks-section h3 {
+  margin: 16px 0 8px 0;
+  font-size: 1rem;
+  color: var(--fg);
+}
+
+.blocks-tree-wrap {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+.blocks-tree-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.blocks-tree-row {
+  margin-left: calc(var(--depth, 0) * 24px);
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+}
+
+.blocks-tree-row[style*="--depth: 0"] {
+  border-left-color: var(--bad);
+}
+
+.blocks-tree-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.blocks-tree-pid {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.blocks-tree-user {
+  color: var(--fg-dim);
+}
+
+.blocks-tree-state {
+  font-weight: 600;
+}
+
+.blocks-tree-state.warn {
+  color: var(--warn);
+}
+
+.blocks-tree-lock {
+  color: var(--accent);
+}
+
+.blocks-tree-dur {
+  color: var(--fg-dim);
+  margin-left: auto;
+}
+
+.blocks-tree-query {
+  font-size: 0.8rem;
+  color: var(--fg-dim);
+  background: var(--bg-sunken);
+  padding: 6px 8px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.badge-ok {
+  background: var(--ok-bg);
+  color: var(--ok);
+  border: 1px solid var(--ok);
+}
+
+.badge-bad {
+  background: var(--bad-bg);
+  color: var(--bad);
+  border: 1px solid var(--bad);
+}
+
+.lock-waiting-row {
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
+.ssl-badge {
+  cursor: help;
+  user-select: none;
+  font-size: 0.85em;
+  margin-right: 4px;
+}
+
+.activity-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 0.82rem;
+  font-family: var(--font-mono);
+}
+
+.meta-item {
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+}
+
+.sec-ssl {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.sec-plain {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.sec-local {
+  color: var(--fg-dim);
+}
+
+.meta-ddl {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}

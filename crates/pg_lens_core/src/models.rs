@@ -6,8 +6,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::blocks::BlockTreeNode;
 use crate::history::{SnapshotHistory, epoch_ms_now};
 
 /// Monotonic counter so that every [`DbSnapshot::mock`] call produces visibly
@@ -50,6 +51,29 @@ pub struct ActivityRow {
     pub is_parallel_worker: bool,
     /// Only present on PG 14+.
     pub query_id: Option<i64>,
+    /// Connection encryption state (v0.17, `pg_stat_ssl.ssl`).
+    #[serde(default)]
+    pub ssl: bool,
+    /// SSL protocol version (e.g. `TLSv1.3`), `None` if plain/local or unknown.
+    #[serde(default)]
+    pub ssl_version: Option<String>,
+    /// SSL cipher name (e.g. `ECDHE-RSA-AES256-GCM-SHA384`), `None` if plain/local or unknown.
+    #[serde(default)]
+    pub ssl_cipher: Option<String>,
+}
+
+/// One in-flight DDL or maintenance operation tracked by `pg_stat_progress_*`
+/// (CREATE INDEX, CLUSTER, VACUUM FULL, ANALYZE).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DdlProgressRow {
+    pub pid: i32,
+    pub command: String,
+    pub relation: String,
+    pub phase: String,
+    pub progress_pct: Option<f64>,
+    pub current_step: i64,
+    pub total_step: i64,
+    pub detail: String,
 }
 
 /// One blocked session from the blocking query (`pg_blocking_pids` based):
@@ -69,6 +93,22 @@ pub struct LockRow {
     /// How long the blocked query has been running.
     pub duration_secs: f64,
     /// The blocked query text.
+    pub query: String,
+}
+
+/// One active lock entry in the current database (for the Blocks & Locks Lens, v0.17).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ActiveLockRow {
+    pub pid: i32,
+    pub locktype: String,
+    pub relation: String,
+    pub schema: String,
+    pub mode: String,
+    pub granted: bool,
+    pub fastpath: bool,
+    pub duration_secs: f64,
+    pub usename: String,
+    pub application_name: String,
     pub query: String,
 }
 
@@ -461,6 +501,15 @@ pub struct IdleSessionRow {
     /// `EXTRACT(epoch FROM (now() - state_change))::float8` — how long this
     /// backend has sat idle since its last query finished.
     pub idle_age_secs: f64,
+    /// Connection encryption state (v0.17, `pg_stat_ssl.ssl`).
+    #[serde(default)]
+    pub ssl: bool,
+    /// SSL protocol version (e.g. `TLSv1.3`), `None` if plain/local or unknown.
+    #[serde(default)]
+    pub ssl_version: Option<String>,
+    /// SSL cipher name (e.g. `ECDHE-RSA-AES256-GCM-SHA384`), `None` if plain/local or unknown.
+    #[serde(default)]
+    pub ssl_cipher: Option<String>,
 }
 
 /// Health of the *slow* schema collection, separate from [`PollerStatus`]:
@@ -1887,6 +1936,15 @@ pub struct DbSnapshot {
     /// the collection failed this tick.
     #[serde(default)]
     pub wal: Option<WalStats>,
+    /// Active locks in the current database (v0.17, Blocks Lens).
+    #[serde(default)]
+    pub active_locks: Option<Vec<ActiveLockRow>>,
+    /// Hierarchical blocking tree (v0.17, Blocks Lens).
+    #[serde(default)]
+    pub blocking_tree: Option<Vec<BlockTreeNode>>,
+    /// In-flight DDL & maintenance progress (v0.17, `pg_stat_progress_*`).
+    #[serde(default)]
+    pub ddl_progress: Option<Vec<DdlProgressRow>>,
     pub status: PollerStatus,
 }
 
@@ -1947,6 +2005,9 @@ impl DbSnapshot {
                 query_leader_pid: 4821,
                 is_parallel_worker: false,
                 query_id: Some(-8_231_734_902_117_431_882),
+                ssl: true,
+                ssl_version: Some("TLSv1.3".to_string()),
+                ssl_cipher: Some("TLS_AES_256_GCM_SHA384".to_string()),
             },
             ActivityRow {
                 pid: 4977,
@@ -1963,6 +2024,9 @@ impl DbSnapshot {
                 query_leader_pid: 4977,
                 is_parallel_worker: false,
                 query_id: Some(3_004_918_872_215_881_003),
+                ssl: true,
+                ssl_version: Some("TLSv1.3".to_string()),
+                ssl_cipher: Some("TLS_AES_128_GCM_SHA256".to_string()),
             },
             ActivityRow {
                 pid: 5010,
@@ -1980,6 +2044,9 @@ impl DbSnapshot {
                 query_leader_pid: 5010,
                 is_parallel_worker: false,
                 query_id: Some(551_202_998_310_442_781),
+                ssl: true,
+                ssl_version: Some("TLSv1.2".to_string()),
+                ssl_cipher: Some("ECDHE-RSA-AES256-GCM-SHA384".to_string()),
             },
             ActivityRow {
                 pid: 5011,
@@ -1997,6 +2064,9 @@ impl DbSnapshot {
                 query_leader_pid: 5010,
                 is_parallel_worker: true,
                 query_id: Some(551_202_998_310_442_781),
+                ssl: true,
+                ssl_version: Some("TLSv1.2".to_string()),
+                ssl_cipher: Some("ECDHE-RSA-AES256-GCM-SHA384".to_string()),
             },
             ActivityRow {
                 pid: 4312,
@@ -2018,6 +2088,9 @@ impl DbSnapshot {
                 query_leader_pid: 4312,
                 is_parallel_worker: false,
                 query_id: None,
+                ssl: false,
+                ssl_version: None,
+                ssl_cipher: None,
             },
             ActivityRow {
                 pid: 4650,
@@ -2033,6 +2106,9 @@ impl DbSnapshot {
                 query_leader_pid: 4650,
                 is_parallel_worker: false,
                 query_id: None,
+                ssl: false,
+                ssl_version: None,
+                ssl_cipher: None,
             },
             // v0.9: third link of the blocking chain — waits on pid 4977,
             // which is itself waiting on pid 4312. See `locks` below: this
@@ -2053,6 +2129,9 @@ impl DbSnapshot {
                 query_leader_pid: 5104,
                 is_parallel_worker: false,
                 query_id: Some(3_004_918_872_215_881_003),
+                ssl: true,
+                ssl_version: Some("TLSv1.3".to_string()),
+                ssl_cipher: Some("TLS_AES_256_GCM_SHA384".to_string()),
             },
         ];
 
@@ -2083,6 +2162,114 @@ impl DbSnapshot {
                     .to_string(),
             },
         ];
+
+        let idle_sessions_vec = vec![
+            IdleSessionRow {
+                pid: 6104,
+                application_name: "reporting-pool".to_string(),
+                database: "warehouse".to_string(),
+                client: "10.0.7.9".to_string(),
+                username: "analytics_ro".to_string(),
+                idle_age_secs: 15_120.0 + age,
+                ssl: true,
+                ssl_version: Some("TLSv1.3".to_string()),
+                ssl_cipher: Some("TLS_AES_256_GCM_SHA384".to_string()),
+            },
+            IdleSessionRow {
+                pid: 6205,
+                application_name: "checkout-api".to_string(),
+                database: "shop".to_string(),
+                client: "10.0.4.14".to_string(),
+                username: "app_rw".to_string(),
+                idle_age_secs: 5_402.0 + age,
+                ssl: true,
+                ssl_version: Some("TLSv1.3".to_string()),
+                ssl_cipher: Some("TLS_AES_256_GCM_SHA384".to_string()),
+            },
+            IdleSessionRow {
+                pid: 6301,
+                application_name: "checkout-api".to_string(),
+                database: "shop".to_string(),
+                client: "10.0.4.15".to_string(),
+                username: "app_rw".to_string(),
+                idle_age_secs: 612.0 + age,
+                ssl: true,
+                ssl_version: Some("TLSv1.3".to_string()),
+                ssl_cipher: Some("TLS_AES_256_GCM_SHA384".to_string()),
+            },
+            IdleSessionRow {
+                pid: 6402,
+                application_name: "psql".to_string(),
+                database: "shop".to_string(),
+                client: "local".to_string(),
+                username: "leonardo".to_string(),
+                idle_age_secs: 42.0 + jitter(seq, 33, 30) as f64,
+                ssl: false,
+                ssl_version: None,
+                ssl_cipher: None,
+            },
+        ];
+
+        let blocking_tree = Some(crate::blocks::build_blocking_tree(
+            &locks,
+            &activity,
+            Some(&idle_sessions_vec),
+        ));
+
+        let active_locks = Some(vec![
+            ActiveLockRow {
+                pid: 4312,
+                locktype: "relation".to_string(),
+                relation: "products".to_string(),
+                schema: "public".to_string(),
+                mode: "RowExclusiveLock".to_string(),
+                granted: true,
+                fastpath: false,
+                duration_secs: 2_450.0 + age,
+                usename: "leonardo".to_string(),
+                application_name: "psql".to_string(),
+                query: "UPDATE products SET price = price * 1.1 WHERE category = 'books'".to_string(),
+            },
+            ActiveLockRow {
+                pid: 4977,
+                locktype: "transactionid".to_string(),
+                relation: "".to_string(),
+                schema: "".to_string(),
+                mode: "ShareLock".to_string(),
+                granted: false,
+                fastpath: false,
+                duration_secs: 12.7 + age,
+                usename: "bench".to_string(),
+                application_name: "checkout-worker".to_string(),
+                query: "UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2".to_string(),
+            },
+            ActiveLockRow {
+                pid: 5104,
+                locktype: "tuple".to_string(),
+                relation: "pgbench_branches".to_string(),
+                schema: "public".to_string(),
+                mode: "RowExclusiveLock".to_string(),
+                granted: false,
+                fastpath: false,
+                duration_secs: 6.1 + age,
+                usename: "bench".to_string(),
+                application_name: "checkout-worker".to_string(),
+                query: "UPDATE pgbench_branches SET bbalance = bbalance - $1 WHERE bid = $2".to_string(),
+            },
+            ActiveLockRow {
+                pid: 4821,
+                locktype: "relation".to_string(),
+                relation: "orders".to_string(),
+                schema: "public".to_string(),
+                mode: "AccessShareLock".to_string(),
+                granted: true,
+                fastpath: true,
+                duration_secs: 0.05,
+                usename: "checkout-api".to_string(),
+                application_name: "checkout-api".to_string(),
+                query: "SELECT * FROM orders WHERE id = $1".to_string(),
+            },
+        ]);
 
         Self {
             vitals,
@@ -2227,40 +2414,7 @@ impl DbSnapshot {
             // ORDER BY, including one comfortably past
             // `idle_sessions::BAD_AGE_SECS` (4h) at ~4h12m so `--mock` opens
             // on a visible red row without waiting for a live incident.
-            idle_sessions: Some(vec![
-                IdleSessionRow {
-                    pid: 6104,
-                    application_name: "reporting-pool".to_string(),
-                    database: "warehouse".to_string(),
-                    client: "10.0.7.9".to_string(),
-                    username: "analytics_ro".to_string(),
-                    idle_age_secs: 15_120.0 + age,
-                },
-                IdleSessionRow {
-                    pid: 6205,
-                    application_name: "checkout-api".to_string(),
-                    database: "shop".to_string(),
-                    client: "10.0.4.14".to_string(),
-                    username: "app_rw".to_string(),
-                    idle_age_secs: 5_402.0 + age,
-                },
-                IdleSessionRow {
-                    pid: 6301,
-                    application_name: "checkout-api".to_string(),
-                    database: "shop".to_string(),
-                    client: "10.0.4.15".to_string(),
-                    username: "app_rw".to_string(),
-                    idle_age_secs: 612.0 + age,
-                },
-                IdleSessionRow {
-                    pid: 6402,
-                    application_name: "psql".to_string(),
-                    database: "shop".to_string(),
-                    client: "local".to_string(),
-                    username: "leonardo".to_string(),
-                    idle_age_secs: 42.0 + jitter(seq, 33, 30) as f64,
-                },
-            ]),
+            idle_sessions: Some(idle_sessions_vec),
             // v0.15: always carries the `order_items` fixture so Enter on
             // that row in `--mock` demos every `\d` section without waiting
             // on a simulated request round-trip (the mock poller re-stamps
@@ -2344,6 +2498,18 @@ impl DbSnapshot {
                 wal_records_per_sec: Some(410.0 + jitter(seq, 54, 80) as f64),
                 wal_buffers_full_delta: Some(0),
             }),
+            active_locks,
+            blocking_tree,
+            ddl_progress: Some(vec![DdlProgressRow {
+                pid: 4821,
+                command: "CREATE INDEX CONCURRENTLY".to_string(),
+                relation: "orders".to_string(),
+                phase: "building index: scanning table".to_string(),
+                progress_pct: Some(64.2),
+                current_step: 642_000,
+                total_step: 1_000_000,
+                detail: "idx_orders_customer_id".to_string(),
+            }]),
             status: PollerStatus::Ok,
         }
     }
@@ -2387,6 +2553,9 @@ impl DbSnapshot {
             table_detail: None,
             io_stats: None,
             wal: None,
+            active_locks: None,
+            blocking_tree: None,
+            ddl_progress: None,
             status: PollerStatus::Connecting,
         }
     }
@@ -2427,6 +2596,34 @@ mod tests {
             inactive.retained_wal_bytes.unwrap_or(0) > 2_000_000_000,
             "the inactive slot must retain a couple GB, per the spec"
         );
+    }
+
+    #[test]
+    fn mock_snapshot_carries_ddl_progress_and_ssl() {
+        let snapshot = DbSnapshot::mock();
+        let ddl = snapshot
+            .ddl_progress
+            .as_ref()
+            .expect("mock must carry ddl_progress");
+        assert_eq!(ddl.len(), 1);
+        assert_eq!(ddl[0].command, "CREATE INDEX CONCURRENTLY");
+        assert_eq!(ddl[0].progress_pct, Some(64.2));
+
+        let ssl_session = snapshot
+            .activity
+            .iter()
+            .find(|a| a.pid == 4821)
+            .expect("checkout-api row");
+        assert!(ssl_session.ssl);
+        assert_eq!(ssl_session.ssl_version.as_deref(), Some("TLSv1.3"));
+
+        let plain_session = snapshot
+            .activity
+            .iter()
+            .find(|a| a.pid == 4312)
+            .expect("psql row");
+        assert!(!plain_session.ssl);
+        assert!(plain_session.ssl_version.is_none());
     }
 
     /// F2: the mock's cluster age sits below the yellow threshold (200M) —

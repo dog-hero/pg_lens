@@ -29,6 +29,9 @@ function row(state: string, duration_secs: number): ActivityRow {
     query_leader_pid: 1,
     is_parallel_worker: false,
     query_id: null,
+    ssl: false,
+    ssl_version: null,
+    ssl_cipher: null,
   };
 }
 
@@ -82,4 +85,14 @@ test("blocked wins over the duration override and over waiting", () => {
 
 test("waiting tints when nothing stronger applies", () => {
   assert.equal(activityRowClass(row("active", 1), false, true), "waiting");
+});
+
+test("ActivityRow supports SSL encryption flags", () => {
+  const r = row("active", 5);
+  r.ssl = true;
+  r.ssl_version = "TLSv1.3";
+  r.ssl_cipher = "TLS_AES_256_GCM_SHA384";
+  assert.equal(r.ssl, true);
+  assert.equal(r.ssl_version, "TLSv1.3");
+  assert.equal(r.ssl_cipher, "TLS_AES_256_GCM_SHA384");
 });

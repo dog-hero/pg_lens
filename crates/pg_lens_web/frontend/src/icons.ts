@@ -5,11 +5,12 @@
 // unit-testable and callers (main.ts, and index.html's hand-written buttons)
 // share one source of truth for the id strings instead of duplicating them.
 
-/** The five nav sections, same order as the sidenav / keyboard shortcuts. */
-export type NavSection = "activity" | "replication" | "schema" | "indexes" | "queries";
+/** The six nav sections, same order as the sidenav / keyboard shortcuts. */
+export type NavSection = "activity" | "blocks" | "replication" | "schema" | "indexes" | "queries";
 
 const NAV_ICON_IDS: Record<NavSection, string> = {
   activity: "icon-activity",
+  blocks: "icon-blocks",
   replication: "icon-replication",
   schema: "icon-schema",
   indexes: "icon-indexes",

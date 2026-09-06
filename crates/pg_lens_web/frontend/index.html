@@ -55,6 +55,10 @@
         <polyline points="7,9 10,12 7,15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
         <line x1="12" y1="15" x2="17" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
       </symbol>
+      <symbol id="icon-blocks" viewBox="0 0 24 24">
+        <rect x="5" y="11" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+        <path d="M8 11V7a4 4 0 0 1 8 0v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
       <symbol id="icon-sun" viewBox="0 0 24 24">
         <circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2" />
         <g stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -166,6 +170,11 @@
             <span class="nav-label">Activity</span>
             <span class="nav-key">1</span>
           </button>
+          <button id="tab-blocks" class="nav-btn" role="tab" aria-selected="false" aria-controls="blocks-panel">
+            <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-blocks"></use></svg>
+            <span class="nav-label">Blocks</span>
+            <span class="nav-key">2</span>
+          </button>
           <button
             id="tab-replication"
             class="nav-btn"
@@ -175,22 +184,22 @@
           >
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-replication"></use></svg>
             <span class="nav-label">Replication</span>
-            <span class="nav-key">2</span>
+            <span class="nav-key">3</span>
           </button>
           <button id="tab-schema" class="nav-btn" role="tab" aria-selected="false" aria-controls="schema-panel">
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-schema"></use></svg>
             <span class="nav-label">Schema</span>
-            <span class="nav-key">3</span>
+            <span class="nav-key">4</span>
           </button>
           <button id="tab-indexes" class="nav-btn" role="tab" aria-selected="false" aria-controls="indexes-panel">
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-indexes"></use></svg>
             <span class="nav-label">Indexes</span>
-            <span class="nav-key">4</span>
+            <span class="nav-key">5</span>
           </button>
           <button id="tab-queries" class="nav-btn" role="tab" aria-selected="false" aria-controls="queries-panel">
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-queries"></use></svg>
             <span class="nav-label">Queries</span>
-            <span class="nav-key">5</span>
+            <span class="nav-key">6</span>
           </button>
           <div class="sidenav-footer">
             <p class="legend">
@@ -198,9 +207,9 @@
               <span class="legend-item"><svg class="icon legend-dot warn" aria-hidden="true"><use href="#icon-dot"></use></svg>warn</span>
               <span class="legend-item"><svg class="icon legend-dot bad" aria-hidden="true"><use href="#icon-dot"></use></svg>bad</span>
             </p>
-            <p class="kbd-hint" title="1-5 jump sections, / focuses the filter, Esc clears focus">
+            <p class="kbd-hint" title="1-6 jump sections, / focuses the filter, Esc clears focus">
               <svg class="icon" aria-hidden="true"><use href="#icon-keyboard"></use></svg>
-              <span><kbd>1</kbd>-<kbd>5</kbd> nav · <kbd>/</kbd> filter · <kbd>Esc</kbd> clear</span>
+              <span><kbd>1</kbd>-<kbd>6</kbd> nav · <kbd>/</kbd> filter · <kbd>Esc</kbd> clear</span>
             </p>
           </div>
         </nav>
@@ -255,6 +264,33 @@
               <summary id="idle-detail-summary">Idle connections</summary>
               <ul id="idle-list" class="vacuum-tables"></ul>
             </details>
+          </section>
+          <section id="blocks-panel" class="panel" role="tabpanel" hidden>
+            <h2>Blocks &amp; Locks <span class="panel-note">wait-for tree &amp; active locks</span></h2>
+            <div class="blocks-section">
+              <h3>Blocking Tree</h3>
+              <div id="blocks-tree-container" class="blocks-tree-wrap"></div>
+            </div>
+            <div class="blocks-section">
+              <h3>Active Locks</h3>
+              <div class="table-wrap">
+                <table id="blocks-locks">
+                  <thead>
+                    <tr>
+                      <th class="num">PID</th>
+                      <th>Type</th>
+                      <th>Relation</th>
+                      <th>Mode</th>
+                      <th>Status</th>
+                      <th class="num">Age</th>
+                      <th>User</th>
+                      <th>Query</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
           </section>
           <section id="replication-panel" class="panel" role="tabpanel" hidden>
             <h2>Replication</h2>

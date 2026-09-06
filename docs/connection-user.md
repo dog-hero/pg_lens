@@ -47,7 +47,9 @@ to the privilege that lights it up.
 | Lens / panel | Data source | Needs | Without it |
 |---|---|---|---|
 | **Macro Lens** — vitals, TPS, sessions | `pg_stat_database`, `pg_stat_activity` | base connect; **`pg_read_all_stats`** (in `pg_monitor`) to see *other* users' rows | you see only your own sessions; aggregate counts under-report |
-| **Micro Lens** — full activity, query text, waits, xact-age, blocking chains | `pg_stat_activity` | **`pg_read_all_stats`** — otherwise `query`, `state` etc. of other backends are `NULL`/hidden | only your own backends visible; blocking chains can't resolve the root blocker |
+| **Micro Lens** — full activity, query text, waits, xact-age, blocking chains, SSL | `pg_stat_activity`, `pg_stat_ssl` | **`pg_read_all_stats`** — otherwise `query`, `state` etc. of other backends are `NULL`/hidden | only your own backends visible; blocking chains can't resolve the root blocker; SSL status blank |
+| **Blocks & Locks Lens** — wait-for tree, active locks | `pg_locks`, `pg_stat_activity` | **`pg_read_all_stats`** (to see queries/waiters across users); `pg_locks` is world-readable | only your own sessions/locks have query text visible |
+| **DDL & maintenance progress** | `pg_stat_progress_*` (`create_index`, `analyze`, `basebackup`, `vacuum`) | **`pg_read_all_stats`** to see other backends' progress | only your own progress is visible |
 | **Query Lens** | `pg_stat_statements` | the **extension installed** (`CREATE EXTENSION pg_stat_statements` + `shared_preload_libraries`) **and** read access — `pg_monitor` grants it | friendly "extension missing/old" explainer; panel absent |
 | **Schema Lens** — table stats & sizes | `pg_stat_user_tables`, `pg_relation_size(...)` | readable by any role for its own tables; **`pg_stat_scan_tables`** / table `SELECT` for full coverage | tables you can't see are omitted |
 | **Schema Lens** — estimated bloat (`R`) | `pg_class`, `pg_stats` | **`pg_read_all_stats`** (statistics rows) | bloat estimate blank; the rest of the lens still works |

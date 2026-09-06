@@ -17,6 +17,9 @@ function row(pid: number, idleAgeSecs: number): IdleSessionRow {
     client: "10.0.0.1",
     username: "app_rw",
     idle_age_secs: idleAgeSecs,
+    ssl: false,
+    ssl_version: null,
+    ssl_cipher: null,
   };
 }
 

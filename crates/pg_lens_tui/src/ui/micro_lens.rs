@@ -593,6 +593,54 @@ fn draw_detail(app: &App, frame: &mut Frame, area: Rect) {
                 .style(Style::new().fg(xact_severity_color(severity))),
         );
     }
+    // SSL / Security status (v0.17)
+    let ssl_info = if row.ssl {
+        let ver = row.ssl_version.as_deref().unwrap_or("TLS");
+        let cipher = row.ssl_cipher.as_deref().unwrap_or("");
+        if cipher.is_empty() {
+            format!("security: {ver} (encrypted)")
+        } else {
+            format!("security: {ver} ({cipher})")
+        }
+    } else if row.client == "local" {
+        "security: unix-socket (local)".to_string()
+    } else {
+        "security: plain (unencrypted)".to_string()
+    };
+    let ssl_color = if row.ssl {
+        Color::Green
+    } else if row.client == "local" {
+        Color::DarkGray
+    } else {
+        Color::Red
+    };
+    lines.push(Line::from(ssl_info).style(Style::new().fg(ssl_color)));
+
+    // DDL & maintenance progress (v0.17)
+    if let Some(ddl_list) = &app.snapshot.ddl_progress {
+        if let Some(ddl) = ddl_list.iter().find(|d| d.pid == row.pid) {
+            let pct_str = ddl
+                .progress_pct
+                .map(|p| format!("{p:.1}%"))
+                .unwrap_or_else(|| "in progress".to_string());
+            let detail_suffix = if !ddl.detail.is_empty() {
+                format!(" [{}]", ddl.detail)
+            } else {
+                String::new()
+            };
+            let progress_line = format!(
+                "ddl progress: {} on {} \u{2502} {} ({}/{}) \u{2502} {}{}",
+                ddl.command,
+                ddl.relation,
+                ddl.phase,
+                ddl.current_step,
+                ddl.total_step,
+                pct_str,
+                detail_suffix
+            );
+            lines.push(Line::from(progress_line).style(Style::new().fg(Color::Cyan).bold()));
+        }
+    }
     // v0.9: wait-for chain, only when this pid is actually blocked — the
     // root blocker (the one to act on) is highlighted; a deadlock cycle is
     // flagged explicitly rather than silently showing a chain that loops.
@@ -1012,6 +1060,9 @@ mod tests {
                 client: "10.0.0.1".to_string(),
                 username: "u".to_string(),
                 idle_age_secs: 100.0,
+                ssl: false,
+                ssl_version: None,
+                ssl_cipher: None,
             },
             pg_lens_core::IdleSessionRow {
                 pid: 2,
@@ -1020,6 +1071,9 @@ mod tests {
                 client: "10.0.0.1".to_string(),
                 username: "u".to_string(),
                 idle_age_secs: 20_000.0,
+                ssl: false,
+                ssl_version: None,
+                ssl_cipher: None,
             },
         ];
         let line = idle_headline(&rows);
@@ -1052,6 +1106,9 @@ mod tests {
             query_leader_pid: 1,
             is_parallel_worker: false,
             query_id: None,
+            ssl: false,
+            ssl_version: None,
+            ssl_cipher: None,
         }
     }
 
@@ -1242,5 +1299,39 @@ mod tests {
             })
         });
         assert!(cyan_bold_present, "the detail panel must still highlight SQL keywords");
+    }
+
+    #[test]
+    fn detail_panel_shows_ssl_security_and_ddl_progress() {
+        let mut app = crate::app::App::new();
+        app.active_tab = crate::app::Tab::MicroLens;
+        let snapshot = app.snapshot.clone();
+        crate::app::update(&mut app, crate::app::Action::Snapshot(snapshot));
+        let pos = app
+            .row_order
+            .iter()
+            .position(|&i| app.snapshot.activity[i].pid == 4821)
+            .expect("mock row 4821 present");
+        app.table_state.select(Some(pos));
+        app.detail_open = true;
+
+        let backend = ratatui::backend::TestBackend::new(160, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("security: TLSv1.3"), "{screen}");
+        assert!(
+            screen.contains("ddl progress: CREATE INDEX CONCURRENTLY on orders"),
+            "{screen}"
+        );
+        assert!(screen.contains("64.2%"), "{screen}");
     }
 }
