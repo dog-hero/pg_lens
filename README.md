@@ -42,7 +42,7 @@ Web Lens dashboard running on recorded data (no database required).
   immediately regardless of duration. A **blocked** row always outranks
   every other tint. SQL keyword highlighting lives in the `Enter` detail
   panel, not the table row. TUI + Web.
-- **Blocks & Locks Lens (`3 Blocks`)** — dedicated lens positioned between
+- **Blocks & Locks Lens (`3 Blocks & Locks Lens`)** — dedicated lens positioned between
   Micro Lens and Replication with a dual-pane split view:
   - Upper pane: hierarchical blocking wait-tree (`root blocker -> waiting PID -> waiting PID`)
     identifying root blockers, blocked session counts, lock modes, target relations, and wait age.

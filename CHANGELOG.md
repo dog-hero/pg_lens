@@ -7,7 +7,7 @@ All notable changes to pg_lens. Format inspired by
 ## [0.17.0] — 2026-09-06 — "Blocks & Locks Lens"
 
 ### Added
-- **Blocks & Locks Lens (`3 Blocks`)** — dedicated lens positioned between Micro
+- **Blocks & Locks Lens (`3 Blocks & Locks Lens`)** — dedicated lens positioned between Micro
   Lens and Replication, featuring a dual-pane split view:
   - Upper pane: hierarchical blocking wait-tree (`root blocker -> waiting PID -> waiting PID`)
     identifying root blockers, blocked session count, lock modes, target relations, and wait age.
@@ -16,7 +16,7 @@ All notable changes to pg_lens. Format inspired by
   - Quick pane-switching with `p` / `o`, interactive detail panel on `Enter`, and direct
     query cancellation (`c`) or backend termination (`K`) with confirmation modals from either pane.
   - Direct jump via key `3` or mnemonic `b`. Web Lens mirrors with an interactive
-    blocking tree, active locks table, and search filter on tab `2 Blocks`.
+    blocking tree, active locks table, and search filter on tab `2 Blocks & Locks`.
 - **In-flight DDL & maintenance progress (`pg_stat_progress_*`)** — monitors live progress
   from `pg_stat_progress_create_index`, `pg_stat_progress_analyze`, and
   `pg_stat_progress_basebackup`. Surfaced directly in the Micro Lens session detail panel (`Enter`)
@@ -29,9 +29,9 @@ All notable changes to pg_lens. Format inspired by
   - SSL status badge on idle connection census in both TUI and Web Lens.
 
 ### Changed
-- **Tab ordering & numbering** — Blocks Lens is positioned as Tab 3 (`3 Blocks`), shifting
+- **Tab ordering & numbering** — Blocks Lens is positioned as Tab 3 (`3 Blocks & Locks Lens`), shifting
   Replication to 4, Schema Lens to 5, Indexes to 6, and Query Lens to 7 (`1`-`7` direct jumps).
-  Web Lens side navigation updated to Activity (1), Blocks (2), Replication (3), Schema (4),
+  Web Lens side navigation updated to Activity (1), Blocks & Locks (2), Replication (3), Schema (4),
   Indexes (5), and Queries (6).
 
 ## [0.16.0] — 2026-08-06 — "First impression"

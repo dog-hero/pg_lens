@@ -65,7 +65,7 @@ impl Tab {
     pub const TITLES: [&'static str; 7] = [
         "1 Macro Lens",
         "2 Micro Lens",
-        "3 Blocks",
+        "3 Blocks & Locks Lens",
         "4 Replication",
         "5 Schema Lens",
         "6 Indexes",
