@@ -91,7 +91,7 @@ impl Tab {
         "1 Macro Lens",
         "2 Micro Lens",
         "3 Blocks & Locks Lens",
-        "4 Replication",
+        "4 Replication Lens",
         "5 Schema Lens",
         "6 Indexes",
         "7 Query Lens",
@@ -298,6 +298,8 @@ pub enum SchemaView {
     /// list (all `VACUUM_TABLES_LIMIT` rows, scrollable via its own
     /// `vacuum_table_state`), and the in-flight vacuum progress section.
     Vacuum,
+    /// Full-height: sequence headroom exhaustion watch (v0.19, `S` toggles).
+    Sequences,
 }
 
 impl SchemaView {
@@ -305,6 +307,7 @@ impl SchemaView {
         match self {
             SchemaView::Tables => SchemaView::Vacuum,
             SchemaView::Vacuum => SchemaView::Tables,
+            SchemaView::Sequences => SchemaView::Tables,
         }
     }
 }
@@ -593,6 +596,9 @@ pub struct App {
     /// worst-first from its own `ORDER BY` and carries no user sort/filter,
     /// so (unlike `schema_row_order`) no separate display-order vec exists.
     pub vacuum_table_state: TableState,
+    /// Sequences sub-view selection (v0.19, `S` toggles).
+    pub sequences_table_state: TableState,
+    pub sequences_row_order: Vec<usize>,
     /// Indices into `snapshot.schema.indexes` in severity-then-size display
     /// order (the Index Lens's twin of `schema_row_order`; no sort mode of
     /// its own — see [`index_finding_rank`]).
@@ -601,6 +607,10 @@ pub struct App {
     /// (U1: it used to share `SchemaView::Indexes`'s state before the
     /// promotion to its own tab; the field name is unchanged).
     pub index_table_state: TableState,
+    /// Search filter for the Index Lens (v0.19, `/` edits, `\` clears).
+    pub index_filter: String,
+    pub index_filter_saved: String,
+    pub index_filter_editing: bool,
     /// Indices into `snapshot.replication_slots` in severity-then-retained
     /// display order (the Replication Lens's twin of `index_row_order`; see
     /// [`slot_severity_rank`]).
@@ -833,8 +843,13 @@ impl App {
             schema_table_state: TableState::default().with_selected(0),
             schema_view: SchemaView::default(),
             vacuum_table_state: TableState::default().with_selected(0),
+            sequences_table_state: TableState::default().with_selected(0),
+            sequences_row_order: Vec::new(),
             index_row_order: Vec::new(),
             index_table_state: TableState::default().with_selected(0),
+            index_filter: String::new(),
+            index_filter_saved: String::new(),
+            index_filter_editing: false,
             replication_row_order: Vec::new(),
             replication_table_state: TableState::default().with_selected(0),
             statements_row_order: Vec::new(),
@@ -906,6 +921,7 @@ impl App {
         };
         resort(&mut app);
         resort_schema(&mut app);
+        resort_sequences(&mut app);
         resort_indexes(&mut app);
         resort_replication(&mut app);
         resort_statements(&mut app);
@@ -944,6 +960,14 @@ impl App {
         let display_idx = self.schema_table_state.selected()?;
         let snapshot_idx = *self.schema_row_order.get(display_idx)?;
         schema.tables.get(snapshot_idx)
+    }
+
+    /// The Sequence currently under the cursor, in display order.
+    pub fn selected_sequence(&self) -> Option<&pg_lens_core::SequenceRow> {
+        let schema = self.snapshot.schema.as_deref()?;
+        let display_idx = self.sequences_table_state.selected()?;
+        let snapshot_idx = *self.sequences_row_order.get(display_idx)?;
+        schema.sequences.get(snapshot_idx)
     }
 
     /// The Index Advisor row currently under the cursor, in display order
@@ -1185,6 +1209,10 @@ pub fn clipboard_text(app: &App) -> Option<String> {
             }
             Some(format!("{}.{}", table.schema, table.name))
         }
+        Tab::SchemaLens if app.schema_view == SchemaView::Sequences => {
+            let seq = app.selected_sequence()?;
+            Some(format!("{}.{}", seq.schema, seq.sequence_name))
+        }
         Tab::BlocksLens => {
             if app.blocks_active_pane == BlocksPane::Tree {
                 app.selected_block_node().map(|n| n.query.clone())
@@ -1343,6 +1371,7 @@ pub fn apply_snapshot(app: &mut App, snapshot: Arc<DbSnapshot>) {
     note_admin_result(app);
     resort(app);
     resort_schema(app);
+    resort_sequences(app);
     resort_indexes(app);
     resort_replication(app);
     resort_statements(app);
@@ -1493,8 +1522,17 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 app.waits_open = false;
             } else if app.active_tab == Tab::SchemaLens && app.schema_view != SchemaView::Tables {
                 // The `v` Vacuum sub-view is an overlay too: Esc returns to
+                // The `v` Vacuum sub-view and `S` Sequences sub-view are overlay-like sub-views: Esc returns to
                 // the Tables view, it does NOT arm quitting.
                 app.schema_view = SchemaView::Tables;
+            } else if app.active_tab == Tab::IndexLens
+                && app.previous_tab == Some(Tab::SchemaLens)
+                && !app.index_filter.is_empty()
+            {
+                // Esc returns to Schema Lens when jumped via `i`
+                app.index_filter.clear();
+                resort_indexes(app);
+                app.active_tab = Tab::SchemaLens;
             } else if app.active_tab == Tab::MicroLens && app.micro_view != MicroView::Activity {
                 // The `I` idle census is the same "overlay-like sub-view"
                 // story as the Vacuum sub-view above: Esc returns to the
@@ -1671,10 +1709,15 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.filter_editing = true;
         }
         KeyCode::Char('/')
-            if app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables =>
+            if app.active_tab == Tab::SchemaLens
+                && (app.schema_view == SchemaView::Tables || app.schema_view == SchemaView::Sequences) =>
         {
             app.schema_filter_saved = app.schema_filter.clone();
             app.schema_filter_editing = true;
+        }
+        KeyCode::Char('/') if app.active_tab == Tab::IndexLens => {
+            app.index_filter_saved = app.index_filter.clone();
+            app.index_filter_editing = true;
         }
         KeyCode::Char('/') if app.active_tab == Tab::QueryLens => {
             app.statements_filter_saved = app.statements_filter.clone();
@@ -1706,10 +1749,17 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 clamp_selection(app);
             }
             Tab::SchemaLens
-                if app.schema_view == SchemaView::Tables && !app.schema_filter.is_empty() =>
+                if (app.schema_view == SchemaView::Tables || app.schema_view == SchemaView::Sequences)
+                    && !app.schema_filter.is_empty() =>
             {
                 app.schema_filter.clear();
                 resort_schema(app);
+                resort_sequences(app);
+                clamp_selection(app);
+            }
+            Tab::IndexLens if !app.index_filter.is_empty() => {
+                app.index_filter.clear();
+                resort_indexes(app);
                 clamp_selection(app);
             }
             Tab::QueryLens if !app.statements_filter.is_empty() => {
@@ -1799,6 +1849,32 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 app.statements_table_state.select(Some(0));
                 clamp_selection(app);
             }
+        }
+        // `i` (v0.19, cross-lens jump from Schema Lens to Index Lens):
+        KeyCode::Char('i')
+            if app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables =>
+        {
+            if let Some(table) = app.selected_table() {
+                let name = table.name.clone();
+                app.previous_tab = Some(app.active_tab);
+                app.detail_open = false;
+                app.waits_open = false;
+                app.active_tab = Tab::IndexLens;
+                app.index_filter = name;
+                app.index_filter_saved = app.index_filter.clone();
+                app.index_filter_editing = false;
+                resort_indexes(app);
+                app.index_table_state.select(Some(0));
+                clamp_selection(app);
+            }
+        }
+        // `S` (v0.19, Sequences sub-view): toggles between Tables and Sequences view in Schema Lens.
+        KeyCode::Char('S') if app.active_tab == Tab::SchemaLens => {
+            app.schema_view = match app.schema_view {
+                SchemaView::Sequences => SchemaView::Tables,
+                _ => SchemaView::Sequences,
+            };
+            app.detail_open = false;
         }
         // `I` (v0.11, mnemonic "idle"): toggles the Micro Lens between the
         // Activity table and the idle connection / connection-age census
@@ -2328,6 +2404,7 @@ enum FilterLens {
     Query,
     Progress,
     Records,
+    Index,
 }
 
 /// `None` when no filter is being edited — defensive; `handle_key` only
@@ -2345,6 +2422,8 @@ fn active_filter_lens(app: &App) -> Option<FilterLens> {
         Some(FilterLens::Progress)
     } else if app.records_filter_editing {
         Some(FilterLens::Records)
+    } else if app.index_filter_editing {
+        Some(FilterLens::Index)
     } else {
         None
     }
@@ -2356,10 +2435,14 @@ fn active_filter_lens(app: &App) -> Option<FilterLens> {
 fn resort_for(app: &mut App, lens: FilterLens) {
     match lens {
         FilterLens::Micro => resort(app),
-        FilterLens::Schema => resort_schema(app),
+        FilterLens::Schema => {
+            resort_schema(app);
+            resort_sequences(app);
+        }
         FilterLens::Query => resort_statements(app),
         FilterLens::Progress => resort_progress(app),
         FilterLens::Records => resort_records(app),
+        FilterLens::Index => resort_indexes(app),
     }
 }
 
@@ -2386,6 +2469,7 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
             FilterLens::Query => app.statements_filter_editing = false,
             FilterLens::Progress => app.progress_filter_editing = false,
             FilterLens::Records => app.records_filter_editing = false,
+            FilterLens::Index => app.index_filter_editing = false,
         },
         KeyCode::Esc => {
             match lens {
@@ -2409,6 +2493,10 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
                     app.records_filter = std::mem::take(&mut app.records_filter_saved);
                     app.records_filter_editing = false;
                 }
+                FilterLens::Index => {
+                    app.index_filter = std::mem::take(&mut app.index_filter_saved);
+                    app.index_filter_editing = false;
+                }
             }
             resort_for(app, lens);
             clamp_selection(app);
@@ -2430,6 +2518,9 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
                 FilterLens::Records => {
                     app.records_filter.pop();
                 }
+                FilterLens::Index => {
+                    app.index_filter.pop();
+                }
             }
             resort_for(app, lens);
             clamp_selection(app);
@@ -2442,6 +2533,7 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
                 FilterLens::Query => app.statements_filter.push(c),
                 FilterLens::Progress => app.progress_filter.push(c),
                 FilterLens::Records => app.records_filter.push(c),
+                FilterLens::Index => app.index_filter.push(c),
             }
             resort_for(app, lens);
             clamp_selection(app);
@@ -2571,6 +2663,10 @@ fn selection_target(app: &mut App) -> (&mut TableState, usize) {
                 .as_deref()
                 .map_or(0, |s| s.vacuum_tables.len()),
         ),
+        Tab::SchemaLens if app.schema_view == SchemaView::Sequences => (
+            &mut app.sequences_table_state,
+            app.sequences_row_order.len(),
+        ),
         // v0.12: navigates the FILTERED display order (`schema_row_order`),
         // same story as the Micro Lens's `row_order` below — an active
         // `schema_filter` must shrink what j/k/Home/End can reach.
@@ -2663,6 +2759,19 @@ fn clamp_selection(app: &mut App) {
             .unwrap_or(0)
             .min(vacuum_len - 1);
         app.vacuum_table_state.select(Some(clamped));
+    }
+
+    // Sequences sub-view (v0.19): no detail panel to close, just a cursor to keep valid.
+    let sequences_len = app.sequences_row_order.len();
+    if sequences_len == 0 {
+        app.sequences_table_state.select(None);
+    } else {
+        let clamped = app
+            .sequences_table_state
+            .selected()
+            .unwrap_or(0)
+            .min(sequences_len - 1);
+        app.sequences_table_state.select(Some(clamped));
     }
 
     let index_len = app.index_row_order.len();
@@ -2907,17 +3016,60 @@ fn resort_schema(app: &mut App) {
     app.schema_row_order = order;
 }
 
+/// Recomputes `sequences_row_order` from the current snapshot (v0.19).
+/// Headroom exhaustion order: percent_used DESC, then remaining_count ASC;
+/// ties break by schema/sequence ascending so the order is deterministic.
+fn resort_sequences(app: &mut App) {
+    let Some(schema) = app.snapshot.schema.as_deref() else {
+        app.sequences_row_order = Vec::new();
+        return;
+    };
+    let rows = &schema.sequences;
+    let needle = app.schema_filter.trim().to_lowercase();
+    let mut order: Vec<usize> = (0..rows.len())
+        .filter(|&i| {
+            needle.is_empty()
+                || rows[i].schema.to_lowercase().contains(&needle)
+                || rows[i].sequence_name.to_lowercase().contains(&needle)
+                || rows[i].table_name.to_lowercase().contains(&needle)
+                || rows[i].column_name.to_lowercase().contains(&needle)
+        })
+        .collect();
+    order.sort_by(|&a, &b| {
+        rows[b]
+            .percent_used
+            .total_cmp(&rows[a].percent_used)
+            .then_with(|| rows[a].remaining_count.cmp(&rows[b].remaining_count))
+            .then_with(|| {
+                (&rows[a].schema, &rows[a].sequence_name)
+                    .cmp(&(&rows[b].schema, &rows[b].sequence_name))
+            })
+    });
+    app.sequences_row_order = order;
+}
+
 /// Recomputes `index_row_order` from the current snapshot (the Index Lens's
 /// twin of [`resort_schema`]). Fixed severity-then-size order (no
 /// user-chosen sort — see [`index_finding_rank`]); ties break by
 /// schema/table/name ascending so the order is deterministic.
+/// twin of [`resort_schema`]). Filtered by `index_filter`.
+/// Fixed severity-then-size order (no user-chosen sort — see [`index_finding_rank`]);
+/// ties break by schema/table/name ascending so the order is deterministic.
 fn resort_indexes(app: &mut App) {
     let Some(schema) = app.snapshot.schema.as_deref() else {
         app.index_row_order = Vec::new();
         return;
     };
     let rows = &schema.indexes;
-    let mut order: Vec<usize> = (0..rows.len()).collect();
+    let needle = app.index_filter.trim().to_lowercase();
+    let mut order: Vec<usize> = (0..rows.len())
+        .filter(|&i| {
+            needle.is_empty()
+                || rows[i].schema.to_lowercase().contains(&needle)
+                || rows[i].table.to_lowercase().contains(&needle)
+                || rows[i].name.to_lowercase().contains(&needle)
+        })
+        .collect();
     order.sort_by(|&a, &b| {
         index_finding_rank(&rows[a].finding)
             .cmp(&index_finding_rank(&rows[b].finding))
@@ -5873,5 +6025,125 @@ mod tests {
         // Esc cancels delete confirmation
         update(&mut app, press(KeyCode::Esc));
         assert!(app.delete_record_target.is_none());
+    }
+
+    #[test]
+    fn schema_sequences_subview_toggle_and_filter() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        assert_eq!(app.schema_view, SchemaView::Tables);
+
+        // Pressing 'S' switches to Sequences view
+        update(&mut app, press(KeyCode::Char('S')));
+        assert_eq!(app.schema_view, SchemaView::Sequences);
+
+        // Mock has sequences; sequences_row_order should be populated and sorted by % used desc
+        assert!(!app.sequences_row_order.is_empty());
+
+        // Pressing 'S' again toggles back to Tables
+        update(&mut app, press(KeyCode::Char('S')));
+        assert_eq!(app.schema_view, SchemaView::Tables);
+
+        // Pressing 'S' to go back to Sequences
+        update(&mut app, press(KeyCode::Char('S')));
+        assert_eq!(app.schema_view, SchemaView::Sequences);
+
+        // Pressing Esc in Sequences view returns to Tables view
+        update(&mut app, press(KeyCode::Esc));
+        assert_eq!(app.schema_view, SchemaView::Tables);
+
+        // Switch back to Sequences and filter with '/'
+        update(&mut app, press(KeyCode::Char('S')));
+        assert_eq!(app.schema_view, SchemaView::Sequences);
+
+        update(&mut app, press(KeyCode::Char('/')));
+        assert!(app.schema_filter_editing);
+        update(&mut app, press(KeyCode::Char('o')));
+        update(&mut app, press(KeyCode::Char('r')));
+        update(&mut app, press(KeyCode::Char('d')));
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.schema_filter_editing);
+        assert_eq!(app.schema_filter, "ord");
+
+        // Clear filter with '\'
+        update(&mut app, press(KeyCode::Char('\\')));
+        assert!(app.schema_filter.is_empty());
+    }
+
+    #[test]
+    fn cross_lens_jump_from_table_to_index_lens() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        assert_eq!(app.schema_view, SchemaView::Tables);
+
+        let selected = app.selected_table().cloned().expect("selected table");
+        let table_name = selected.name.clone();
+
+        // Pressing 'i' jumps from selected table to IndexLens
+        update(&mut app, press(KeyCode::Char('i')));
+        assert_eq!(app.active_tab, Tab::IndexLens);
+        assert_eq!(app.previous_tab, Some(Tab::SchemaLens));
+        assert_eq!(app.index_filter, table_name);
+
+        // Filtered indexes should match table name
+        if let Some(schema) = app.snapshot.schema.as_deref() {
+            for &idx_i in &app.index_row_order {
+                assert!(
+                    schema.indexes[idx_i]
+                        .table
+                        .to_lowercase()
+                        .contains(&table_name.to_lowercase())
+                        || schema.indexes[idx_i]
+                            .name
+                            .to_lowercase()
+                            .contains(&table_name.to_lowercase())
+                );
+            }
+        }
+
+        // Backspace returns to SchemaLens
+        update(&mut app, press(KeyCode::Backspace));
+        assert_eq!(app.active_tab, Tab::SchemaLens);
+
+        // Jumping again and using Esc to return
+        update(&mut app, press(KeyCode::Char('i')));
+        assert_eq!(app.active_tab, Tab::IndexLens);
+        assert_eq!(app.index_filter, table_name);
+
+        update(&mut app, press(KeyCode::Esc));
+        assert_eq!(app.active_tab, Tab::SchemaLens);
+        assert!(app.index_filter.is_empty());
+    }
+
+    #[test]
+    fn index_lens_filter_and_clear() {
+        let mut app = App::new();
+        app.active_tab = Tab::IndexLens;
+        assert!(app.index_filter.is_empty());
+
+        // '/' begins editing index filter
+        update(&mut app, press(KeyCode::Char('/')));
+        assert!(app.index_filter_editing);
+
+        update(&mut app, press(KeyCode::Char('p')));
+        update(&mut app, press(KeyCode::Char('k')));
+        assert_eq!(app.index_filter, "pk");
+
+        // Esc cancels and reverts
+        update(&mut app, press(KeyCode::Esc));
+        assert!(!app.index_filter_editing);
+        assert!(app.index_filter.is_empty());
+
+        // Type and commit with Enter
+        update(&mut app, press(KeyCode::Char('/')));
+        update(&mut app, press(KeyCode::Char('p')));
+        update(&mut app, press(KeyCode::Char('k')));
+        update(&mut app, press(KeyCode::Enter));
+        assert!(!app.index_filter_editing);
+        assert_eq!(app.index_filter, "pk");
+
+        // '\' clears committed filter
+        update(&mut app, press(KeyCode::Char('\\')));
+        assert!(app.index_filter.is_empty());
     }
 }

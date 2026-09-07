@@ -315,6 +315,11 @@ mod tests {
             partition_count: None,
             lock_count: None,
             lock_waiters: None,
+            heap_bytes: total_bytes,
+            toast_bytes: 0,
+            heap_cache_hit_pct: None,
+            idx_cache_hit_pct: None,
+            toast_cache_hit_pct: None,
         }
     }
 

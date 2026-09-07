@@ -311,6 +311,13 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.19.0** — "Observability Expansion: Sequences, SLRU, Standby Conflicts & Table Storage":
+  - **Sequence Exhaustion Alerts**: proactive monitoring of `pg_sequences` in core, TUI Schema Lens sub-view (`S`), and Web Lens panel with exhaustion percentage and capacity calculation.
+  - **SLRU Cache Monitoring**: Simple LRU cache monitoring (`pg_stat_slru`, PG 13+) on TUI Macro Lens and Web vitals with subtransaction thrashing warning.
+  - **Standby Recovery Conflicts**: standby replica recovery conflict tracking (`pg_stat_database_conflicts`) on TUI Replication Lens and Web status row.
+  - **Table to Index Jump**: cross-lens jump from Schema Lens to Index Lens filtered by table (`i`), with `Backspace`/`Esc` returning back.
+  - **TOAST & Cache Breakdown**: separated heap and TOAST storage sizes and cache hit ratios for tables in TUI and Web detail views.
+  - **Replication Lens Renaming**: Tab 4 renamed to "4 Replication Lens" across TUI and Web.
 - **v0.18.1** — "Records Lens & Streaming Compression":
   - **Records Lens**: dedicated recording archive manager in TUI (Tab 9 `9 Records Lens`) and Web Lens (Tab 8 `Records`) with search filtering (`/`), file metadata, in-app replay (`Enter`), path copy (`y`), and interactive/token-gated deletion (`x`).
   - **Streaming Compression**: pure-Rust streaming gzip compression (`.jsonl.gz`) via `flate2` (`--record-compress`), transparently detected and read by `RecordingReader::load`.

@@ -283,6 +283,60 @@ pub struct WalStats {
     pub wal_buffers_full_delta: Option<i64>,
 }
 
+/// One SLRU cache subsystem's counters and derived rates (v0.19, `pg_stat_slru`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SlruRow {
+    pub name: String,
+    pub blks_zeroed: i64,
+    pub blks_hit: i64,
+    pub blks_read: i64,
+    pub blks_written: i64,
+    pub blks_exists: i64,
+    pub flushes: i64,
+    pub truncates: i64,
+    /// Cumulative hit ratio: `blks_hit / (blks_hit + blks_read) * 100.0`. `None` if `blks_hit + blks_read == 0`.
+    pub hit_ratio_pct: Option<f64>,
+    /// Per-second reads rate computed from tick deltas.
+    pub reads_per_sec: Option<f64>,
+    /// Per-second writes rate computed from tick deltas.
+    pub writes_per_sec: Option<f64>,
+    /// Per-second flushes rate computed from tick deltas.
+    pub flushes_per_sec: Option<f64>,
+}
+
+/// Aggregated SLRU cache stats for the Macro Lens and web dashboard (v0.19).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SlruStats {
+    pub collected_at_epoch_ms: u64,
+    pub rows: Vec<SlruRow>,
+    /// Overall SLRU hit ratio across all subsystems.
+    pub overall_hit_ratio_pct: Option<f64>,
+    /// True if subtrans hit ratio drops below 90% while actively reading (subtransaction thrashing).
+    pub subtrans_warning: bool,
+}
+
+/// Standby recovery conflict stats from `pg_stat_database_conflicts` (v0.19).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DatabaseConflicts {
+    pub datid: i64,
+    pub datname: String,
+    pub confl_tablespace: i64,
+    pub confl_lock: i64,
+    pub confl_snapshot: i64,
+    pub confl_bufferpin: i64,
+    pub confl_deadlock: i64,
+    pub confl_total: i64,
+    /// Total conflicts per second from tick deltas.
+    pub conflicts_per_sec: Option<f64>,
+    /// Lock conflicts per second from tick deltas.
+    pub lock_conflicts_per_sec: Option<f64>,
+    /// Snapshot conflicts per second from tick deltas.
+    pub snapshot_conflicts_per_sec: Option<f64>,
+    /// Deadlock conflicts per second from tick deltas.
+    pub deadlock_conflicts_per_sec: Option<f64>,
+}
+
+
 /// One row of the Schema Lens table-stats query
 /// (`queries/table_stats_post_130000.sql`): `pg_stat_user_tables` counters
 /// plus on-disk sizes, for one user table of the *connected database*.
@@ -383,6 +437,21 @@ pub struct TableStatRow {
     /// conditions as `lock_count`.
     #[serde(default)]
     pub lock_waiters: Option<i64>,
+    /// v0.19: `pg_relation_size(relid)` — main table heap bytes only (no toast, no indexes).
+    #[serde(default)]
+    pub heap_bytes: i64,
+    /// v0.19: `table_bytes.saturating_sub(heap_bytes)` — TOAST table storage.
+    #[serde(default)]
+    pub toast_bytes: i64,
+    /// v0.19: buffer cache hit percentage for heap blocks from `pg_statio_user_tables`.
+    #[serde(default)]
+    pub heap_cache_hit_pct: Option<f32>,
+    /// v0.19: buffer cache hit percentage for index blocks from `pg_statio_user_tables`.
+    #[serde(default)]
+    pub idx_cache_hit_pct: Option<f32>,
+    /// v0.19: buffer cache hit percentage for toast blocks from `pg_statio_user_tables`.
+    #[serde(default)]
+    pub toast_cache_hit_pct: Option<f32>,
 }
 
 /// One estimated-bloat row (table or btree index), shaped after the output
@@ -602,6 +671,70 @@ pub struct IndexRow {
     pub finding: IndexFinding,
 }
 
+/// Severity tier of sequence exhaustion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SequenceSeverity {
+    Normal,
+    Warning,
+    Critical,
+}
+
+/// User sequence exhaustion tracking (v0.19, `pg_sequences`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SequenceRow {
+    pub schema: String,
+    pub sequence_name: String,
+    pub data_type: String,
+    pub start_value: i64,
+    pub min_value: i64,
+    pub max_value: i64,
+    pub increment_by: i64,
+    pub cycle: bool,
+    pub last_value: Option<i64>,
+    pub table_name: String,
+    pub column_name: String,
+    /// Percentage of the sequence headroom consumed (0.0..=100.0).
+    pub percent_used: f64,
+    /// How many increments remain before max_value (or min_value if negative).
+    pub remaining_count: i64,
+    /// Severity level based on exhaustion (>=90% Critical, >=75% Warning, else Normal).
+    pub severity: SequenceSeverity,
+}
+
+/// Pure calculation helper for sequence exhaustion percentage, remaining values, and severity tier.
+pub fn calculate_sequence_exhaustion(
+    start_value: i64,
+    min_value: i64,
+    max_value: i64,
+    increment_by: i64,
+    last_value: Option<i64>,
+) -> (f64, i64, SequenceSeverity) {
+    let current = last_value.unwrap_or(start_value);
+    let range = (max_value - min_value).max(1);
+    let (percent_used, remaining) = if increment_by > 0 {
+        let used = current.saturating_sub(min_value).max(0);
+        let pct = (used as f64 / range as f64) * 100.0;
+        let rem = max_value.saturating_sub(current).max(0) / increment_by.max(1);
+        (pct.clamp(0.0, 100.0), rem)
+    } else {
+        let used = max_value.saturating_sub(current).max(0);
+        let pct = (used as f64 / range as f64) * 100.0;
+        let inc = increment_by.abs().max(1);
+        let rem = current.saturating_sub(min_value).max(0) / inc;
+        (pct.clamp(0.0, 100.0), rem)
+    };
+
+    let severity = if percent_used >= 90.0 {
+        SequenceSeverity::Critical
+    } else if percent_used >= 75.0 {
+        SequenceSeverity::Warning
+    } else {
+        SequenceSeverity::Normal
+    };
+
+    (percent_used, remaining, severity)
+}
+
 /// The Schema Lens payload: table stats (+ estimated bloat from Fase S2 on)
 /// of the connected database, collected on its own slow cadence (default
 /// 60s). Wrapped in an `Arc` inside [`DbSnapshot`] so the fast ticks that
@@ -639,6 +772,9 @@ pub struct SchemaSnapshot {
     /// mid-query (the database itself would have to be dropped), never a
     /// real "unknown" state on a healthy connection.
     pub stats_reset_epoch_secs: Option<f64>,
+    /// User sequences exhaustion tracking (v0.19, `pg_sequences`).
+    #[serde(default)]
+    pub sequences: Vec<SequenceRow>,
     pub status: SchemaStatus,
 }
 
@@ -680,13 +816,18 @@ impl SchemaSnapshot {
                 // Flat: pgbench_accounts is the steady-state table.
                 growth_1h_bytes: Some(2_097_152),
                 growth_1h_pct: Some(0.3),
-            is_partition: false,
-            parent_oid: None,
-            partition_count: None,
-            // v0.15: granted-only locks (no waiter) — the dim/info tier,
-            // demoed alongside `order_items`'s red waiter tier below.
-            lock_count: Some(2),
-            lock_waiters: Some(0),
+                is_partition: false,
+                parent_oid: None,
+                partition_count: None,
+                // v0.15: granted-only locks (no waiter) — the dim/info tier,
+                // demoed alongside `order_items`'s red waiter tier below.
+                lock_count: Some(2),
+                lock_waiters: Some(0),
+                heap_bytes: 549_453_824,
+                toast_bytes: 0,
+                heap_cache_hit_pct: Some(99.4),
+                idx_cache_hit_pct: Some(99.8),
+                toast_cache_hit_pct: None,
             },
             // The bloated-looking one: dead tuples rival live ones and
             // autovacuum has not caught up. Also the mock's "big grower".
@@ -720,14 +861,19 @@ impl SchemaSnapshot {
                 // Big grower: +42% in the last hour, above the red tier.
                 growth_1h_bytes: Some(65_011_712),
                 growth_1h_pct: Some(42.3),
-            is_partition: false,
-            parent_oid: None,
-            partition_count: None,
-            // v0.15: a real waiter — the red tier (`--mock` demos both
-            // severities so the TUI/web render can be built/tested against
-            // it without a live blocking session).
-            lock_count: Some(3),
-            lock_waiters: Some(1),
+                is_partition: false,
+                parent_oid: None,
+                partition_count: None,
+                // v0.15: a real waiter — the red tier (`--mock` demos both
+                // severities so the TUI/web render can be built/tested against
+                // it without a live blocking session).
+                lock_count: Some(3),
+                lock_waiters: Some(1),
+                heap_bytes: 147_695_104,
+                toast_bytes: 40_000_000,
+                heap_cache_hit_pct: Some(94.2),
+                idx_cache_hit_pct: Some(98.1),
+                toast_cache_hit_pct: Some(91.0),
             },
             // Shrinker: a recent VACUUM FULL / TRUNCATE-and-reload dropped
             // its size — negative growth is valid and shown, not clamped.
@@ -760,11 +906,16 @@ impl SchemaSnapshot {
                 autoanalyze_count: 204,
                 growth_1h_bytes: Some(-3_244_032),
                 growth_1h_pct: Some(-25.8),
-            is_partition: false,
-            parent_oid: None,
-            partition_count: None,
-            lock_count: None,
-            lock_waiters: None,
+                is_partition: false,
+                parent_oid: None,
+                partition_count: None,
+                lock_count: None,
+                lock_waiters: None,
+                heap_bytes: 892_928,
+                toast_bytes: 0,
+                heap_cache_hit_pct: Some(99.9),
+                idx_cache_hit_pct: Some(99.9),
+                toast_cache_hit_pct: None,
             },
             // A table with no indexes at all: idx_scan is NULL, exercising
             // the Option path end to end (SQL → model → JSON → UI). Also
@@ -800,11 +951,16 @@ impl SchemaSnapshot {
                 autoanalyze_count: 3,
                 growth_1h_bytes: None,
                 growth_1h_pct: None,
-            is_partition: false,
-            parent_oid: None,
-            partition_count: None,
-            lock_count: None,
-            lock_waiters: None,
+                is_partition: false,
+                parent_oid: None,
+                partition_count: None,
+                lock_count: None,
+                lock_waiters: None,
+                heap_bytes: 66_468_992,
+                toast_bytes: 30_000_000,
+                heap_cache_hit_pct: Some(88.5),
+                idx_cache_hit_pct: None,
+                toast_cache_hit_pct: Some(85.0),
             },
             // v0.15: a native partitioned table's PARENT (`events_by_month`)
             // + its 3 leaves — demos collapse (leaves hidden by default),
@@ -847,6 +1003,11 @@ impl SchemaSnapshot {
                 partition_count: Some(3),
                 lock_count: None,
                 lock_waiters: None,
+                heap_bytes: 331_838_592,
+                toast_bytes: 30_000_000,
+                heap_cache_hit_pct: Some(96.5),
+                idx_cache_hit_pct: Some(97.2),
+                toast_cache_hit_pct: None,
             },
             TableStatRow {
                 oid: 16_421,
@@ -882,6 +1043,11 @@ impl SchemaSnapshot {
                 partition_count: None,
                 lock_count: None,
                 lock_waiters: None,
+                heap_bytes: 106_916_224,
+                toast_bytes: 10_000_000,
+                heap_cache_hit_pct: Some(96.0),
+                idx_cache_hit_pct: Some(97.0),
+                toast_cache_hit_pct: None,
             },
             TableStatRow {
                 oid: 16_422,
@@ -917,6 +1083,11 @@ impl SchemaSnapshot {
                 partition_count: None,
                 lock_count: None,
                 lock_waiters: None,
+                heap_bytes: 110_586_240,
+                toast_bytes: 10_000_000,
+                heap_cache_hit_pct: Some(96.2),
+                idx_cache_hit_pct: Some(97.1),
+                toast_cache_hit_pct: None,
             },
             TableStatRow {
                 oid: 16_423,
@@ -952,6 +1123,11 @@ impl SchemaSnapshot {
                 partition_count: None,
                 lock_count: None,
                 lock_waiters: None,
+                heap_bytes: 114_336_128,
+                toast_bytes: 10_000_000,
+                heap_cache_hit_pct: Some(97.0),
+                idx_cache_hit_pct: Some(97.5),
+                toast_cache_hit_pct: None,
             },
         ];
         let table_bloat = vec![
@@ -1203,6 +1379,108 @@ impl SchemaSnapshot {
             },
         ];
         let indexes = build_index_rows(index_catalog);
+        let sequences = vec![
+            {
+                let (pct, rem, sev) = calculate_sequence_exhaustion(
+                    1,
+                    1,
+                    2_147_483_647,
+                    1,
+                    Some(2_010_000_000),
+                );
+                SequenceRow {
+                    schema: "public".to_string(),
+                    sequence_name: "order_items_id_seq".to_string(),
+                    data_type: "integer".to_string(),
+                    start_value: 1,
+                    min_value: 1,
+                    max_value: 2_147_483_647,
+                    increment_by: 1,
+                    cycle: false,
+                    last_value: Some(2_010_000_000),
+                    table_name: "order_items".to_string(),
+                    column_name: "id".to_string(),
+                    percent_used: pct,
+                    remaining_count: rem,
+                    severity: sev,
+                }
+            },
+            {
+                let (pct, rem, sev) = calculate_sequence_exhaustion(
+                    1,
+                    1,
+                    32_767,
+                    1,
+                    Some(25_500),
+                );
+                SequenceRow {
+                    schema: "public".to_string(),
+                    sequence_name: "user_actions_id_seq".to_string(),
+                    data_type: "smallint".to_string(),
+                    start_value: 1,
+                    min_value: 1,
+                    max_value: 32_767,
+                    increment_by: 1,
+                    cycle: false,
+                    last_value: Some(25_500),
+                    table_name: "user_actions".to_string(),
+                    column_name: "id".to_string(),
+                    percent_used: pct,
+                    remaining_count: rem,
+                    severity: sev,
+                }
+            },
+            {
+                let (pct, rem, sev) = calculate_sequence_exhaustion(
+                    1000,
+                    1000,
+                    999_999,
+                    1,
+                    Some(450_000),
+                );
+                SequenceRow {
+                    schema: "billing".to_string(),
+                    sequence_name: "invoice_num_seq".to_string(),
+                    data_type: "integer".to_string(),
+                    start_value: 1000,
+                    min_value: 1000,
+                    max_value: 999_999,
+                    increment_by: 1,
+                    cycle: false,
+                    last_value: Some(450_000),
+                    table_name: "invoices".to_string(),
+                    column_name: "invoice_number".to_string(),
+                    percent_used: pct,
+                    remaining_count: rem,
+                    severity: sev,
+                }
+            },
+            {
+                let (pct, rem, sev) = calculate_sequence_exhaustion(
+                    1,
+                    1,
+                    i64::MAX,
+                    1,
+                    Some(12_500_000),
+                );
+                SequenceRow {
+                    schema: "public".to_string(),
+                    sequence_name: "pgbench_history_id_seq".to_string(),
+                    data_type: "bigint".to_string(),
+                    start_value: 1,
+                    min_value: 1,
+                    max_value: i64::MAX,
+                    increment_by: 1,
+                    cycle: false,
+                    last_value: Some(12_500_000),
+                    table_name: "pgbench_history".to_string(),
+                    column_name: "hid".to_string(),
+                    percent_used: pct,
+                    remaining_count: rem,
+                    severity: sev,
+                }
+            },
+        ];
         Self {
             collected_at_epoch_ms: epoch_ms_now(),
             // v0.15: the mock deliberately reports MORE real (PHYSICAL)
@@ -1224,6 +1502,7 @@ impl SchemaSnapshot {
             // A plausible "reset a couple weeks ago" freshness so the
             // header's "stats reset Nd ago" reads naturally in `--mock`.
             stats_reset_epoch_secs: Some(epoch_ms_now() as f64 / 1000.0 - 12.0 * 86_400.0),
+            sequences,
             status: SchemaStatus::Ok,
         }
     }
@@ -1544,6 +1823,24 @@ pub struct TableDetail {
     /// privilege, ...) — `None` on success. Never fails the poll: see
     /// `poller::collect_table_detail`.
     pub error: Option<String>,
+    /// v0.19: `pg_relation_size(oid)` — heap size in bytes.
+    #[serde(default)]
+    pub heap_bytes: i64,
+    /// v0.19: `table_bytes - heap_bytes` — TOAST size in bytes.
+    #[serde(default)]
+    pub toast_bytes: i64,
+    /// v0.19: `pg_indexes_size(oid)` — indexes size in bytes.
+    #[serde(default)]
+    pub index_bytes: i64,
+    /// v0.19: `pg_total_relation_size(oid)` — total size in bytes.
+    #[serde(default)]
+    pub total_bytes: i64,
+    /// v0.19: heap cache hit percentage.
+    #[serde(default)]
+    pub heap_cache_hit_pct: Option<f32>,
+    /// v0.19: index cache hit percentage.
+    #[serde(default)]
+    pub idx_cache_hit_pct: Option<f32>,
 }
 
 impl TableDetail {
@@ -1672,6 +1969,12 @@ impl TableDetail {
                 },
             ],
             error: None,
+            heap_bytes: 147_695_104,
+            toast_bytes: 40_000_000,
+            index_bytes: 31_457_280,
+            total_bytes: 219_152_384,
+            heap_cache_hit_pct: Some(94.2),
+            idx_cache_hit_pct: Some(98.1),
         }
     }
 
@@ -1690,6 +1993,12 @@ impl TableDetail {
             error: Some(
                 "mock mode: no catalog fixture for this table (try order_items)".to_string(),
             ),
+            heap_bytes: 0,
+            toast_bytes: 0,
+            index_bytes: 0,
+            total_bytes: 0,
+            heap_cache_hit_pct: None,
+            idx_cache_hit_pct: None,
         }
     }
 }
@@ -1961,6 +2270,12 @@ pub struct DbSnapshot {
     /// In-flight DDL & maintenance progress (v0.17, `pg_stat_progress_*`).
     #[serde(default)]
     pub ddl_progress: Option<Vec<DdlProgressRow>>,
+    /// SLRU cache counters and hit ratios (v0.19, `pg_stat_slru`, PG 13+).
+    #[serde(default)]
+    pub slru: Option<SlruStats>,
+    /// Standby database recovery conflicts (v0.19, `pg_stat_database_conflicts`).
+    #[serde(default)]
+    pub conflicts: Option<DatabaseConflicts>,
     pub status: PollerStatus,
 }
 
@@ -2526,6 +2841,97 @@ impl DbSnapshot {
                 total_step: 1_000_000,
                 detail: "idx_orders_customer_id".to_string(),
             }]),
+            slru: Some(SlruStats {
+                collected_at_epoch_ms: epoch_ms_now(),
+                rows: vec![
+                    SlruRow {
+                        name: "clog".to_string(),
+                        blks_zeroed: 120,
+                        blks_hit: 845_200 + (seq as i64) * 40,
+                        blks_read: 1_210,
+                        blks_written: 4_320 + (seq as i64) * 2,
+                        blks_exists: 0,
+                        flushes: 320,
+                        truncates: 12,
+                        hit_ratio_pct: Some(99.85),
+                        reads_per_sec: Some(0.5),
+                        writes_per_sec: Some(4.2),
+                        flushes_per_sec: Some(0.1),
+                    },
+                    SlruRow {
+                        name: "subtrans".to_string(),
+                        blks_zeroed: 45,
+                        blks_hit: 320_000 + (seq as i64) * 15,
+                        blks_read: 850,
+                        blks_written: 1_200,
+                        blks_exists: 0,
+                        flushes: 90,
+                        truncates: 4,
+                        hit_ratio_pct: Some(99.73),
+                        reads_per_sec: Some(0.2),
+                        writes_per_sec: Some(1.1),
+                        flushes_per_sec: Some(0.0),
+                    },
+                    SlruRow {
+                        name: "multixact_members".to_string(),
+                        blks_zeroed: 10,
+                        blks_hit: 12_400,
+                        blks_read: 80,
+                        blks_written: 340,
+                        blks_exists: 0,
+                        flushes: 25,
+                        truncates: 1,
+                        hit_ratio_pct: Some(99.36),
+                        reads_per_sec: Some(0.0),
+                        writes_per_sec: Some(0.2),
+                        flushes_per_sec: Some(0.0),
+                    },
+                    SlruRow {
+                        name: "multixact_offsets".to_string(),
+                        blks_zeroed: 8,
+                        blks_hit: 9_100,
+                        blks_read: 40,
+                        blks_written: 180,
+                        blks_exists: 0,
+                        flushes: 15,
+                        truncates: 1,
+                        hit_ratio_pct: Some(99.56),
+                        reads_per_sec: Some(0.0),
+                        writes_per_sec: Some(0.1),
+                        flushes_per_sec: Some(0.0),
+                    },
+                    SlruRow {
+                        name: "notify".to_string(),
+                        blks_zeroed: 2,
+                        blks_hit: 1_500,
+                        blks_read: 5,
+                        blks_written: 40,
+                        blks_exists: 0,
+                        flushes: 8,
+                        truncates: 0,
+                        hit_ratio_pct: Some(99.67),
+                        reads_per_sec: Some(0.0),
+                        writes_per_sec: Some(0.0),
+                        flushes_per_sec: Some(0.0),
+                    },
+                ],
+                overall_hit_ratio_pct: Some(99.82),
+                subtrans_warning: false,
+            }),
+            conflicts: Some(DatabaseConflicts {
+                datid: 16384,
+                datname: "pgbench".to_string(),
+                confl_tablespace: 0,
+                confl_lock: 2,
+                confl_snapshot: 5,
+                confl_bufferpin: 0,
+                confl_deadlock: 1,
+                confl_total: 8,
+                conflicts_per_sec: Some(0.0),
+                lock_conflicts_per_sec: Some(0.0),
+                snapshot_conflicts_per_sec: Some(0.0),
+                deadlock_conflicts_per_sec: Some(0.0),
+            }),
             status: PollerStatus::Ok,
         }
     }
@@ -2572,6 +2978,8 @@ impl DbSnapshot {
             active_locks: None,
             blocking_tree: None,
             ddl_progress: None,
+            slru: None,
+            conflicts: None,
             status: PollerStatus::Connecting,
         }
     }
@@ -3030,4 +3438,77 @@ mod tests {
         assert!(json.contains("\"status\":\"Connecting\""));
         assert!(matches!(snapshot.status, PollerStatus::Connecting));
     }
+
+    #[test]
+    fn sequence_exhaustion_calculation_and_severity() {
+        // Normal (< 75%)
+        let (pct, rem, sev) = calculate_sequence_exhaustion(1, 1, 100, 1, Some(50));
+        assert!((pct - 49.49).abs() < 0.1);
+        assert_eq!(rem, 50);
+        assert_eq!(sev, SequenceSeverity::Normal);
+
+        // Warning (>= 75%, < 90%)
+        let (pct, rem, sev) = calculate_sequence_exhaustion(1, 1, 100, 1, Some(80));
+        assert!((pct - 79.79).abs() < 0.1);
+        assert_eq!(rem, 20);
+        assert_eq!(sev, SequenceSeverity::Warning);
+
+        // Critical (>= 90%)
+        let (pct, rem, sev) = calculate_sequence_exhaustion(1, 1, 100, 1, Some(95));
+        assert!((pct - 94.94).abs() < 0.1);
+        assert_eq!(rem, 5);
+        assert_eq!(sev, SequenceSeverity::Critical);
+
+        // Exhausted (100%)
+        let (pct, rem, sev) = calculate_sequence_exhaustion(1, 1, 100, 1, Some(100));
+        assert!((pct - 100.0).abs() < 0.1);
+        assert_eq!(rem, 0);
+        assert_eq!(sev, SequenceSeverity::Critical);
+
+        // Int4 max test
+        let (pct, rem, sev) = calculate_sequence_exhaustion(1, 1, 2_147_483_647, 1, Some(2_000_000_000));
+        assert!(pct > 90.0);
+        assert_eq!(sev, SequenceSeverity::Critical);
+        assert_eq!(rem, 147_483_647);
+
+        // Descending sequence (increment_by < 0)
+        let (pct, rem, sev) = calculate_sequence_exhaustion(100, 1, 100, -1, Some(20));
+        assert!((pct - 80.8).abs() < 0.1);
+        assert_eq!(rem, 19);
+        assert_eq!(sev, SequenceSeverity::Warning);
+    }
+
+    #[test]
+    fn v0_19_models_serialize_in_mock_snapshot() {
+        let snap = DbSnapshot::mock();
+        let json = serde_json::to_value(&snap).expect("snapshot must serialize");
+
+        // SLRU
+        assert!(json["slru"]["rows"].is_array());
+        assert_eq!(json["slru"]["subtrans_warning"], serde_json::json!(false));
+
+        // Conflicts
+        assert!(json["conflicts"]["confl_total"].as_i64().is_some());
+        assert_eq!(json["conflicts"]["datname"], serde_json::json!("pgbench"));
+
+        // Schema & Sequences
+        let schema = snap.schema.expect("mock has schema");
+        assert!(!schema.sequences.is_empty());
+        let seq_json = serde_json::to_value(&schema.sequences[0]).expect("seq json");
+        assert_eq!(seq_json["sequence_name"], "order_items_id_seq");
+        assert_eq!(seq_json["severity"], "Critical");
+
+        // Table sizes & cache
+        let table = &schema.tables[0];
+        assert_eq!(table.name, "pgbench_accounts");
+        assert!(table.heap_bytes > 0);
+        assert!(table.heap_cache_hit_pct.is_some());
+
+        let bloated_table = &schema.tables[1];
+        assert_eq!(bloated_table.name, "order_items");
+        assert_eq!(bloated_table.toast_bytes, 40_000_000);
+        assert_eq!(bloated_table.heap_bytes, 147_695_104);
+        assert_eq!(bloated_table.table_bytes, 187_695_104);
+    }
 }
+

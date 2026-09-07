@@ -215,6 +215,7 @@ export class SchemaLens {
   private readonly warning: HTMLElement;
   private readonly placeholder: HTMLElement;
   private readonly onDetailRequest: ((oid: number, schema: string, name: string) => void) | null;
+  private readonly onJumpToIndexes: ((tableName: string) => void) | null;
 
   // Plain assignment, not TS constructor-parameter-property shorthand: the
   // shorthand form is `SyntaxError`-incompatible with Node's built-in
@@ -229,11 +230,13 @@ export class SchemaLens {
     filterInput?: HTMLInputElement | null,
     onDetailRequest?: (oid: number, schema: string, name: string) => void,
     partitionsToggle?: HTMLInputElement | null,
+    onJumpToIndexes?: (tableName: string) => void,
   ) {
     this.staleness = staleness;
     this.warning = warning;
     this.placeholder = placeholder;
     this.onDetailRequest = onDetailRequest ?? null;
+    this.onJumpToIndexes = onJumpToIndexes ?? null;
     this.thead = table.tHead ?? table.createTHead();
     this.tbody = table.tBodies[0] ?? table.createTBody();
     this.renderHead();
@@ -500,12 +503,40 @@ export class SchemaLens {
     }
     children.push(
       locksSection(table),
+      this.storageAndCacheSection(table),
       this.structureSection(table),
       this.bloatSection(schema, table),
     );
     td.append(...children);
     tr.append(td);
     return tr;
+  }
+
+  /** Storage breakdown (Heap, TOAST, Indexes, Total) and buffer cache hit
+   * ratios (Heap, Index, TOAST) for this table (v0.19). */
+  private storageAndCacheSection(table: TableStatRow): HTMLElement {
+    const section = document.createElement("div");
+    section.classList.add("schema-structure");
+    const heading = document.createElement("p");
+    heading.classList.add("schema-structure-heading");
+    heading.textContent = "storage & buffer cache";
+    section.append(heading);
+    section.append(preLines(storageAndCacheLines(table)));
+    if (this.onJumpToIndexes !== null) {
+      const jumpWrap = document.createElement("div");
+      jumpWrap.style.marginTop = "6px";
+      const btn = document.createElement("button");
+      btn.classList.add("ghost-btn", "jump-btn");
+      btn.type = "button";
+      btn.textContent = `View Indexes for ${table.name} (i) ↗`;
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.onJumpToIndexes?.(table.name);
+      });
+      jumpWrap.append(btn);
+      section.append(jumpWrap);
+    }
+    return section;
   }
 
   /** v0.15's drill-down: lists every leaf partition of `parent` (matched by
@@ -746,4 +777,21 @@ function preLines(lines: string[]): HTMLPreElement {
   const pre = document.createElement("pre");
   pre.textContent = lines.join("\n");
   return pre;
+}
+
+/** Storage and cache hit lines for table detail (v0.19). */
+export function storageAndCacheLines(table: TableStatRow): string[] {
+  const heap = table.heap_bytes != null ? humanBytes(table.heap_bytes) : "—";
+  const toast = table.toast_bytes != null ? humanBytes(table.toast_bytes) : "—";
+  const idx = humanBytes(table.index_bytes);
+  const total = humanBytes(table.total_bytes);
+
+  const heapHit = table.heap_cache_hit_pct != null ? `${table.heap_cache_hit_pct.toFixed(1)}%` : "—";
+  const idxHit = table.idx_cache_hit_pct != null ? `${table.idx_cache_hit_pct.toFixed(1)}%` : "—";
+  const toastHit = table.toast_cache_hit_pct != null ? `${table.toast_cache_hit_pct.toFixed(1)}%` : "—";
+
+  return [
+    `storage: total ${total} · heap ${heap} · toast ${toast} · indexes ${idx}`,
+    `cache hit: heap ${heapHit} · index ${idxHit} · toast ${toastHit}`,
+  ];
 }

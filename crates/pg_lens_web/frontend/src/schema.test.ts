@@ -15,6 +15,7 @@ import {
   partitionsHint,
   referencingConstraintLines,
   schemaRowMatches,
+  storageAndCacheLines,
   structureErrorLine,
   tableCountText,
 } from "./schema.ts";
@@ -323,4 +324,27 @@ test("partitionsHint counts hidden leaves when collapsed, and flips when expande
   ];
   assert.equal(partitionsHint(rows, false), " · +2 parts");
   assert.equal(partitionsHint(rows, true), " · parts shown");
+});
+
+test("storageAndCacheLines formats storage breakdown and cache hits", () => {
+  const row = table("public", "orders", {
+    total_bytes: 50 * 1024 * 1024,
+    heap_bytes: 30 * 1024 * 1024,
+    toast_bytes: 5 * 1024 * 1024,
+    index_bytes: 15 * 1024 * 1024,
+    heap_cache_hit_pct: 99.4,
+    idx_cache_hit_pct: 98.2,
+    toast_cache_hit_pct: null,
+  });
+
+  const lines = storageAndCacheLines(row);
+  assert.equal(lines.length, 2);
+  assert.equal(
+    lines[0],
+    "storage: total 50.0 MB · heap 30.0 MB · toast 5.0 MB · indexes 15.0 MB",
+  );
+  assert.equal(
+    lines[1],
+    "cache hit: heap 99.4% · index 98.2% · toast —",
+  );
 });

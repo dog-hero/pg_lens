@@ -9,9 +9,9 @@ use tokio_postgres::{Client, Config, NoTls, Row, Transaction};
 
 use crate::models::{
     ActiveLockRow, ActivityRow, BloatRow, DatabaseRow, DdlProgressRow, IdleSessionRow, LockRow,
-    PreparedXactRow, ReplicationSlotRow, StatementRow, TableDetailColumn, TableDetailConstraint,
-    TableDetailIndex, TableStatRow, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
-    WalReceiverRow, WalSenderRow,
+    PreparedXactRow, ReplicationSlotRow, SequenceRow, StatementRow, TableDetailColumn,
+    TableDetailConstraint, TableDetailIndex, TableStatRow, VacuumClusterAge, VacuumProgressRow,
+    VacuumTableRow, WalReceiverRow, WalSenderRow, calculate_sequence_exhaustion,
 };
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
@@ -268,12 +268,39 @@ pub fn table_stats_total_from_row(row: &Row) -> Result<i64, tokio_postgres::Erro
 /// is information the model keeps as `None`. `last_*` timestamps arrive as
 /// epoch seconds `::float8` (NULL = never), per the repo convention.
 pub fn table_stat_from_row(row: &Row) -> Result<TableStatRow, tokio_postgres::Error> {
+    let table_bytes: i64 = row.try_get("table_bytes")?;
+    let heap_bytes: i64 = row.try_get("heap_bytes").unwrap_or(table_bytes);
+    let toast_bytes = table_bytes.saturating_sub(heap_bytes);
+
+    let heap_blks_read: i64 = row.try_get("heap_blks_read").unwrap_or(0);
+    let heap_blks_hit: i64 = row.try_get("heap_blks_hit").unwrap_or(0);
+    let idx_blks_read: i64 = row.try_get("idx_blks_read").unwrap_or(0);
+    let idx_blks_hit: i64 = row.try_get("idx_blks_hit").unwrap_or(0);
+    let toast_blks_read: i64 = row.try_get("toast_blks_read").unwrap_or(0);
+    let toast_blks_hit: i64 = row.try_get("toast_blks_hit").unwrap_or(0);
+
+    let heap_cache_hit_pct = if heap_blks_hit + heap_blks_read > 0 {
+        Some(((heap_blks_hit as f64 / (heap_blks_hit + heap_blks_read) as f64) * 100.0) as f32)
+    } else {
+        None
+    };
+    let idx_cache_hit_pct = if idx_blks_hit + idx_blks_read > 0 {
+        Some(((idx_blks_hit as f64 / (idx_blks_hit + idx_blks_read) as f64) * 100.0) as f32)
+    } else {
+        None
+    };
+    let toast_cache_hit_pct = if toast_blks_hit + toast_blks_read > 0 {
+        Some(((toast_blks_hit as f64 / (toast_blks_hit + toast_blks_read) as f64) * 100.0) as f32)
+    } else {
+        None
+    };
+
     Ok(TableStatRow {
         oid: row.try_get("relid")?,
         schema: row.try_get("schemaname")?,
         name: row.try_get("relname")?,
         total_bytes: row.try_get("total_bytes")?,
-        table_bytes: row.try_get("table_bytes")?,
+        table_bytes,
         index_bytes: row.try_get("index_bytes")?,
         seq_scan: row.try_get("seq_scan")?,
         seq_tup_read: row.try_get("seq_tup_read")?,
@@ -308,6 +335,11 @@ pub fn table_stat_from_row(row: &Row) -> Result<TableStatRow, tokio_postgres::Er
         // row is parsed (`poller::fold_relation_locks`), never by this SQL.
         lock_count: None,
         lock_waiters: None,
+        heap_bytes,
+        toast_bytes,
+        heap_cache_hit_pct,
+        idx_cache_hit_pct,
+        toast_cache_hit_pct,
     })
 }
 
@@ -322,12 +354,39 @@ pub fn table_stat_from_row(row: &Row) -> Result<TableStatRow, tokio_postgres::Er
 /// likewise stay `None` (not aggregated by the SQL) rather than a
 /// misleading partial sum.
 pub fn partition_parent_from_row(row: &Row) -> Result<TableStatRow, tokio_postgres::Error> {
+    let table_bytes: i64 = row.try_get("table_bytes")?;
+    let heap_bytes: i64 = row.try_get("heap_bytes").unwrap_or(table_bytes);
+    let toast_bytes = table_bytes.saturating_sub(heap_bytes);
+
+    let heap_blks_read: i64 = row.try_get("heap_blks_read").unwrap_or(0);
+    let heap_blks_hit: i64 = row.try_get("heap_blks_hit").unwrap_or(0);
+    let idx_blks_read: i64 = row.try_get("idx_blks_read").unwrap_or(0);
+    let idx_blks_hit: i64 = row.try_get("idx_blks_hit").unwrap_or(0);
+    let toast_blks_read: i64 = row.try_get("toast_blks_read").unwrap_or(0);
+    let toast_blks_hit: i64 = row.try_get("toast_blks_hit").unwrap_or(0);
+
+    let heap_cache_hit_pct = if heap_blks_hit + heap_blks_read > 0 {
+        Some(((heap_blks_hit as f64 / (heap_blks_hit + heap_blks_read) as f64) * 100.0) as f32)
+    } else {
+        None
+    };
+    let idx_cache_hit_pct = if idx_blks_hit + idx_blks_read > 0 {
+        Some(((idx_blks_hit as f64 / (idx_blks_hit + idx_blks_read) as f64) * 100.0) as f32)
+    } else {
+        None
+    };
+    let toast_cache_hit_pct = if toast_blks_hit + toast_blks_read > 0 {
+        Some(((toast_blks_hit as f64 / (toast_blks_hit + toast_blks_read) as f64) * 100.0) as f32)
+    } else {
+        None
+    };
+
     Ok(TableStatRow {
         oid: row.try_get("relid")?,
         schema: row.try_get("schemaname")?,
         name: row.try_get("relname")?,
         total_bytes: row.try_get("total_bytes")?,
-        table_bytes: row.try_get("table_bytes")?,
+        table_bytes,
         index_bytes: row.try_get("index_bytes")?,
         seq_scan: row.try_get("seq_scan")?,
         seq_tup_read: row.try_get("seq_tup_read")?,
@@ -357,6 +416,11 @@ pub fn partition_parent_from_row(row: &Row) -> Result<TableStatRow, tokio_postgr
         // Same fold-in-poller contract as `table_stat_from_row`.
         lock_count: None,
         lock_waiters: None,
+        heap_bytes,
+        toast_bytes,
+        heap_cache_hit_pct,
+        idx_cache_hit_pct,
+        toast_cache_hit_pct,
     })
 }
 
@@ -789,6 +853,93 @@ pub fn wal_stats_from_row(row: &Row) -> Result<WalStatsRawRow, tokio_postgres::E
         wal_write_time_ms: row.try_get("wal_write_time_ms")?,
         wal_sync_time_ms: row.try_get("wal_sync_time_ms")?,
         track_wal_io_timing_on: row.try_get("track_wal_io_timing_on")?,
+    })
+}
+
+/// Maps one row of `queries/sequences.sql` onto [`SequenceRow`].
+pub fn sequence_from_row(row: &Row) -> Result<SequenceRow, tokio_postgres::Error> {
+    let schema: String = row.try_get("schemaname")?;
+    let sequence_name: String = row.try_get("sequencename")?;
+    let data_type: String = row.try_get("data_type")?;
+    let start_value: i64 = row.try_get("start_value")?;
+    let min_value: i64 = row.try_get("min_value")?;
+    let max_value: i64 = row.try_get("max_value")?;
+    let increment_by: i64 = row.try_get("increment_by")?;
+    let cycle: bool = row.try_get("cycle")?;
+    let last_value: Option<i64> = row.try_get("last_value")?;
+    let table_name: String = opt_text(row, "table_name")?;
+    let column_name: String = opt_text(row, "column_name")?;
+
+    let (percent_used, remaining_count, severity) =
+        calculate_sequence_exhaustion(start_value, min_value, max_value, increment_by, last_value);
+
+    Ok(SequenceRow {
+        schema,
+        sequence_name,
+        data_type,
+        start_value,
+        min_value,
+        max_value,
+        increment_by,
+        cycle,
+        last_value,
+        table_name,
+        column_name,
+        percent_used,
+        remaining_count,
+        severity,
+    })
+}
+
+/// Raw row of `pg_stat_slru` (v0.19, `queries/slru_post_130000.sql`).
+#[derive(Clone, Debug)]
+pub struct SlruRawRow {
+    pub name: String,
+    pub blks_zeroed: i64,
+    pub blks_hit: i64,
+    pub blks_read: i64,
+    pub blks_written: i64,
+    pub blks_exists: i64,
+    pub flushes: i64,
+    pub truncates: i64,
+}
+
+/// Maps one row of `queries/slru_post_130000.sql` onto [`SlruRawRow`].
+pub fn slru_from_row(row: &Row) -> Result<SlruRawRow, tokio_postgres::Error> {
+    Ok(SlruRawRow {
+        name: row.try_get("name")?,
+        blks_zeroed: row.try_get("blks_zeroed")?,
+        blks_hit: row.try_get("blks_hit")?,
+        blks_read: row.try_get("blks_read")?,
+        blks_written: row.try_get("blks_written")?,
+        blks_exists: row.try_get("blks_exists")?,
+        flushes: row.try_get("flushes")?,
+        truncates: row.try_get("truncates")?,
+    })
+}
+
+/// Raw row of `pg_stat_database_conflicts` (v0.19, `queries/replication_conflicts.sql`).
+#[derive(Clone, Debug)]
+pub struct ConflictsRawRow {
+    pub datid: i64,
+    pub datname: String,
+    pub confl_tablespace: i64,
+    pub confl_lock: i64,
+    pub confl_snapshot: i64,
+    pub confl_bufferpin: i64,
+    pub confl_deadlock: i64,
+}
+
+/// Maps one row of `queries/replication_conflicts.sql` onto [`ConflictsRawRow`].
+pub fn conflicts_from_row(row: &Row) -> Result<ConflictsRawRow, tokio_postgres::Error> {
+    Ok(ConflictsRawRow {
+        datid: row.try_get("datid")?,
+        datname: row.try_get("datname")?,
+        confl_tablespace: row.try_get("confl_tablespace")?,
+        confl_lock: row.try_get("confl_lock")?,
+        confl_snapshot: row.try_get("confl_snapshot")?,
+        confl_bufferpin: row.try_get("confl_bufferpin")?,
+        confl_deadlock: row.try_get("confl_deadlock")?,
     })
 }
 

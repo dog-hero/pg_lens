@@ -104,6 +104,9 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     match app.schema_view {
         SchemaView::Tables => draw_tables_view(app, &schema, frame, area),
         SchemaView::Vacuum => draw_vacuum_view(app, &schema, frame, area),
+        SchemaView::Sequences => {
+            crate::ui::sequences_subview::draw_sequences_view(app, &schema, frame, area)
+        }
     }
 }
 
@@ -176,6 +179,31 @@ fn draw_vacuum_footer(schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
     let [k, d] = style::hint("v", ": vacuum detail");
     spans.push(k);
     spans.push(d);
+    spans.push(Span::styled("   \u{b7}   ", style::label_style()));
+    let [sk, sd] = style::hint("S", ": sequences");
+    spans.push(sk);
+    spans.push(sd);
+    let critical_seq_count = schema
+        .sequences
+        .iter()
+        .filter(|s| s.severity == pg_lens_core::SequenceSeverity::Critical)
+        .count();
+    let warn_seq_count = schema
+        .sequences
+        .iter()
+        .filter(|s| s.severity == pg_lens_core::SequenceSeverity::Warning)
+        .count();
+    if critical_seq_count > 0 {
+        spans.push(Span::styled(
+            format!(" ({} CRIT!)", critical_seq_count),
+            Style::new().fg(Color::Red).bold(),
+        ));
+    } else if warn_seq_count > 0 {
+        spans.push(Span::styled(
+            format!(" ({} warn)", warn_seq_count),
+            Style::new().fg(Color::Yellow).bold(),
+        ));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -698,10 +726,26 @@ fn draw_detail(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
         style::kv(
             "size: ",
             format!(
-                "total {} \u{b7} table {} \u{b7} indexes {}",
+                "total {} \u{b7} heap {} \u{b7} toast {} \u{b7} indexes {}",
                 format::human_bytes(table.total_bytes),
-                format::human_bytes(table.table_bytes),
+                format::human_bytes(table.heap_bytes),
+                format::human_bytes(table.toast_bytes),
                 format::human_bytes(table.index_bytes),
+            ),
+        ),
+        style::kv(
+            "cache hit: ",
+            format!(
+                "heap {} \u{b7} index {} \u{b7} toast {}",
+                table
+                    .heap_cache_hit_pct
+                    .map_or("-".to_string(), |v| format!("{v:.1}%")),
+                table
+                    .idx_cache_hit_pct
+                    .map_or("-".to_string(), |v| format!("{v:.1}%")),
+                table
+                    .toast_cache_hit_pct
+                    .map_or("-".to_string(), |v| format!("{v:.1}%")),
             ),
         ),
         style::kv(

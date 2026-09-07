@@ -216,7 +216,7 @@
             aria-controls="replication-panel"
           >
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-replication"></use></svg>
-            <span class="nav-label">Replication</span>
+            <span class="nav-label">Replication Lens</span>
             <span class="nav-key">3</span>
           </button>
           <button id="tab-schema" class="nav-btn" role="tab" aria-selected="false" aria-controls="schema-panel">
@@ -336,7 +336,7 @@
             </div>
           </section>
           <section id="replication-panel" class="panel" role="tabpanel" hidden>
-            <h2>Replication</h2>
+            <h2>Replication Lens</h2>
             <p id="replication-placeholder" class="placeholder">collecting…</p>
             <div id="replication"></div>
           </section>
@@ -384,9 +384,28 @@
               <h3>Prepared transactions (orphaned 2PC)</h3>
               <ul id="prepared-xacts" class="vacuum-tables"></ul>
             </div>
+            <div id="sequences-section" class="vacuum-section">
+              <h3>Sequences <span class="panel-note">exhaustion risk (pg_sequences)</span></h3>
+              <p id="sequences-staleness" class="staleness"></p>
+              <p id="sequences-placeholder" class="placeholder">collecting…</p>
+              <div class="table-wrap">
+                <table id="sequences">
+                  <thead></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
           </section>
           <section id="indexes-panel" class="panel" role="tabpanel" hidden>
             <h2>Indexes <span class="panel-note">unused / duplicate / prefix-redundant</span></h2>
+            <input
+              id="indexes-filter"
+              class="filter-input"
+              type="search"
+              placeholder="Filter by index, table or schema… (/)"
+              autocomplete="off"
+              spellcheck="false"
+            />
             <p id="indexes-staleness" class="staleness"></p>
             <p id="indexes-warning" class="inline-warning" hidden></p>
             <p id="indexes-placeholder" class="placeholder">collecting…</p>

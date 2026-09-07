@@ -8,12 +8,13 @@ import assert from "node:assert/strict";
 
 import {
   findingDescription,
+  indexRowMatches,
   marker,
   partnerOf,
   severity,
   severityRank,
 } from "./index-advisor.ts";
-import type { IndexFinding } from "./types.ts";
+import type { IndexFinding, IndexRow } from "./types.ts";
 
 test("severity maps every finding variant to its tier", () => {
   assert.equal(severity("Invalid"), "invalid");
@@ -67,4 +68,29 @@ test("findingDescription names the partner as evidence, not a bare label", () =>
   assert.match(prefix, /orders_wide_idx/);
   assert.match(prefix, /prefix/);
   assert.match(findingDescription("None"), /no finding/);
+});
+
+test("indexRowMatches matches table name, index name, or schema case-insensitively", () => {
+  const row: IndexRow = {
+    schema: "public",
+    table: "users",
+    name: "users_email_idx",
+    indexdef: "CREATE INDEX users_email_idx ON public.users (email)",
+    index_bytes: 1024,
+    idx_scan: 10,
+    idx_tup_read: 100,
+    idx_tup_fetch: 100,
+    is_unique: false,
+    is_primary: false,
+    is_exclusion: false,
+    is_valid: true,
+    is_ready: true,
+    is_constraint: false,
+    finding: "None",
+  };
+
+  assert.ok(indexRowMatches(row, "users"));
+  assert.ok(indexRowMatches(row, "EMAIL"));
+  assert.ok(indexRowMatches(row, "public.users"));
+  assert.ok(!indexRowMatches(row, "orders"));
 });

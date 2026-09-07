@@ -126,6 +126,12 @@ pub struct QuerySet {
     pub active_locks: &'static str,
     /// In-flight DDL & maintenance progress (v0.17).
     pub progress_ddl: &'static str,
+    /// User sequence exhaustion tracking (v0.19, `pg_sequences`). Runs on the slow cadence.
+    pub sequences: &'static str,
+    /// SLRU cache counters (v0.19, `pg_stat_slru`, PG 13+). Runs on the fast tick.
+    pub slru: &'static str,
+    /// Standby database recovery conflicts (v0.19, `pg_stat_database_conflicts`). Runs on the fast tick.
+    pub replication_conflicts: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -258,6 +264,12 @@ const WAL_STATS_POST_140000: &str = include_str!("../queries/wal_stats_post_1400
 const LOCKS_ACTIVE: &str = include_str!("../queries/locks_active.sql");
 // In-flight DDL & maintenance progress (v0.17).
 const PROGRESS_DDL: &str = include_str!("../queries/progress_ddl.sql");
+// User sequences exhaustion tracking (v0.19, `pg_sequences`).
+const SEQUENCES: &str = include_str!("../queries/sequences.sql");
+// SLRU cache stats (v0.19, `pg_stat_slru`, PG 13+).
+const SLRU_POST_130000: &str = include_str!("../queries/slru_post_130000.sql");
+// Database recovery conflicts for standby replicas (v0.19, `pg_stat_database_conflicts`).
+const REPLICATION_CONFLICTS: &str = include_str!("../queries/replication_conflicts.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -313,6 +325,9 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             wal_stats,
             active_locks: LOCKS_ACTIVE,
             progress_ddl: PROGRESS_DDL,
+            sequences: SEQUENCES,
+            slru: SLRU_POST_130000,
+            replication_conflicts: REPLICATION_CONFLICTS,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -348,6 +363,9 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             wal_stats,
             active_locks: LOCKS_ACTIVE,
             progress_ddl: PROGRESS_DDL,
+            sequences: SEQUENCES,
+            slru: SLRU_POST_130000,
+            replication_conflicts: REPLICATION_CONFLICTS,
         })
     } else {
         Err(format!(
@@ -690,4 +708,38 @@ mod tests {
         assert!(q.bgwriter.contains("AS buffers_backend"));
         assert!(q.bgwriter.contains("NULL::int8 AS buffers_backend"));
     }
+
+    #[test]
+    fn sequences_query_serves_pg13_and_up() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.sequences.contains("pg_sequences"));
+            assert!(q.sequences.contains("pg_depend"));
+            assert!(q.sequences.contains("pg_class"));
+            assert!(q.sequences.contains("table_name"));
+            assert!(q.sequences.contains("column_name"));
+        }
+    }
+
+    #[test]
+    fn slru_query_serves_pg13_and_up() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.slru.contains("pg_stat_slru"));
+            assert!(q.slru.contains("blks_hit"));
+            assert!(q.slru.contains("blks_read"));
+        }
+    }
+
+    #[test]
+    fn replication_conflicts_query_serves_pg13_and_up() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.replication_conflicts.contains("pg_stat_database_conflicts"));
+            assert!(q.replication_conflicts.contains("current_database()"));
+            assert!(q.replication_conflicts.contains("confl_lock"));
+            assert!(q.replication_conflicts.contains("confl_deadlock"));
+        }
+    }
 }
+

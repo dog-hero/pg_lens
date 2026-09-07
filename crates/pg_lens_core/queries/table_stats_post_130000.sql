@@ -84,6 +84,7 @@ SELECT
       s.relname::text AS relname,
       pg_total_relation_size(s.relid) AS total_bytes,
       pg_table_size(s.relid) AS table_bytes,
+      pg_relation_size(s.relid) AS heap_bytes,
       pg_indexes_size(s.relid) AS index_bytes,
       coalesce(s.seq_scan, 0) AS seq_scan,
       coalesce(s.seq_tup_read, 0) AS seq_tup_read,
@@ -106,9 +107,16 @@ SELECT
       coalesce(s.analyze_count, 0) AS analyze_count,
       coalesce(s.autoanalyze_count, 0) AS autoanalyze_count,
       c.relispartition AS is_partition,
-      i.inhparent::int8 AS parent_oid
+      i.inhparent::int8 AS parent_oid,
+      coalesce(io.heap_blks_read, 0)::int8 AS heap_blks_read,
+      coalesce(io.heap_blks_hit, 0)::int8 AS heap_blks_hit,
+      coalesce(io.idx_blks_read, 0)::int8 AS idx_blks_read,
+      coalesce(io.idx_blks_hit, 0)::int8 AS idx_blks_hit,
+      coalesce(io.toast_blks_read, 0)::int8 AS toast_blks_read,
+      coalesce(io.toast_blks_hit, 0)::int8 AS toast_blks_hit
  FROM pg_stat_user_tables AS s
  JOIN ranked AS r ON r.relid = s.relid
  JOIN pg_class AS c ON c.oid = s.relid
  LEFT JOIN pg_inherits AS i ON i.inhrelid = s.relid
+ LEFT JOIN pg_statio_user_tables AS io ON io.relid = s.relid
 ORDER BY pg_total_relation_size(s.relid) DESC;

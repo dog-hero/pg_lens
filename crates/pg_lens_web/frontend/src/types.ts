@@ -215,6 +215,16 @@ export interface TableStatRow {
   /** Of `lock_count`, how many are NOT granted (a real waiter right now).
    * Same fold/freshness contract as `lock_count`. */
   lock_waiters: number | null;
+  /** v0.19: main table heap size in bytes. */
+  heap_bytes?: number;
+  /** v0.19: TOAST table size in bytes. */
+  toast_bytes?: number;
+  /** v0.19: buffer cache hit percentage for heap blocks. */
+  heap_cache_hit_pct?: number | null;
+  /** v0.19: buffer cache hit percentage for index blocks. */
+  idx_cache_hit_pct?: number | null;
+  /** v0.19: buffer cache hit percentage for toast blocks. */
+  toast_cache_hit_pct?: number | null;
 }
 
 /** ioguix-estimated bloat of a table or btree index. */
@@ -408,6 +418,31 @@ export interface TableDetail {
   constraints: TableDetailConstraint[];
   indexes: TableDetailIndex[];
   error: string | null;
+  heap_bytes?: number;
+  toast_bytes?: number;
+  index_bytes?: number;
+  total_bytes?: number;
+  heap_cache_hit_pct?: number | null;
+  idx_cache_hit_pct?: number | null;
+}
+
+export type SequenceSeverity = "Normal" | "Warning" | "Critical";
+
+export interface SequenceRow {
+  schema: string;
+  sequence_name: string;
+  data_type: string;
+  start_value: number;
+  min_value: number;
+  max_value: number;
+  increment_by: number;
+  cycle: boolean;
+  last_value: number | null;
+  table_name: string;
+  column_name: string;
+  percent_used: number;
+  remaining_count: number;
+  severity: SequenceSeverity;
 }
 
 /** Slow-cadence Schema Lens collection; null until the first one lands. */
@@ -425,6 +460,8 @@ export interface SchemaSnapshot {
   vacuum_tables: VacuumTableRow[];
   /** Index advisor rows (F3), same slow collection as `tables`. */
   indexes: IndexRow[];
+  /** User sequence exhaustion tracking (v0.19, `pg_sequences`). */
+  sequences?: SequenceRow[];
   /** When the connected database's cumulative stats were last reset (F3
    * freshness header) — null only if the row vanished mid-query. */
   stats_reset_epoch_secs: number | null;
@@ -727,8 +764,49 @@ export interface DbSnapshot {
   blocking_tree: BlockTreeNode[] | null;
   /** In-flight DDL & maintenance progress (v0.17). */
   ddl_progress: DdlProgressRow[] | null;
+  /** SLRU cache counters and hit ratios (v0.19, `pg_stat_slru`). */
+  slru?: SlruStats | null;
+  /** Standby database recovery conflicts (v0.19, `pg_stat_database_conflicts`). */
+  conflicts?: DatabaseConflicts | null;
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
+}
+
+export interface SlruRow {
+  name: string;
+  blks_zeroed: number;
+  blks_hit: number;
+  blks_read: number;
+  blks_written: number;
+  blks_exists: number;
+  flushes: number;
+  truncates: number;
+  hit_ratio_pct: number | null;
+  reads_per_sec: number | null;
+  writes_per_sec: number | null;
+  flushes_per_sec: number | null;
+}
+
+export interface SlruStats {
+  collected_at_epoch_ms: number;
+  rows: SlruRow[];
+  overall_hit_ratio_pct: number | null;
+  subtrans_warning: boolean;
+}
+
+export interface DatabaseConflicts {
+  datid: number;
+  datname: string;
+  confl_tablespace: number;
+  confl_lock: number;
+  confl_snapshot: number;
+  confl_bufferpin: number;
+  confl_deadlock: number;
+  confl_total: number;
+  conflicts_per_sec: number | null;
+  lock_conflicts_per_sec: number | null;
+  snapshot_conflicts_per_sec: number | null;
+  deadlock_conflicts_per_sec: number | null;
 }
 
 export type RecordingKind = "Recording" | "Bookmark";

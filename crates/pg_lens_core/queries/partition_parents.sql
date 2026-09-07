@@ -62,6 +62,7 @@ SELECT
       p.relname::text AS relname,
       coalesce(sum(pg_total_relation_size(l.leaf_relid)), 0)::int8 AS total_bytes,
       coalesce(sum(pg_table_size(l.leaf_relid)), 0)::int8 AS table_bytes,
+      coalesce(sum(pg_relation_size(l.leaf_relid)), 0)::int8 AS heap_bytes,
       coalesce(sum(pg_indexes_size(l.leaf_relid)), 0)::int8 AS index_bytes,
       coalesce(sum(s.seq_scan), 0)::int8 AS seq_scan,
       coalesce(sum(s.seq_tup_read), 0)::int8 AS seq_tup_read,
@@ -71,11 +72,18 @@ SELECT
       coalesce(sum(s.n_tup_hot_upd), 0)::int8 AS n_tup_hot_upd,
       coalesce(sum(s.n_live_tup), 0)::int8 AS n_live_tup,
       coalesce(sum(s.n_dead_tup), 0)::int8 AS n_dead_tup,
-      count(l.leaf_relid)::int8 AS partition_count
+      count(l.leaf_relid)::int8 AS partition_count,
+      coalesce(sum(io.heap_blks_read), 0)::int8 AS heap_blks_read,
+      coalesce(sum(io.heap_blks_hit), 0)::int8 AS heap_blks_hit,
+      coalesce(sum(io.idx_blks_read), 0)::int8 AS idx_blks_read,
+      coalesce(sum(io.idx_blks_hit), 0)::int8 AS idx_blks_hit,
+      coalesce(sum(io.toast_blks_read), 0)::int8 AS toast_blks_read,
+      coalesce(sum(io.toast_blks_hit), 0)::int8 AS toast_blks_hit
  FROM ranked AS r
  JOIN pg_class AS p ON p.oid = r.oid
  JOIN pg_namespace AS n ON n.oid = p.relnamespace
  LEFT JOIN leaves AS l ON l.parent_oid = r.oid
  LEFT JOIN pg_stat_user_tables AS s ON s.relid = l.leaf_relid
+ LEFT JOIN pg_statio_user_tables AS io ON io.relid = l.leaf_relid
 GROUP BY p.oid, n.nspname, p.relname
 ORDER BY total_bytes DESC;

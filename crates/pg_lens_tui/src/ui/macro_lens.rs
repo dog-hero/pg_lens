@@ -343,6 +343,47 @@ fn io_stats_lines(rows: Option<&[IoStatRow]>) -> Option<Vec<Line<'static>>> {
     )
 }
 
+fn slru_lines(slru: Option<&pg_lens_core::SlruStats>) -> Option<Vec<Line<'static>>> {
+    let slru = slru?;
+    if slru.rows.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    let overall_hit_str = slru
+        .overall_hit_ratio_pct
+        .map_or("-".to_string(), |v| format!("{v:.1}%"));
+    let mut header_spans = vec![
+        Span::styled("overall hit ratio: ", style::label_style()),
+        Span::styled(overall_hit_str, style::value_style()),
+    ];
+    if slru.subtrans_warning {
+        header_spans.push(Span::styled(
+            " \u{b7} ! SUBTRANS THRASHING",
+            Style::new().fg(Color::Red).bold(),
+        ));
+    }
+    lines.push(Line::from(header_spans));
+
+    for row in slru.rows.iter().take(4) {
+        let hit = row
+            .hit_ratio_pct
+            .map_or("-".to_string(), |v| format!("{v:.1}%"));
+        let r_rate = row
+            .reads_per_sec
+            .map_or("-".to_string(), |v| format!("{v:.0}/s"));
+        let w_rate = row
+            .writes_per_sec
+            .map_or("-".to_string(), |v| format!("{v:.0}/s"));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<14}", row.name), style::label_style()),
+            Span::styled(format!("hit {hit:<6}"), style::value_style()),
+            Span::styled(format!(" r:{r_rate:<5}"), style::label_style()),
+            Span::styled(format!(" w:{w_rate}"), style::label_style()),
+        ]));
+    }
+    Some(lines)
+}
+
 pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     let vitals = &app.snapshot.vitals;
     let history = &app.snapshot.history;
@@ -502,8 +543,21 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
             ),
         ),
     ];
+    let slru_lines = slru_lines(app.snapshot.slru.as_ref());
+    let slru_height = slru_lines
+        .as_ref()
+        .map(|l| (l.len() as u16 + 2).min(7))
+        .unwrap_or(0);
+    let [vitals_area, slru_area] =
+        Layout::vertical([Constraint::Min(8), Constraint::Length(slru_height)]).areas(vitals_area);
+
     let paragraph = Paragraph::new(lines).block(titled_block("Vitals"));
     frame.render_widget(paragraph, vitals_area);
+
+    if let Some(lines) = slru_lines {
+        let panel = Paragraph::new(lines).block(titled_block("SLRU caches (pg_stat_slru)"));
+        frame.render_widget(panel, slru_area);
+    }
 
     // v0.16: the I/O profile panel is a compact sub-panel of the checkpoint
     // column (both are buffer/IO health, thematically adjacent) rather than

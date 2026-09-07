@@ -20,6 +20,7 @@ mod blocks_lens;
 mod progress_lens;
 mod records_lens;
 mod replay_scrubber;
+pub mod sequences_subview;
 
 use pg_lens_core::PollerStatus;
 use ratatui::{
@@ -297,6 +298,12 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             None,
             true,
         ),
+        Tab::SchemaLens if app.schema_view == SchemaView::Sequences => (
+            app.sequences_table_state.selected(),
+            app.sequences_row_order.len(),
+            None,
+            true,
+        ),
         Tab::SchemaLens => (
             app.schema_table_state.selected(),
             app.snapshot.schema.as_deref().map_or(0, |s| s.tables.len()),
@@ -378,9 +385,23 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     }
     // Filter editing takes over the whole statusbar with a focused keymap —
     // the lens hints are inert while typing anyway.
-    if app.filter_editing || app.progress_filter_editing {
+    if app.filter_editing
+        || app.progress_filter_editing
+        || app.schema_filter_editing
+        || app.statements_filter_editing
+        || app.records_filter_editing
+        || app.index_filter_editing
+    {
         let needle = if app.progress_filter_editing {
             &app.progress_filter
+        } else if app.schema_filter_editing {
+            &app.schema_filter
+        } else if app.statements_filter_editing {
+            &app.statements_filter
+        } else if app.records_filter_editing {
+            &app.records_filter
+        } else if app.index_filter_editing {
+            &app.index_filter
         } else {
             &app.filter
         };
@@ -516,9 +537,15 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     // v0.12: `/` filters Micro Lens, Schema Lens's Tables view, and Query Lens —
     // "where width allows" like `w`/`I` (already-crowded bars competing for
     // the budget so data staleness is never pushed off screen).
+    // `/` filters Micro Lens, Schema Lens (Tables & Sequences), Index Lens, and Query Lens
     if app.active_tab == Tab::MicroLens
         || (app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables)
+        || (app.active_tab == Tab::SchemaLens
+            && (app.schema_view == SchemaView::Tables || app.schema_view == SchemaView::Sequences))
         || app.active_tab == Tab::QueryLens
+        || app.active_tab == Tab::IndexLens
+        || app.active_tab == Tab::ProgressLens
+        || app.active_tab == Tab::RecordsLens
     {
         let [fk, fd] = style::hint("/", ": filter");
         let fits = Line::from(spans.clone()).width()
@@ -532,6 +559,25 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             spans.push(sep.clone());
             spans.push(fk);
             spans.push(fd);
+        }
+    }
+    // `i` (v0.19): jumps to Index Lens filtered by selected table
+    if app.active_tab == Tab::SchemaLens
+        && app.schema_view == SchemaView::Tables
+        && app.selected_table().is_some()
+    {
+        let [ik, id] = style::hint("i", ": indexes");
+        let fits = Line::from(spans.clone()).width()
+            + sep.width()
+            + ik.width()
+            + id.width()
+            + sep.width()
+            + data_span.width()
+            <= area.width as usize;
+        if fits {
+            spans.push(sep.clone());
+            spans.push(ik);
+            spans.push(id);
         }
     }
     // v0.15: `x` cross-references the selected Schema Lens table into the
@@ -554,6 +600,21 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             spans.push(sep.clone());
             spans.push(xk);
             spans.push(xd);
+        }
+    }
+    if app.active_tab == Tab::IndexLens && app.previous_tab == Some(Tab::SchemaLens) {
+        let [bk, bd] = style::hint("Backspace", ": return");
+        let fits = Line::from(spans.clone()).width()
+            + sep.width()
+            + bk.width()
+            + bd.width()
+            + sep.width()
+            + data_span.width()
+            <= area.width as usize;
+        if fits {
+            spans.push(sep.clone());
+            spans.push(bk);
+            spans.push(bd);
         }
     }
     // U2's `d: database` hint works from any lens, but the tight lenses
@@ -1941,6 +2002,50 @@ mod tests {
         assert!(screen.contains("Frame 1/2"), "scrubber shows frame count: {screen}");
         assert!(screen.contains("step"), "statusbar shows stepping hint: {screen}");
         assert!(screen.contains("export"), "statusbar shows export hint: {screen}");
+    }
+
+    #[test]
+    fn schema_sequences_subview_renders() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        press(&mut app, crossterm::event::KeyCode::Char('S'));
+        assert_eq!(app.schema_view, SchemaView::Sequences);
+
+        let screen = render(&mut app);
+        assert!(screen.contains("Sequences"), "{screen}");
+        assert!(screen.contains("Headroom Exhaustion Watch"), "{screen}");
+        assert!(screen.contains("Remaining"), "{screen}");
+    }
+
+    #[test]
+    fn macro_lens_renders_slru_panel() {
+        let mut app = App::new();
+        app.active_tab = Tab::MacroLens;
+        let screen = render(&mut app);
+        assert!(screen.contains("SLRU caches"), "{screen}");
+        assert!(screen.contains("overall hit ratio"), "{screen}");
+    }
+
+    #[test]
+    fn replication_lens_renders_conflicts_panel() {
+        let mut app = App::new();
+        app.active_tab = Tab::ReplicationLens;
+        let screen = render(&mut app);
+        assert!(screen.contains("Standby Recovery Conflicts"), "{screen}");
+        assert!(screen.contains("total:"), "{screen}");
+    }
+
+    #[test]
+    fn schema_detail_shows_toast_and_cache_hits() {
+        let mut app = App::new();
+        app.active_tab = Tab::SchemaLens;
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        assert!(app.detail_open);
+
+        let screen = render(&mut app);
+        assert!(screen.contains("heap"), "{screen}");
+        assert!(screen.contains("toast"), "{screen}");
+        assert!(screen.contains("cache hit:"), "{screen}");
     }
 }
 

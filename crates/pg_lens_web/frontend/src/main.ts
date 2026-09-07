@@ -27,6 +27,7 @@ import type { SnapshotHistory } from "./types";
 import { ActivityTable } from "./table";
 import { SchemaLens } from "./schema";
 import { IndexAdvisor } from "./index-advisor";
+import { SequencesPanel } from "./sequences";
 import { VacuumPanel } from "./vacuum-panel";
 import { StatementsLens } from "./statements";
 import { initBlocksLens } from "./blocks-lens";
@@ -232,12 +233,22 @@ const schemaLens = new SchemaLens(
     void requestTableDetail(activeToken, oid, schema, name);
   },
   document.getElementById("schema-partitions-toggle") as HTMLInputElement | null,
+  (tableName) => {
+    selectTab("tab-indexes");
+    indexAdvisor.setFilter(tableName);
+  },
 );
 const indexAdvisor = new IndexAdvisor(
   el<HTMLTableElement>("indexes"),
   el<HTMLParagraphElement>("indexes-staleness"),
   el<HTMLParagraphElement>("indexes-warning"),
   el<HTMLParagraphElement>("indexes-placeholder"),
+  document.getElementById("indexes-filter") as HTMLInputElement | null,
+);
+const sequencesPanel = new SequencesPanel(
+  el<HTMLTableElement>("sequences"),
+  el<HTMLParagraphElement>("sequences-placeholder"),
+  document.getElementById("sequences-staleness"),
 );
 const vacuumPanel = new VacuumPanel(
   el<HTMLParagraphElement>("vacuum-cluster"),
@@ -467,6 +478,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.history,
     snapshot.io_stats,
     snapshot.wal,
+    snapshot.slru ?? null,
   );
   renderReplication(
     replicationBody,
@@ -474,6 +486,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.replication,
     snapshot.replication_slots,
     snapshot.wal,
+    snapshot.conflicts ?? null,
   );
   currentHistory = snapshot.history;
   chart.update(snapshot.history);
@@ -493,6 +506,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   renderOldestXact(xactHeadline, xactHeadlineAge, xactHeadlineMeta, xactHeadlineState, snapshot.activity);
   table.update(snapshot.activity, snapshot.locks, snapshot.ddl_progress);
   schemaLens.update(snapshot.schema, snapshot.vitals.database, snapshot.table_detail);
+  sequencesPanel.update(snapshot.schema?.sequences);
   indexAdvisor.update(snapshot.schema, snapshot.vitals.database);
   vacuumPanel.update(snapshot.schema, snapshot.vacuum_progress, snapshot.prepared_xacts, snapshot.ddl_progress);
   statementsLens.update(snapshot.statements, snapshot.vitals.database);

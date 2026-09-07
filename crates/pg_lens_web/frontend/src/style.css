@@ -1032,6 +1032,46 @@ html[data-theme="light"] .sql-num {
   background: var(--warn-bg);
 }
 
+/* v0.19: Standby recovery conflicts summary row */
+#replication .repl-conflicts {
+  font-family: var(--font-mono);
+  color: var(--fg-dim);
+}
+
+#replication .repl-conflicts.warn {
+  color: var(--warn);
+  background: var(--warn-bg);
+}
+
+#replication .repl-conflicts.bad {
+  color: var(--bad);
+  background: var(--bad-bg);
+}
+
+/* v0.19: Sequences exhaustion table */
+.seq-crit {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.seq-warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.jump-btn {
+  font-size: 0.76rem;
+  padding: 3px 8px;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.jump-btn:hover {
+  background: var(--bg-raised);
+  border-color: var(--accent);
+}
+
 /* ── schema table ───────────────────────────────────────────────────── */
 
 .panel-note {

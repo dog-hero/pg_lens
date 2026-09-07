@@ -3,13 +3,14 @@
 // same "hide when a primary has no replicas" rule.
 
 import type {
+  DatabaseConflicts,
   ReplicationInfo,
   ReplicationSlotRow,
   WalReceiverRow,
   WalSenderRow,
   WalStats,
-} from "./types";
-import { humanBytes, humanDuration } from "./format.ts";
+} from "./types.ts";
+import { humanBytes, humanCount, humanDuration } from "./format.ts";
 import { walBuffersFullSeverity, walGenerationText } from "./wal.ts";
 
 type Severity = "" | "warn" | "bad";
@@ -134,6 +135,29 @@ function walRow(wal: WalStats): HTMLDivElement {
   return div;
 }
 
+/** v0.19: One-line summary of standby recovery conflicts (pg_stat_database_conflicts). */
+export function conflictsText(c: DatabaseConflicts): string {
+  const rateText =
+    c.conflicts_per_sec !== null && c.conflicts_per_sec > 0
+      ? ` (${c.conflicts_per_sec.toFixed(1)}/s)`
+      : "";
+  return `conflicts: ${humanCount(c.confl_total)}${rateText} · lock ${humanCount(c.confl_lock)} · snapshot ${humanCount(c.confl_snapshot)} · deadlock ${humanCount(c.confl_deadlock)} · pin ${humanCount(c.confl_bufferpin)} · tblspc ${humanCount(c.confl_tablespace)}`;
+}
+
+export function conflictsSeverity(c: DatabaseConflicts): Severity {
+  if (c.conflicts_per_sec !== null && c.conflicts_per_sec > 0) return "bad";
+  if (c.confl_total > 0) return "warn";
+  return "";
+}
+
+function conflictsRow(c: DatabaseConflicts): HTMLDivElement {
+  const sev = conflictsSeverity(c);
+  const div = document.createElement("div");
+  div.className = `repl-row repl-conflicts ${sev}`.trim();
+  div.textContent = `standby recovery ${conflictsText(c)}`;
+  return div;
+}
+
 /** Worst-severity-first, then retained bytes descending — the web twin of
  * the TUI's `resort_replication` (see `crates/pg_lens_tui/src/app.rs`). */
 function sortedSlots(slots: ReplicationSlotRow[]): ReplicationSlotRow[] {
@@ -162,8 +186,9 @@ export function renderReplication(
   repl: ReplicationInfo | null,
   slots: ReplicationSlotRow[] | null,
   wal: WalStats | null = null,
+  conflicts: DatabaseConflicts | null = null,
 ): void {
-  if (repl === null && slots === null) {
+  if (repl === null && slots === null && conflicts === null) {
     placeholder.hidden = false;
     body.replaceChildren();
     return;
@@ -173,6 +198,9 @@ export function renderReplication(
   const rows: HTMLElement[] = [];
   if (wal !== null) {
     rows.push(walRow(wal));
+  }
+  if (conflicts !== null) {
+    rows.push(conflictsRow(conflicts));
   }
   if (repl && "Primary" in repl) {
     if (repl.Primary.senders.length === 0) {

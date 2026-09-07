@@ -5,17 +5,18 @@ import type {
   IoStatRow,
   LockCapacity,
   ServerVitals,
+  SlruStats,
   SnapshotHistory,
   VacuumClusterAge,
   WalStats,
-} from "./types";
-import { humanBytes, humanCount, humanDuration, humanPercent } from "./format";
-import { ageSeverity } from "./vacuum";
-import { checkpointerCard } from "./checkpointer";
-import { ioStatLines } from "./io_stats";
-import { lockCapacitySeverity } from "./lock_capacity";
-import { walBuffersFullSeverity, walGenerationText } from "./wal";
-import { TREND_LOOKBACK_TICKS, cardTrend, sampleForTrend, trendGlyph, trendTitle, trendTone } from "./trend";
+} from "./types.ts";
+import { humanBytes, humanCount, humanDuration, humanPercent } from "./format.ts";
+import { ageSeverity } from "./vacuum.ts";
+import { checkpointerCard } from "./checkpointer.ts";
+import { ioStatLines } from "./io_stats.ts";
+import { lockCapacitySeverity } from "./lock_capacity.ts";
+import { walBuffersFullSeverity, walGenerationText } from "./wal.ts";
+import { TREND_LOOKBACK_TICKS, cardTrend, sampleForTrend, trendGlyph, trendTitle, trendTone } from "./trend.ts";
 
 interface Card {
   label: string;
@@ -143,6 +144,48 @@ function ioStatsCard(rows: IoStatRow[] | null): Card | null {
   };
 }
 
+/**
+ * v0.19's SLRU cache monitoring card (`pg_stat_slru`).
+ * `null` when not collected or PG without SLRU stats.
+ */
+export function slruCard(slru: SlruStats | null): Card | null {
+  if (slru === null || slru.rows.length === 0) return null;
+  const hitRatio =
+    slru.overall_hit_ratio_pct !== null
+      ? `${slru.overall_hit_ratio_pct.toFixed(1)}%`
+      : "—";
+
+  const topSubsystems = slru.rows
+    .slice(0, 3)
+    .map((r) => {
+      const hit = r.hit_ratio_pct !== null ? `${r.hit_ratio_pct.toFixed(0)}%` : "—";
+      return `${r.name} ${hit}`;
+    })
+    .join(" · ");
+
+  const thrashing = slru.subtrans_warning;
+  const detail = thrashing
+    ? `! SUBTRANS THRASHING · ${topSubsystems}`
+    : topSubsystems;
+
+  const tone: Card["tone"] = thrashing
+    ? "bad"
+    : slru.overall_hit_ratio_pct !== null && slru.overall_hit_ratio_pct < 90
+      ? "warn"
+      : "";
+
+  const meter =
+    slru.overall_hit_ratio_pct !== null ? slru.overall_hit_ratio_pct / 100 : null;
+
+  return {
+    label: "SLRU caches",
+    value: hitRatio,
+    detail,
+    meter,
+    tone,
+  };
+}
+
 function cards(
   v: ServerVitals,
   vacuumAge: VacuumClusterAge | null,
@@ -151,6 +194,7 @@ function cards(
   history: SnapshotHistory,
   ioStats: IoStatRow[] | null,
   wal: WalStats | null,
+  slru: SlruStats | null = null,
 ): Card[] {
   const saturation =
     v.max_connections > 0 ? v.connections_total / v.max_connections : 0;
@@ -229,6 +273,7 @@ function cards(
     },
     checkpointCard(checkpointer, wal),
     ...(ioStatsCard(ioStats) ? [ioStatsCard(ioStats) as Card] : []),
+    ...(slruCard(slru) ? [slruCard(slru) as Card] : []),
   ];
 }
 
@@ -241,9 +286,10 @@ export function renderVitals(
   history: SnapshotHistory = { cap: 0, points: [] },
   ioStats: IoStatRow[] | null = null,
   wal: WalStats | null = null,
+  slru: SlruStats | null = null,
 ): void {
   container.replaceChildren(
-    ...cards(v, vacuumAge, checkpointer, lockCapacity, history, ioStats, wal).map((card) => {
+    ...cards(v, vacuumAge, checkpointer, lockCapacity, history, ioStats, wal, slru).map((card) => {
       const el = document.createElement("div");
       const classes = ["card", card.tone, card.lead ? "lead" : ""].filter(Boolean);
       el.className = classes.join(" ");

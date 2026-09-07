@@ -31,11 +31,12 @@ use crate::history::{DEFAULT_CAP, HistoryPoint, SnapshotHistory, epoch_ms_now};
 use crate::history_store::HistoryStore;
 use crate::index_advisor::{self, IndexCatalogRow};
 use crate::models::{
-    ActiveLockRow, AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats, DatabaseRow,
-    DbSnapshot, DdlProgressRow, IdleSessionRow, IndexRow, IoStatRow, LockCapacity, PollerStatus,
-    PreparedXactRow, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus,
-    ServerVitals, StatementRow, StatementsSnapshot, StatementsStatus, TableDetail,
-    TableDetailRequest, VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalStats,
+    ActiveLockRow, AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats,
+    DatabaseConflicts, DatabaseRow, DbSnapshot, DdlProgressRow, IdleSessionRow, IndexRow, IoStatRow,
+    LockCapacity, PollerStatus, PreparedXactRow, ReplicationInfo, ReplicationSlotRow,
+    SchemaSnapshot, SchemaStatus, SequenceRow, ServerVitals, SlruRow, SlruStats, StatementRow,
+    StatementsSnapshot, StatementsStatus, TableDetail, TableDetailRequest, VacuumClusterAge,
+    VacuumProgressRow, VacuumTableRow, WalStats,
 };
 use crate::schema_growth::{GROWTH_LOOKBACK_MS, SchemaGrowthTracker};
 use crate::services::{self, PasswordSource};
@@ -161,6 +162,7 @@ impl SchemaState {
             vacuum_tables: collection.vacuum_tables,
             indexes: collection.indexes,
             stats_reset_epoch_secs: collection.stats_reset_epoch_secs,
+            sequences: collection.sequences,
             status,
         }));
     }
@@ -195,6 +197,7 @@ impl SchemaState {
             vacuum_tables: previous.map(|p| p.vacuum_tables.clone()).unwrap_or_default(),
             indexes: previous.map(|p| p.indexes.clone()).unwrap_or_default(),
             stats_reset_epoch_secs: previous.and_then(|p| p.stats_reset_epoch_secs),
+            sequences: previous.map(|p| p.sequences.clone()).unwrap_or_default(),
             status: SchemaStatus::Error(msg),
         }));
     }
@@ -1093,6 +1096,10 @@ struct DeltaState {
     /// does). Carried forward unchanged across a tick whose collection
     /// failed, so a transient failure never resets the delta window.
     wal: Option<WalDeltaState>,
+    /// v0.19's SLRU cache stats delta window.
+    slru: Option<SlruDeltaState>,
+    /// v0.19's Standby recovery conflicts delta window.
+    conflicts: Option<ConflictsDeltaState>,
 }
 
 /// v0.16's previous-tick `pg_stat_wal` counters, the basis for
@@ -1157,6 +1164,192 @@ fn derive_wal_stats(
         wal_buffers_full: raw.wal_buffers_full,
     };
     (stats, next)
+}
+
+#[derive(Clone)]
+struct SlruSubsystemDelta {
+    blks_read: i64,
+    blks_written: i64,
+    flushes: i64,
+}
+
+#[derive(Clone)]
+struct SlruDeltaState {
+    at: Instant,
+    subsystems: std::collections::HashMap<String, SlruSubsystemDelta>,
+}
+
+fn derive_slru_stats(
+    raws: &[db::SlruRawRow],
+    now: Instant,
+    prev: Option<&SlruDeltaState>,
+) -> (SlruStats, SlruDeltaState) {
+    let mut total_hit = 0i64;
+    let mut total_read = 0i64;
+    let mut rows = Vec::with_capacity(raws.len());
+    let mut next_subsystems = std::collections::HashMap::with_capacity(raws.len());
+    let mut subtrans_warning = false;
+
+    let dt = prev.map(|p| now.duration_since(p.at).as_secs_f64()).unwrap_or(0.0);
+
+    for raw in raws {
+        total_hit += raw.blks_hit;
+        total_read += raw.blks_read;
+
+        let denom = raw.blks_hit + raw.blks_read;
+        let hit_ratio_pct = if denom > 0 {
+            Some(((raw.blks_hit as f64 / denom as f64) * 100.0).clamp(0.0, 100.0))
+        } else {
+            None
+        };
+
+        let prev_sub = prev.and_then(|p| p.subsystems.get(&raw.name));
+        let (reads_per_sec, writes_per_sec, flushes_per_sec) = if let Some(p) = prev_sub {
+            if dt > 0.0
+                && raw.blks_read >= p.blks_read
+                && raw.blks_written >= p.blks_written
+                && raw.flushes >= p.flushes
+            {
+                (
+                    Some((raw.blks_read - p.blks_read) as f64 / dt),
+                    Some((raw.blks_written - p.blks_written) as f64 / dt),
+                    Some((raw.flushes - p.flushes) as f64 / dt),
+                )
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (None, None, None)
+        };
+
+        if raw.name == "subtrans" || raw.name.contains("subtrans") {
+            if let Some(pct) = hit_ratio_pct {
+                if pct < 90.0 && (raw.blks_read > 0 || reads_per_sec.unwrap_or(0.0) > 0.0) {
+                    subtrans_warning = true;
+                }
+            }
+        }
+
+        next_subsystems.insert(
+            raw.name.clone(),
+            SlruSubsystemDelta {
+                blks_read: raw.blks_read,
+                blks_written: raw.blks_written,
+                flushes: raw.flushes,
+            },
+        );
+
+        rows.push(SlruRow {
+            name: raw.name.clone(),
+            blks_zeroed: raw.blks_zeroed,
+            blks_hit: raw.blks_hit,
+            blks_read: raw.blks_read,
+            blks_written: raw.blks_written,
+            blks_exists: raw.blks_exists,
+            flushes: raw.flushes,
+            truncates: raw.truncates,
+            hit_ratio_pct,
+            reads_per_sec,
+            writes_per_sec,
+            flushes_per_sec,
+        });
+    }
+
+    let overall_hit_ratio_pct = if total_hit + total_read > 0 {
+        Some(((total_hit as f64 / (total_hit + total_read) as f64) * 100.0).clamp(0.0, 100.0))
+    } else {
+        None
+    };
+
+    let next_delta = SlruDeltaState {
+        at: now,
+        subsystems: next_subsystems,
+    };
+
+    (
+        SlruStats {
+            collected_at_epoch_ms: epoch_ms_now(),
+            rows,
+            overall_hit_ratio_pct,
+            subtrans_warning,
+        },
+        next_delta,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ConflictsDeltaState {
+    at: Instant,
+    confl_tablespace: i64,
+    confl_lock: i64,
+    confl_snapshot: i64,
+    confl_bufferpin: i64,
+    confl_deadlock: i64,
+    confl_total: i64,
+}
+
+fn derive_conflicts(
+    raw: &db::ConflictsRawRow,
+    now: Instant,
+    prev: Option<&ConflictsDeltaState>,
+) -> (DatabaseConflicts, ConflictsDeltaState) {
+    let confl_total = raw.confl_tablespace
+        + raw.confl_lock
+        + raw.confl_snapshot
+        + raw.confl_bufferpin
+        + raw.confl_deadlock;
+
+    let stats_reset = prev.is_some_and(|p| {
+        raw.confl_tablespace < p.confl_tablespace
+            || raw.confl_lock < p.confl_lock
+            || raw.confl_snapshot < p.confl_snapshot
+            || raw.confl_bufferpin < p.confl_bufferpin
+            || raw.confl_deadlock < p.confl_deadlock
+    });
+    let usable_prev = prev.filter(|_| !stats_reset);
+
+    let mut conflicts_per_sec = None;
+    let mut lock_conflicts_per_sec = None;
+    let mut snapshot_conflicts_per_sec = None;
+    let mut deadlock_conflicts_per_sec = None;
+
+    if let Some(p) = usable_prev {
+        let dt = now.duration_since(p.at).as_secs_f64();
+        if dt > 0.0 {
+            conflicts_per_sec = Some((confl_total - p.confl_total).max(0) as f64 / dt);
+            lock_conflicts_per_sec = Some((raw.confl_lock - p.confl_lock).max(0) as f64 / dt);
+            snapshot_conflicts_per_sec = Some((raw.confl_snapshot - p.confl_snapshot).max(0) as f64 / dt);
+            deadlock_conflicts_per_sec = Some((raw.confl_deadlock - p.confl_deadlock).max(0) as f64 / dt);
+        }
+    }
+
+    let next_delta = ConflictsDeltaState {
+        at: now,
+        confl_tablespace: raw.confl_tablespace,
+        confl_lock: raw.confl_lock,
+        confl_snapshot: raw.confl_snapshot,
+        confl_bufferpin: raw.confl_bufferpin,
+        confl_deadlock: raw.confl_deadlock,
+        confl_total,
+    };
+
+    (
+        DatabaseConflicts {
+            datid: raw.datid,
+            datname: raw.datname.clone(),
+            confl_tablespace: raw.confl_tablespace,
+            confl_lock: raw.confl_lock,
+            confl_snapshot: raw.confl_snapshot,
+            confl_bufferpin: raw.confl_bufferpin,
+            confl_deadlock: raw.confl_deadlock,
+            confl_total,
+            conflicts_per_sec,
+            lock_conflicts_per_sec,
+            snapshot_conflicts_per_sec,
+            deadlock_conflicts_per_sec,
+        },
+        next_delta,
+    )
 }
 
 /// F4's previous-tick checkpointer/bgwriter counters, plus the
@@ -1383,6 +1576,12 @@ async fn poll_once(
         None => None,
     };
 
+    // SLRU cache stats (v0.19, PG 13+) — best-effort.
+    let slru_raw = collect_slru_raw(client, q.slru).await;
+
+    // Standby recovery conflicts (v0.19) — best-effort.
+    let conflicts_raw = collect_conflicts_raw(client, q.replication_conflicts).await;
+
     // Active locks in current database (v0.17, Blocks Lens) — best-effort.
     let active_locks = collect_active_locks(client, q).await;
 
@@ -1447,6 +1646,24 @@ async fn poll_once(
         None => (None, prev_wal),
     };
 
+    let prev_slru = deltas.as_ref().and_then(|d| d.slru.clone());
+    let (slru, next_slru_delta) = match &slru_raw {
+        Some(raw) => {
+            let (stats, next) = derive_slru_stats(raw, now, prev_slru.as_ref());
+            (Some(stats), Some(next))
+        }
+        None => (None, prev_slru),
+    };
+
+    let prev_conflicts = deltas.as_ref().and_then(|d| d.conflicts);
+    let (conflicts, next_conflicts_delta) = match &conflicts_raw {
+        Some(raw) => {
+            let (stats, next) = derive_conflicts(raw, now, prev_conflicts.as_ref());
+            (Some(stats), Some(next))
+        }
+        None => (None, prev_conflicts),
+    };
+
     *deltas = Some(DeltaState {
         at: now,
         xact_total,
@@ -1455,6 +1672,8 @@ async fn poll_once(
         cache_hit_ratio,
         checkpointer: checkpointer_delta,
         wal: next_wal_delta,
+        slru: next_slru_delta,
+        conflicts: next_conflicts_delta,
     });
 
     // One incremental push per poll — the ring is never rebuilt.
@@ -1508,6 +1727,8 @@ async fn poll_once(
             lock_capacity,
             idle_sessions,
             wal,
+            slru,
+            conflicts,
             active_locks,
             blocking_tree,
             ddl_progress,
@@ -1543,6 +1764,8 @@ struct SchemaCollection {
     indexes: Vec<IndexRow>,
     /// F3 freshness header, same transaction as `indexes`.
     stats_reset_epoch_secs: Option<f64>,
+    /// User sequences exhaustion tracking (v0.19, `pg_sequences`).
+    sequences: Vec<SequenceRow>,
     /// `None` when bloat was not requested this cycle (auto tick — keep the
     /// last on-demand estimate); `Some(_)` when a force refresh asked for a
     /// fresh estimate.
@@ -1633,6 +1856,13 @@ async fn collect_schema(
         .map_err(|e| e.to_string())?
         .flatten();
 
+    // User sequences exhaustion tracking (v0.19, `pg_sequences`).
+    let seq_rows = stx.query(q.sequences, &[]).await.map_err(|e| e.to_string())?;
+    let mut sequences = Vec::with_capacity(seq_rows.len());
+    for row in &seq_rows {
+        sequences.push(db::sequence_from_row(row).map_err(|e| e.to_string())?);
+    }
+
     let bloat = if with_bloat {
         let (bloat_table_rows, bloat_index_rows) = tokio::join!(
             stx.query(q.bloat_tables, &[]),
@@ -1667,6 +1897,7 @@ async fn collect_schema(
         vacuum_tables,
         indexes,
         stats_reset_epoch_secs,
+        sequences,
         bloat,
     })
 }
@@ -1740,6 +1971,43 @@ async fn collect_table_detail(
             tx.query(q.table_detail_indexdefs, &params),
         )
         .map_err(|e| e.to_string())?;
+        let size_row = tx
+            .query_opt(
+                "SELECT
+                    pg_relation_size($1::oid)::int8 AS heap_bytes,
+                    (pg_table_size($1::oid) - pg_relation_size($1::oid))::int8 AS toast_bytes,
+                    pg_indexes_size($1::oid)::int8 AS index_bytes,
+                    pg_total_relation_size($1::oid)::int8 AS total_bytes,
+                    CASE WHEN (s.heap_blks_hit + s.heap_blks_read) > 0
+                        THEN ((s.heap_blks_hit::float8 / (s.heap_blks_hit + s.heap_blks_read)::float8) * 100.0)::float4
+                        ELSE NULL
+                    END AS heap_cache_hit_pct,
+                    CASE WHEN (s.idx_blks_hit + s.idx_blks_read) > 0
+                        THEN ((s.idx_blks_hit::float8 / (s.idx_blks_hit + s.idx_blks_read)::float8) * 100.0)::float4
+                        ELSE NULL
+                    END AS idx_cache_hit_pct
+                FROM (SELECT $1::oid AS relid) r
+                LEFT JOIN pg_statio_user_tables s ON s.relid = r.relid",
+                &params,
+            )
+            .await
+            .ok()
+            .flatten();
+
+        let (heap_bytes, toast_bytes, index_bytes, total_bytes, heap_cache_hit_pct, idx_cache_hit_pct) =
+            if let Some(r) = size_row {
+                (
+                    r.try_get("heap_bytes").unwrap_or(0),
+                    r.try_get("toast_bytes").unwrap_or(0),
+                    r.try_get("index_bytes").unwrap_or(0),
+                    r.try_get("total_bytes").unwrap_or(0),
+                    r.try_get("heap_cache_hit_pct").ok(),
+                    r.try_get("idx_cache_hit_pct").ok(),
+                )
+            } else {
+                (0, 0, 0, 0, None, None)
+            };
+
         tx.commit().await.map_err(|e| e.to_string())?;
 
         let mut columns = Vec::with_capacity(column_rows.len());
@@ -1754,12 +2022,32 @@ async fn collect_table_detail(
         for row in &index_rows {
             indexes.push(db::table_detail_index_from_row(row).map_err(|e| e.to_string())?);
         }
-        Ok::<_, String>((columns, constraints, indexes))
+        Ok::<_, String>((
+            columns,
+            constraints,
+            indexes,
+            heap_bytes,
+            toast_bytes,
+            index_bytes,
+            total_bytes,
+            heap_cache_hit_pct,
+            idx_cache_hit_pct,
+        ))
     }
     .await;
 
     match fetch {
-        Ok((columns, constraints, indexes)) => TableDetail {
+        Ok((
+            columns,
+            constraints,
+            indexes,
+            heap_bytes,
+            toast_bytes,
+            index_bytes,
+            total_bytes,
+            heap_cache_hit_pct,
+            idx_cache_hit_pct,
+        )) => TableDetail {
             oid,
             schema,
             name,
@@ -1768,6 +2056,12 @@ async fn collect_table_detail(
             constraints,
             indexes,
             error: None,
+            heap_bytes,
+            toast_bytes,
+            index_bytes,
+            total_bytes,
+            heap_cache_hit_pct,
+            idx_cache_hit_pct,
         },
         Err(msg) => TableDetail {
             oid,
@@ -1778,6 +2072,12 @@ async fn collect_table_detail(
             constraints: Vec::new(),
             indexes: Vec::new(),
             error: Some(format!("table detail collection failed: {msg}")),
+            heap_bytes: 0,
+            toast_bytes: 0,
+            index_bytes: 0,
+            total_bytes: 0,
+            heap_cache_hit_pct: None,
+            idx_cache_hit_pct: None,
         },
     }
 }
@@ -1893,6 +2193,27 @@ async fn collect_wal_stats(client: &mut Client, sql: &str) -> Option<db::WalStat
     let row = tx.query_opt(sql, &[]).await.ok()??;
     let raw = db::wal_stats_from_row(&row).ok()?;
     // Best-effort: a failed commit just means no panel this tick.
+    tx.commit().await.ok()?;
+    Some(raw)
+}
+
+/// Best-effort SLRU cache stats (v0.19, `queries/slru_post_130000.sql`).
+async fn collect_slru_raw(client: &mut Client, sql: &str) -> Option<Vec<db::SlruRawRow>> {
+    let tx = begin_read(client).await.ok()?;
+    let rows = tx.query(sql, &[]).await.ok()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        out.push(db::slru_from_row(row).ok()?);
+    }
+    tx.commit().await.ok()?;
+    Some(out)
+}
+
+/// Best-effort database recovery conflicts (v0.19, `queries/replication_conflicts.sql`).
+async fn collect_conflicts_raw(client: &mut Client, sql: &str) -> Option<db::ConflictsRawRow> {
+    let tx = begin_read(client).await.ok()?;
+    let row = tx.query_opt(sql, &[]).await.ok()??;
+    let raw = db::conflicts_from_row(&row).ok()?;
     tx.commit().await.ok()?;
     Some(raw)
 }
@@ -2602,6 +2923,7 @@ mod tests {
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),
             stats_reset_epoch_secs: good.stats_reset_epoch_secs,
+            sequences: good.sequences.clone(),
             bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
         let mut fresh = good.tables.clone();
@@ -2613,6 +2935,7 @@ mod tests {
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),
             stats_reset_epoch_secs: good.stats_reset_epoch_secs,
+            sequences: good.sequences.clone(),
             bloat: None, // auto tick: no bloat this cycle
         });
         let after = schema.current.clone().expect("stored");
@@ -2639,6 +2962,7 @@ mod tests {
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),
             stats_reset_epoch_secs: good.stats_reset_epoch_secs,
+            sequences: good.sequences.clone(),
             bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
         assert!(schema.current.is_some(), "collected before the switch");
@@ -2668,6 +2992,7 @@ mod tests {
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),
             stats_reset_epoch_secs: good.stats_reset_epoch_secs,
+            sequences: good.sequences.clone(),
             bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
         let stored = schema.current.clone().expect("stored");
@@ -2697,6 +3022,7 @@ mod tests {
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),
             stats_reset_epoch_secs: good.stats_reset_epoch_secs,
+            sequences: good.sequences.clone(),
             bloat: Some(Ok((good.table_bloat.clone(), good.index_bloat.clone()))),
         });
 
@@ -2709,6 +3035,7 @@ mod tests {
             vacuum_tables: good.vacuum_tables.clone(),
             indexes: good.indexes.clone(),
             stats_reset_epoch_secs: good.stats_reset_epoch_secs,
+            sequences: good.sequences.clone(),
             bloat: Some(Err("canceling statement due to statement timeout".to_string())),
         });
 
@@ -3424,5 +3751,121 @@ mod tests {
         ] {
             assert!(sql.contains(&format!("AS {col}")), "missing column alias: {col}");
         }
+    }
+
+    #[test]
+    fn slru_stats_derivation_and_subtrans_warning() {
+        let now = Instant::now();
+        let raws0 = vec![
+            db::SlruRawRow {
+                name: "clog".to_string(),
+                blks_zeroed: 10,
+                blks_hit: 950,
+                blks_read: 50,
+                blks_written: 20,
+                blks_exists: 0,
+                flushes: 5,
+                truncates: 1,
+            },
+            db::SlruRawRow {
+                name: "subtrans".to_string(),
+                blks_zeroed: 0,
+                blks_hit: 80,
+                blks_read: 20,
+                blks_written: 10,
+                blks_exists: 0,
+                flushes: 2,
+                truncates: 0,
+            },
+        ];
+
+        let (stats0, delta0) = derive_slru_stats(&raws0, now, None);
+        assert_eq!(stats0.rows.len(), 2);
+        // Overall: (950 + 80) / (950 + 50 + 80 + 20) = 1030 / 1100 = 93.636%
+        assert!((stats0.overall_hit_ratio_pct.unwrap() - 93.636).abs() < 0.1);
+        // subtrans hit ratio = 80%, so subtrans_warning must be true (reads > 0)
+        assert!(stats0.subtrans_warning);
+
+        // Tick 2: 2 seconds later
+        let t1 = now + Duration::from_secs(2);
+        let raws1 = vec![
+            db::SlruRawRow {
+                name: "clog".to_string(),
+                blks_zeroed: 10,
+                blks_hit: 1050,
+                blks_read: 60,
+                blks_written: 24,
+                blks_exists: 0,
+                flushes: 7,
+                truncates: 1,
+            },
+            db::SlruRawRow {
+                name: "subtrans".to_string(),
+                blks_zeroed: 0,
+                blks_hit: 180,
+                blks_read: 20,
+                blks_written: 10,
+                blks_exists: 0,
+                flushes: 2,
+                truncates: 0,
+            },
+        ];
+
+        let (stats1, _delta1) = derive_slru_stats(&raws1, t1, Some(&delta0));
+        let clog = stats1.rows.iter().find(|r| r.name == "clog").unwrap();
+        // 10 reads over 2s = 5.0 reads/sec
+        assert!((clog.reads_per_sec.unwrap() - 5.0).abs() < 1e-6);
+        // 4 writes over 2s = 2.0 writes/sec
+        assert!((clog.writes_per_sec.unwrap() - 2.0).abs() < 1e-6);
+        // 2 flushes over 2s = 1.0 flushes/sec
+        assert!((clog.flushes_per_sec.unwrap() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn conflicts_stats_derivation_and_reset() {
+        let now = Instant::now();
+        let raw0 = db::ConflictsRawRow {
+            datid: 12345,
+            datname: "testdb".to_string(),
+            confl_tablespace: 1,
+            confl_lock: 5,
+            confl_snapshot: 10,
+            confl_bufferpin: 2,
+            confl_deadlock: 0,
+        };
+        let (conf0, delta0) = derive_conflicts(&raw0, now, None);
+        assert_eq!(conf0.confl_total, 18);
+        assert!(conf0.conflicts_per_sec.is_none());
+
+        let t1 = now + Duration::from_secs(2);
+        let raw1 = db::ConflictsRawRow {
+            datid: 12345,
+            datname: "testdb".to_string(),
+            confl_tablespace: 1,
+            confl_lock: 9,     // +4
+            confl_snapshot: 14, // +4
+            confl_bufferpin: 2,
+            confl_deadlock: 0,
+        };
+        let (conf1, delta1) = derive_conflicts(&raw1, t1, Some(&delta0));
+        assert_eq!(conf1.confl_total, 26);
+        // +8 total over 2s = 4.0/s
+        assert!((conf1.conflicts_per_sec.unwrap() - 4.0).abs() < 1e-6);
+        assert!((conf1.lock_conflicts_per_sec.unwrap() - 2.0).abs() < 1e-6);
+        assert!((conf1.snapshot_conflicts_per_sec.unwrap() - 2.0).abs() < 1e-6);
+
+        // Stats reset: counters drop
+        let t2 = t1 + Duration::from_secs(2);
+        let raw2 = db::ConflictsRawRow {
+            datid: 12345,
+            datname: "testdb".to_string(),
+            confl_tablespace: 0,
+            confl_lock: 0,
+            confl_snapshot: 0,
+            confl_bufferpin: 0,
+            confl_deadlock: 0,
+        };
+        let (conf2, _delta2) = derive_conflicts(&raw2, t2, Some(&delta1));
+        assert!(conf2.conflicts_per_sec.is_none());
     }
 }

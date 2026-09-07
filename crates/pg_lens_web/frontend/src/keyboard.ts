@@ -21,9 +21,12 @@ export function tabIdForKey(key: string): string | null {
 
 /** Each panel's filter input id, for `/` — panels with no filter (Replication,
  * Indexes) map to null and the key is a no-op there. */
+/** Each panel's filter input id, for `/` — panels with no filter (Replication)
+ * map to null and the key is a no-op there. */
 const PANEL_FILTER_INPUT_ID: Record<string, string> = {
   "activity-panel": "activity-filter",
   "schema-panel": "schema-filter",
+  "indexes-panel": "indexes-filter",
   "queries-panel": "statements-filter",
   "progress-panel": "progress-filter",
   "records-panel": "records-filter",

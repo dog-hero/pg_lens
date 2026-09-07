@@ -20,9 +20,10 @@ test("tabIdForKey is null for anything outside 1-8", () => {
   assert.equal(tabIdForKey("/"), null);
 });
 
-test("filterInputIdForPanel resolves the five filterable panels", () => {
+test("filterInputIdForPanel resolves the six filterable panels", () => {
   assert.equal(filterInputIdForPanel("activity-panel"), "activity-filter");
   assert.equal(filterInputIdForPanel("schema-panel"), "schema-filter");
+  assert.equal(filterInputIdForPanel("indexes-panel"), "indexes-filter");
   assert.equal(filterInputIdForPanel("queries-panel"), "statements-filter");
   assert.equal(filterInputIdForPanel("progress-panel"), "progress-filter");
   assert.equal(filterInputIdForPanel("records-panel"), "records-filter");
@@ -30,7 +31,6 @@ test("filterInputIdForPanel resolves the five filterable panels", () => {
 
 test("filterInputIdForPanel is null for panels without a filter", () => {
   assert.equal(filterInputIdForPanel("replication-panel"), null);
-  assert.equal(filterInputIdForPanel("indexes-panel"), null);
   assert.equal(filterInputIdForPanel("nonexistent"), null);
 });
 

@@ -63,11 +63,26 @@ export function partnerOf(finding: IndexFinding): string | null {
   return null;
 }
 
+/** Case-insensitive substring match over schema name, table name, index name,
+ * and the fully-qualified `schema.table` / `schema.table.name` (v0.19). */
+export function indexRowMatches(idx: IndexRow, needle: string): boolean {
+  const n = needle.toLowerCase();
+  return (
+    idx.name.toLowerCase().includes(n) ||
+    idx.table.toLowerCase().includes(n) ||
+    idx.schema.toLowerCase().includes(n) ||
+    `${idx.schema}.${idx.table}`.toLowerCase().includes(n) ||
+    `${idx.schema}.${idx.table}.${idx.name}`.toLowerCase().includes(n)
+  );
+}
+
 const COLUMNS = ["Index", "Table", "Size", "Scans", "Tup Read", "Flag"];
 
 export class IndexAdvisor {
   private snapshot: SchemaSnapshot | null = null;
   private database = "";
+  private filter = "";
+  private readonly filterInput: HTMLInputElement | null;
   /** `schema.table.name` keys of rows whose detail is open. */
   private readonly expanded = new Set<string>();
   private readonly thead: HTMLTableSectionElement;
@@ -81,15 +96,33 @@ export class IndexAdvisor {
     staleness: HTMLElement,
     warning: HTMLElement,
     placeholder: HTMLElement,
+    filterInput?: HTMLInputElement | null,
   ) {
     this.staleness = staleness;
     this.warning = warning;
     this.placeholder = placeholder;
+    this.filterInput = filterInput ?? null;
     this.thead = table.tHead ?? table.createTHead();
     this.tbody = table.tBodies[0] ?? table.createTBody();
     this.renderHead();
+    if (this.filterInput) {
+      this.filterInput.addEventListener("input", () => {
+        this.filter = this.filterInput?.value.trim().toLowerCase() ?? "";
+        this.renderStaleness();
+        this.renderBody();
+      });
+    }
     // Local 1s tick so "collected Xs ago" advances between SSE frames.
     setInterval(() => this.renderStaleness(), 1000);
+  }
+
+  setFilter(filter: string): void {
+    this.filter = filter.trim().toLowerCase();
+    if (this.filterInput) {
+      this.filterInput.value = filter;
+    }
+    this.renderStaleness();
+    this.renderBody();
   }
 
   update(schema: SchemaSnapshot | null, database: string): void {
@@ -130,8 +163,14 @@ export class IndexAdvisor {
       s.stats_reset_epoch_secs === null
         ? "stats reset: unknown"
         : `stats reset ${humanAgo(s.stats_reset_epoch_secs, now)}`;
+    const shown = this.filter
+      ? s.indexes.filter((idx) => indexRowMatches(idx, this.filter)).length
+      : s.indexes.length;
+    const countText = this.filter
+      ? `${shown}/${s.indexes.length} indexes`
+      : `${s.indexes.length} indexes`;
     this.staleness.textContent =
-      `db: ${this.database} · ${s.indexes.length} indexes · ` +
+      `db: ${this.database} · ${countText} · ` +
       `collected ${humanDuration(ageSecs)} ago · ${resetAge} · ` +
       `signal, not verdict — verify against the workload`;
   }
@@ -149,7 +188,10 @@ export class IndexAdvisor {
   /** Fixed severity-then-size order — no per-column sort in v1, matching
    * the TUI's `SchemaView::Indexes`. Ties break by schema/table/name. */
   private sorted(schema: SchemaSnapshot): IndexRow[] {
-    return [...schema.indexes].sort((a, b) => {
+    const visible = this.filter
+      ? schema.indexes.filter((idx) => indexRowMatches(idx, this.filter))
+      : schema.indexes;
+    return [...visible].sort((a, b) => {
       const rankDiff = severityRank(a.finding) - severityRank(b.finding);
       if (rankDiff !== 0) return rankDiff;
       const sizeDiff = b.index_bytes - a.index_bytes;

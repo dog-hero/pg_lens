@@ -129,9 +129,15 @@ fn draw_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: R
         Constraint::Length(FIXED_WIDTHS[4]),
     ];
 
+    let title = if !app.index_filter.is_empty() {
+        format!("Indexes [filter: \"{}\" \u{2014} \\ to clear]", app.index_filter)
+    } else {
+        "Indexes".to_string()
+    };
+
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title("Indexes"))
+        .block(Block::bordered().title(title))
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol("\u{25b6} ");
 
@@ -162,9 +168,14 @@ fn draw_footer(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
         ),
         None => "stats reset: unknown".to_string(),
     };
+    let return_hint = if app.previous_tab == Some(crate::app::Tab::SchemaLens) {
+        " \u{b7} Backspace/Esc: back to table"
+    } else {
+        ""
+    };
     let line = Line::from(format!(
         " db: {db} \u{b7} {n} indexes \u{b7} collected {staleness_secs}s ago \u{b7} \
-         {reset_age} \u{b7} signal, not verdict \u{2014} verify against the workload",
+         {reset_age} \u{b7} signal, not verdict \u{2014} verify against the workload{return_hint}",
         db = app.snapshot.vitals.database,
         n = schema.indexes.len(),
     ))

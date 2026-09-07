@@ -4,6 +4,27 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.19.0] — 2026-09-07 — "Observability Expansion: Sequences, SLRU, Standby Conflicts & Table Storage"
+
+### Added
+- **Sequence Exhaustion Alerts (`pg_sequences`)** — proactive monitoring of PostgreSQL sequences to prevent catastrophic integer overflow / sequence exhaustion incidents:
+  - Core domain model `SequenceRow`, `SequencesSnapshot`, `calculate_sequence_exhaustion`, and multi-tier severity (`bad` > 90%, `warn` > 75%, `calm`).
+  - TUI Schema Lens sub-view (accessible via `S`, with `T` returning to Tables view) displaying sequence name, schema, data type, current value, maximum value, percentage consumed, and remaining headroom with `/` search filtering.
+  - Web Lens dedicated Sequences panel with search filtering, remaining capacity formatting, and visual exhaustion warning badges.
+- **SLRU Cache Monitoring (`pg_stat_slru`, PG 13+)** — deep visibility into Simple LRU buffer subsystems (subtrans, multixact, clog, async, commit_ts):
+  - Tracks cumulative and per-second delta rates for page reads and writes, overall hit ratio percentage, and actively flags subtransaction cache thrashing (`subtrans_warning`).
+  - TUI Macro Lens SLRU panel displaying hit ratios and activity across active subsystems.
+  - Web Lens vitals card reporting SLRU efficiency and warning when subtransactions thrash the SLRU cache.
+- **Standby Recovery Conflicts (`pg_stat_database_conflicts`)** — telemetry for query cancellations and delays on streaming standby replicas:
+  - Tracks individual conflict classes (`tablespace`, `lock`, `snapshot`, `bufferpin`, `deadlock`) and aggregate conflict rate per second.
+  - TUI Replication Lens panel with real-time recovery conflict rate and category breakdown.
+  - Web Lens Replication Lens row alerting on active standby conflicts.
+- **Cross-Lens Navigation: Table to Index Jump (`i`)** — instant jump from Schema Lens directly into Index Lens filtered by the selected table (`i`), with `Backspace` or `Esc` returning to the originating table.
+- **Granular Table Storage & Cache Breakdown** — table statistics expanded to distinguish between main heap storage and TOAST storage (`heap_bytes` vs `toast_bytes`), along with separate buffer cache hit ratios for heap, index, and toast blocks (`heap_cache_hit_pct`, `idx_cache_hit_pct`, `toast_cache_hit_pct`) across TUI detail and Web Lens detail inspectors.
+
+### Changed
+- **Replication Lens Renaming** — renamed Tab 4 from "4 Replication" to "4 Replication Lens" in TUI and "Replication Lens" in Web Lens navigation, aligning naming across all nine lenses.
+
 ## [0.18.1] — 2026-09-07 — "Records Lens & Streaming Compression"
 
 ### Added

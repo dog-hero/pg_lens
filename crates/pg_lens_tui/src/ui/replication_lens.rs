@@ -13,13 +13,13 @@ use pg_lens_core::ReplicationInfo;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style, Stylize},
-    text::Line,
+    style::{Color, Modifier, Style, Stylize},
+    text::{Line, Span},
     widgets::{Block, Paragraph, Row, Table},
 };
 
 use crate::app::App;
-use crate::ui::format;
+use crate::ui::{format, style};
 use crate::ui::replication::{receiver_line, sender_line, slot_severity, wal_generation_line};
 
 /// Fixed widths of every column except the flexible Slot one, in order:
@@ -46,6 +46,73 @@ fn role_lines(repl: Option<&ReplicationInfo>) -> Vec<Line<'static>> {
     }
 }
 
+fn conflicts_line(conflicts: &pg_lens_core::DatabaseConflicts) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled("total: ", style::label_style()),
+        Span::styled(format::human_count(conflicts.confl_total), style::value_style()),
+    ];
+    if let Some(rate) = conflicts.conflicts_per_sec {
+        if rate > 0.0 {
+            spans.push(Span::styled(
+                format!(" ({rate:.1}/s)"),
+                Style::new().fg(Color::Red).bold(),
+            ));
+        } else {
+            spans.push(Span::styled(format!(" ({rate:.1}/s)"), style::label_style()));
+        }
+    }
+    spans.push(Span::styled(" \u{b7} lock: ", style::label_style()));
+    spans.push(Span::styled(
+        format::human_count(conflicts.confl_lock),
+        style::value_style(),
+    ));
+    if let Some(r) = conflicts.lock_conflicts_per_sec
+        && r > 0.0
+    {
+        spans.push(Span::styled(
+            format!(" ({r:.1}/s)"),
+            Style::new().fg(Color::Red),
+        ));
+    }
+    spans.push(Span::styled(" \u{b7} snapshot: ", style::label_style()));
+    spans.push(Span::styled(
+        format::human_count(conflicts.confl_snapshot),
+        style::value_style(),
+    ));
+    if let Some(r) = conflicts.snapshot_conflicts_per_sec
+        && r > 0.0
+    {
+        spans.push(Span::styled(
+            format!(" ({r:.1}/s)"),
+            Style::new().fg(Color::Red),
+        ));
+    }
+    spans.push(Span::styled(" \u{b7} deadlock: ", style::label_style()));
+    spans.push(Span::styled(
+        format::human_count(conflicts.confl_deadlock),
+        style::value_style(),
+    ));
+    if let Some(r) = conflicts.deadlock_conflicts_per_sec
+        && r > 0.0
+    {
+        spans.push(Span::styled(
+            format!(" ({r:.1}/s)"),
+            Style::new().fg(Color::Red).bold(),
+        ));
+    }
+    spans.push(Span::styled(" \u{b7} pin: ", style::label_style()));
+    spans.push(Span::styled(
+        format::human_count(conflicts.confl_bufferpin),
+        style::value_style(),
+    ));
+    spans.push(Span::styled(" \u{b7} tblspc: ", style::label_style()));
+    spans.push(Span::styled(
+        format::human_count(conflicts.confl_tablespace),
+        style::value_style(),
+    ));
+    Line::from(spans)
+}
+
 pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     let lines = role_lines(app.snapshot.replication.as_ref());
     // This view has room: no artificial cap on senders, but the role panel
@@ -56,9 +123,10 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     // once the fast tick has collected `pg_stat_wal` at least once this
     // session (absent, not an empty box, on PG < 14 or a restricted role).
     let wal_height = u16::from(app.snapshot.wal.is_some()) * 3;
-
-    let [wal_area, role_area, table_area, footer_area] = Layout::vertical([
+    let conflicts_height = u16::from(app.snapshot.conflicts.is_some()) * 3;
+    let [wal_area, conflicts_area, role_area, table_area, footer_area] = Layout::vertical([
         Constraint::Length(wal_height),
+        Constraint::Length(conflicts_height),
         Constraint::Length(role_height),
         Constraint::Min(0),
         Constraint::Length(1),
@@ -69,6 +137,14 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
         let panel =
             Paragraph::new(wal_generation_line(wal)).block(Block::bordered().title("WAL Generation"));
         frame.render_widget(panel, wal_area);
+    }
+
+    if let Some(conflicts) = app.snapshot.conflicts.as_ref() {
+        let panel = Paragraph::new(conflicts_line(conflicts)).block(
+            Block::bordered()
+                .title("Standby Recovery Conflicts (pg_stat_database_conflicts)"),
+        );
+        frame.render_widget(panel, conflicts_area);
     }
 
     let role_panel = Paragraph::new(lines).block(Block::bordered().title("Role"));
