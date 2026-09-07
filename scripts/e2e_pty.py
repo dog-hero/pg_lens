@@ -84,7 +84,7 @@ def main():
     master, slave = pty.openpty()
     import fcntl, struct, termios
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
-    env = dict(os.environ, TERM="xterm-256color")
+    env = dict(os.environ, TERM="xterm-256color", PG_LENS_STATE_DIR="/tmp/pg_lens_e2e_state")
     proc = subprocess.Popen([BIN, "--mock"], stdin=slave, stdout=slave,
                             stderr=slave, env=env, close_fds=True)
     os.close(slave)
@@ -189,6 +189,11 @@ def main():
         snaps["s6_after_B"] = screen.snapshot()
         m = stale_re.search(snaps["s6_after_B"])
         after = int(m.group(1)) if m else None
+        # R toggles incident recording mode: REC appears in header
+        send("R"); pump(0.6); snaps["rec_started"] = screen.snapshot()
+        send("R"); pump(0.6); snaps["rec_stopped"] = screen.snapshot()
+        # E exports snapshot bookmark
+        send("E"); pump(0.6); snaps["snapshot_exported"] = screen.snapshot()
     # U1: fourth Tab reaches the Index Lens (also in BASIC, proving the
     # 80x24 layout doesn't panic).
     send("\t"); pump(0.9); snaps["x1_index_lens"] = screen.snapshot()
@@ -219,9 +224,10 @@ def main():
         proc.kill()
         code = "KILLED (did not exit on q)"
 
+    os.makedirs("target/e2e_snaps", exist_ok=True)
     for name, snap in snaps.items():
         try:
-            with open(f"/tmp/pg_lens_{name}.txt", "w") as f:
+            with open(f"target/e2e_snaps/{name}.txt", "w") as f:
                 f.write(snap + "\n")
         except OSError:
             pass
@@ -340,6 +346,10 @@ def main():
               "despite 2.8s more elapsing)",
               before is not None and after is not None and after < before
               and after <= 3)
+        check("R toggled incident recording mode (REC indicator in header)",
+              "REC" in snaps["rec_started"] and "REC" not in snaps["rec_stopped"])
+        check("E exported snapshot bookmark (toast feedback)",
+              "snapshot" in snaps["snapshot_exported"].lower())
     # --- U1: Index Lens ------------------------------------------------------
     check("Tab x5 reached the Index Lens (its own tab now, Flag column)",
           "Indexes" in snaps["x1_index_lens"] and "Flag" in snaps["x1_index_lens"])

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { filterInputIdForPanel, isEditableTag, tabIdForKey } from "./keyboard.ts";
+import { filterInputIdForPanel, isEditableTag, isExportKey, isRecordKey, isSchemaRefreshKey, tabIdForKey } from "./keyboard.ts";
 
 test("tabIdForKey maps 1-7 to the seven nav tabs in order", () => {
   assert.equal(tabIdForKey("1"), "tab-activity");
@@ -38,4 +38,27 @@ test("isEditableTag flags text-consuming form elements only", () => {
   assert.equal(isEditableTag("SELECT"), true);
   assert.equal(isEditableTag("BUTTON"), false);
   assert.equal(isEditableTag("DIV"), false);
+});
+
+test("isRecordKey matches Shift+R ('R') and Ctrl+R", () => {
+  assert.equal(isRecordKey({ key: "R" }), true);
+  assert.equal(isRecordKey({ key: "r", ctrlKey: true }), true);
+  assert.equal(isRecordKey({ key: "R", ctrlKey: true }), true);
+  assert.equal(isRecordKey({ key: "r" }), false);
+  assert.equal(isRecordKey({ key: "R", altKey: true }), false);
+  assert.equal(isRecordKey({ key: "r", metaKey: true }), false);
+});
+
+test("isExportKey matches 'E' without modifiers", () => {
+  assert.equal(isExportKey({ key: "E" }), true);
+  assert.equal(isExportKey({ key: "e" }), false);
+  assert.equal(isExportKey({ key: "E", ctrlKey: true }), false);
+  assert.equal(isExportKey({ key: "E", altKey: true }), false);
+});
+
+test("isSchemaRefreshKey matches 'B' without modifiers", () => {
+  assert.equal(isSchemaRefreshKey({ key: "B" }), true);
+  assert.equal(isSchemaRefreshKey({ key: "b" }), false);
+  assert.equal(isSchemaRefreshKey({ key: "B", ctrlKey: true }), false);
+  assert.equal(isSchemaRefreshKey({ key: "B", altKey: true }), false);
 });

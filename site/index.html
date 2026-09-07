@@ -120,7 +120,7 @@
           <a href="https://ratatui.rs">ratatui</a>.
         </p>
         <div class="badges">
-          <a class="pill version-pill" href="docs/changelog.html">v0.17.3 — Changelog &rarr;</a>
+          <a class="pill version-pill" href="docs/changelog.html">v0.18.0 — Changelog &rarr;</a>
           <span class="pill">FSL-1.1-MIT licensed</span>
           <span class="pill">PostgreSQL 13+</span>
           <span class="pill">Rust 2024 edition</span>
@@ -142,7 +142,7 @@
           </a>
         </div>
         <figure class="shot">
-          <img src="assets/demo.gif" alt="pg_lens TUI recording: live activity, vitals and lenses in a terminal" width="1200" />
+          <img src="assets/demo.gif?v=0.18.0" alt="pg_lens TUI recording: live activity, vitals and lenses in a terminal" width="1200" />
           <figcaption>The TUI: instance vitals, per-backend activity, and eight lenses — all in a terminal.</figcaption>
         </figure>
       </div>
@@ -231,6 +231,7 @@
 
           <h2 style="margin-top: 2.5rem">And the things that catch incidents</h2>
           <ul class="checks">
+            <li><strong>Incident Flight Recorder &amp; Offline Replay</strong> — continuous background incident recording with <code>Shift+R</code> (<code>● REC</code>) writing structured <code>.jsonl</code> frames, snapshot bookmark export (<code>E</code>), and deterministic offline replay with <code>pg_lens replay &lt;file&gt;</code>.</li>
             <li><strong>Column Color System &amp; Duration Severity</strong> — intuitive terminal color system where state colors are distinct, and time-based severity coloring is applied strictly to duration so you spot stuck transactions instantly.</li>
             <li><strong>Copy to clipboard over SSH (OSC 52)</strong> — press <code>y</code> to copy the full SQL query, verbatim <code>CREATE INDEX</code> definition, or table schema directly to your system clipboard from anywhere — works seamlessly over remote SSH sessions and tmux without needing X11 or Wayland.</li>
             <li><strong>Instant <code>psql</code> shell (<code>!</code>)</strong> — drop straight into an interactive <code>psql</code> console on the exact same connection and credentials at the press of a single key.</li>
@@ -338,6 +339,12 @@ cargo build --release -p pg_lens_tui
               <h3>Terminal (Live TUI)</h3>
 <pre><code>pg_lens --dsn "host=localhost user=postgres dbname=postgres"
 pg_lens --mock            # instant mock sandbox, no DB needed</code></pre>
+            </article>
+            <article class="card">
+              <h3>Incident Replay (Offline)</h3>
+<pre><code>pg_lens replay ~/.local/state/pg_lens/recordings/rec-123.jsonl
+# Space: pause/play | &larr;/&rarr;: step | [/]: speed</code></pre>
+              <p>Replay recorded incidents frame-by-frame across all eight lenses.</p>
             </article>
             <article class="card">
               <h3>Web dashboard</h3>

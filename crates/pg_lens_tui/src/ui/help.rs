@@ -20,7 +20,7 @@ use ratatui::{
 use crate::app::App;
 use crate::ui::style;
 
-const WIDTH: u16 = 66;
+const WIDTH: u16 = 72;
 
 /// One row of the reference: `None` starts a dim section header, `Some`
 /// renders a `key   description` line (key in accent, description dim).
@@ -55,11 +55,15 @@ const ROWS: &[Row] = &[
     Row::Bind("y", "copy selection to clipboard, OSC 52 (Micro/Query/Index/Blocks/Progress)"),
     Row::Bind("?", "this help"),
     Row::Section("Data & refresh"),
-    Row::Bind("R", "force schema/query-stats refresh (any lens)"),
+    Row::Bind("B", "force schema/bloat refresh (any lens)"),
+    Row::Bind("Shift+R / Ctrl+R", "toggle incident recording (Flight Recorder)"),
+    Row::Bind("E", "export current snapshot to JSON bookmark"),
     Row::Bind("s", "cycle sort (Micro/Schema Tables/Query Lens)"),
     Row::Bind("+ / =", "increase poll interval"),
     Row::Bind("-", "decrease poll interval"),
-    Row::Bind("Space", "pause / resume the display"),
+    Row::Bind("Space", "pause / resume display (live) or playback (replay)"),
+    Row::Bind("\u{2190} / \u{2192}", "step backward / forward 1 frame (replay mode)"),
+    Row::Bind("[ / ]", "decrease / increase playback speed (replay mode)"),
     Row::Section("Admin (Micro / Blocks Lens, selected row)"),
     Row::Bind("c", "cancel the query (asks to confirm)"),
     Row::Bind("K", "terminate the backend (asks to confirm)"),

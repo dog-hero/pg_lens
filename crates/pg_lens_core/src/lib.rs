@@ -16,6 +16,7 @@ pub mod models;
 pub mod poller;
 pub mod prepared_xacts;
 pub mod queries;
+pub mod recording;
 pub mod remote_config;
 pub mod schema_growth;
 pub mod services;
@@ -52,6 +53,10 @@ pub use lock_capacity::{Severity as LockCapacitySeverity, severity as lock_capac
 pub use prepared_xacts::{
     OldestPreparedXact, Severity as PreparedXactSeverity, oldest_prepared_xact,
     severity as prepared_xact_severity,
+};
+pub use recording::{
+    RecordingReader, RecordingWriter, export_snapshot, export_snapshot_to, exports_dir,
+    recordings_dir, sanitize_target_name,
 };
 pub use services::PasswordSource;
 pub use waits::{WaitSummary, top_waits};

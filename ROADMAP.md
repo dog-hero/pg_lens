@@ -295,9 +295,7 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## v0.8+ candidates (from the discovery research — re-rank before starting)
 
-- [ ] **Snapshot export / incident bookmark** — write the current (paused)
-  `DbSnapshot` to `~/.local/state/pg_lens/exports/*.json` (TUI keybinding)
-  and a download button (web) for postmortems (in backlog).
+(All prioritized candidates shipped!)
 
 ## Backlog (deliberately deprioritized — owner decision 2026-07-15)
 
@@ -313,6 +311,11 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.18.0** — "Incident Recording & Flight Recorder":
+  - **Live Incident Recording**: continuous streaming capture of `DbSnapshot` frames to `.jsonl` (`~/.local/state/pg_lens/recordings/rec-<target>-<ts>.jsonl`) toggled via `Shift+R` (`R`) or `Ctrl+R` in TUI and `● REC` button in Web Lens, with live pulse timer and frame count; file path copied to clipboard via OSC 52 on stop.
+  - **Snapshot Bookmark Export**: point-in-time pretty JSON bookmark (`~/.local/state/pg_lens/exports/snapshot-<target>-<ts>.json`) via `E` key (TUI) and `Export` button (Web Lens), with file path copied to clipboard via OSC 52.
+  - **Offline Interactive Replay**: `pg_lens replay <file.jsonl> [--speed <f64>] [--loop-playback]` and `pg_lens view <file.json|file.jsonl>` for offline incident diagnosis without requiring a PostgreSQL connection (`Space` to play/pause, `←`/`→` to step frames, `[`/`]` to adjust speed 0.25x–16.0x, `E` to bookmark).
+  - **Bloat & Schema Refresh Rebind**: schema and bloat recollect rebound to `Shift+B` (`B`) across all lenses, statusbar, and help overlay, cleanly freeing `R` for Flight Recorder.
 - **v0.17.2** — "Column Colors & Duration Severity": replaced whole-row tinting in
   the Micro Lens activity table with a dedicated column-specific color system
   inspired by pg_activity (semantic colors per column); and restricted time-based

@@ -17,7 +17,7 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 and a [live interactive demo](https://dog-hero.github.io/pg_lens/demo/) of the
 Web Lens dashboard running on recorded data (no database required).
 
-![pg_lens TUI demo](docs/demo.gif)
+![pg_lens TUI demo](https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=0.18.0)
 
 <details>
 <summary>Web Lens dashboard (<code>pg_lens serve</code>)</summary>
@@ -87,7 +87,7 @@ Web Lens dashboard running on recorded data (no database required).
   on demand. Tables with locks held against them show an `L:N`/`L:N!`
   badge, and `x` jumps to the Query Lens filtered to statements mentioning
   the selected table. **Estimated bloat is on-demand** — its queries are
-  heavy, so they run only when you press `R` in the Schema Lens (never
+  heavy, so they run only when you press `B` (Shift+B) in the Schema Lens (never
   automatically, so connecting is instant). Bloat estimation uses queries
   adapted from
   [ioguix/pgsql-bloat-estimation](https://github.com/ioguix/pgsql-bloat-estimation)
@@ -105,7 +105,7 @@ Web Lens dashboard running on recorded data (no database required).
   or too old the lens shows a friendly explainer with the exact
   `CREATE EXTENSION` / `shared_preload_libraries` steps instead of an
   error. Scope is the **current database only** (the extension is
-  cluster-wide); collection shares the Schema Lens slow cadence, and `R`
+  cluster-wide); collection shares the Schema Lens slow cadence, and `B`
   force-refreshes both. `queryid` is exposed as a string in the JSON API —
   the raw int8 can exceed JavaScript's safe-integer range.
 - **I/O profile** (`pg_stat_io`, **PG 16+**) — cumulative reads/writes/hits
@@ -443,7 +443,10 @@ Open a new shell (or re-source your rc file) afterward.
 
 ```sh
 pg_lens --dsn "host=localhost port=5432 user=postgres password=..." [--interval 2]
-pg_lens --mock          # built-in mock data (dev/demo mode)
+pg_lens --mock                     # built-in mock data (dev/demo mode)
+pg_lens replay <recording.jsonl>   # offline interactive replay of an incident recording
+pg_lens view <snapshot.json|*.jsonl> # offline inspection of an exported bookmark or recording
+pg_lens serve                      # Web Lens HTTP / SSE dashboard
 ```
 
 | Flag / env | Meaning |
@@ -673,11 +676,15 @@ they ever drift, trust the overlay.
 | `!` | Open a `psql` shell on the same connection (any lens) — see [The `psql` shell](#the-psql-shell) |
 | `y` | Copy the current selection to the clipboard via OSC 52 — the Micro Lens's full selected query, the Query Lens's full statement, the Index Lens's `CREATE INDEX` definition, the Blocks Lens's selected query, the Progress Lens's selected command & relation, or the Schema Lens's selected table's qualified name (its column list instead, once the structure detail overlay is open); see [Copy to clipboard](#copy-to-clipboard) |
 | `?` | Keyboard help overlay — lists every binding |
-| `R` | Force schema/query-stats refresh (any lens) |
+| `B` / `Shift+B` | Force schema/query-stats & bloat refresh (any lens) |
+| `Shift+R` / `Ctrl+R` | Toggle incident recording mode (Flight Recorder to `.jsonl`) |
+| `E` | Export snapshot bookmark to JSON (`~/.local/state/pg_lens/exports/*.json`) |
 | `s` | Cycle sort column (Micro Lens / Schema Lens tables / Query Lens; inert on Index, Replication, and the Vacuum sub-view) |
 | `+` / `=` | Increase the poll interval |
 | `-` | Decrease the poll interval |
-| `Space` | Pause / resume the display refresh (freeze for point-in-time analysis) |
+| `Space` | Pause / resume the display refresh (freeze for point-in-time analysis; in replay mode: toggle playback) |
+| `←` / `→` | Replay mode: step frames backward / forward |
+| `[` / `]` | Replay mode: decrease / increase playback speed (0.25x – 16.0x) |
 | `c` | Cancel the selected session's query (`pg_cancel_backend`, Micro / Blocks / Progress Lens) — asks for confirmation first |
 | `K` | Terminate the selected session's backend (`pg_terminate_backend`, kills the connection, Micro / Blocks / Progress Lens) — asks for confirmation first (uppercase on purpose; `k` stays navigation) |
 | `y` / `n` | Confirm / abort — only while a confirm modal is open |
@@ -740,6 +747,42 @@ large query/definition gets truncated). Web Lens: use the copy button on the
 expanded query/statement detail (or an index definition in the Schema Lens
 structure detail) instead — the browser's own clipboard API there needs no
 such caveat.
+
+### Incident Recording & Snapshot Bookmarks (Flight Recorder)
+
+When diagnosing transient incidents, connection spikes, locking cascades, or slow queries, pg_lens includes a built-in **Flight Recorder** and **Snapshot Export** mechanism that requires zero database-side extensions or external agents.
+
+#### 1. Live Incident Recording (Flight Recorder)
+- Press **`Shift+R` (`R`)** or **`Ctrl+R`** (or click **● REC** in the Web Lens) to start recording.
+- While active, a bold red **`● REC [MM:SS | N frames]`** indicator pulses in the header.
+- On every poll tick, complete state frames (`DbSnapshot`) are appended to a `.jsonl` file in `$XDG_STATE_HOME/pg_lens/recordings/rec-<target>-<timestamp>.jsonl`.
+- Press **`Shift+R` / `Ctrl+R`** again to stop. The recording file path is automatically queued to your clipboard via OSC 52.
+
+#### 2. Snapshot Bookmark Export
+- Press **`E`** (or click **Export** in the Web Lens) at any moment (live or paused) to bookmark the current point-in-time state.
+- Formatted as pretty JSON in `$XDG_STATE_HOME/pg_lens/exports/snapshot-<target>-<timestamp>.json`.
+- The export file path is automatically queued to your clipboard via OSC 52.
+
+#### 3. Offline Replay & Inspection (`replay` / `view`)
+You can inspect or replay recordings completely offline on any machine, without a PostgreSQL connection:
+
+```sh
+# Interactive time-travel playback of an incident recording
+pg_lens replay ~/.local/state/pg_lens/recordings/rec-prod-db-20260906-220000.jsonl
+
+# Adjust playback speed (e.g. 2x fast-forward) and loop indefinitely
+pg_lens replay ./rec-incident.jsonl --speed 2.0 --loop-playback
+
+# Open a snapshot bookmark or recording file for static inspection
+pg_lens view ~/.local/state/pg_lens/exports/snapshot-prod-db-20260906-220500.json
+```
+
+**Replay Controls**:
+- `Space`: Pause / resume continuous playback.
+- `←` / `→`: Step frames backward and forward one by one.
+- `[` / `]`: Half / double playback speed (from 0.25x up to 16.0x).
+- `E`: Export a point-in-time JSON bookmark of the currently displayed frame.
+- All lenses (`1`–`8`), detail inspectors (`Enter`), and table scrolling (`j`/`k`, `PgUp`/`PgDn`) remain fully interactive across all frames.
 
 ### Read-only mode
 
@@ -957,8 +1000,10 @@ v0.17 "Blocks & Locks Lens" (dedicated Blocks & Locks lens in position 3
 between Micro Lens and Replication with wait-for tree and active locks table,
 in-flight DDL & maintenance progress, and SSL/TLS connection security indicators),
 v0.17.1 "Progress Lens" (dedicated Progress Lens for live maintenance & DDL
-tracking, ASCII progress gauges, and tab consistency), and v0.17.2 "Column Colors &
-Duration Severity" (pg_activity-style column color system, time coloring strictly on Duration).
+tracking, ASCII progress gauges, and tab consistency), v0.17.2 "Column Colors &
+Duration Severity" (pg_activity-style column color system, time coloring strictly on Duration),
+v0.17.3 "FSL-1.1-MIT License & Governance" (adoption of Fair Source licensing, CLA, automated license compliance), and
+v0.18.0 "Incident Recording & Flight Recorder" (continuous JSONL flight recording, offline replay CLI, and snapshot bookmark export).
 See [ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Changelog

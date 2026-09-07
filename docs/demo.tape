@@ -97,6 +97,16 @@ Sleep 1.5s
 Escape
 Sleep 500ms
 
+# Incident Recording Mode: Shift+R (R) activates recording (REC indicator in header)
+Type "R"
+Sleep 2.5s
+# Export snapshot bookmark (E)
+Type "E"
+Sleep 2s
+# Stop recording (R)
+Type "R"
+Sleep 1s
+
 # Help overlay (?): the full key map, then close
 Type "?"
 Sleep 3s

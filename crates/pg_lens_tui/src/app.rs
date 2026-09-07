@@ -3,6 +3,7 @@
 //! `App` is pure state; [`update`] is the only place that mutates it. The
 //! `Action` enum is internal to this crate — `pg_lens_core` never sees it.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,25 @@ use pg_lens_core::{
     AdminCommand, AdminKind, AdminOutcome, DbSnapshot, PollerStatus, TableDetailRequest,
 };
 use ratatui::widgets::TableState;
+
+/// Active in-flight incident recording session (Flight Recorder).
+#[derive(Debug)]
+pub struct ActiveRecording {
+    pub writer: pg_lens_core::recording::RecordingWriter,
+    pub started_at: Instant,
+}
+
+/// Active in-memory state of an offline recording / snapshot replay.
+#[derive(Clone, Debug)]
+pub struct ReplayState {
+    pub frames: Vec<Arc<DbSnapshot>>,
+    pub current_idx: usize,
+    pub is_paused: bool,
+    pub speed: f64,
+    pub loop_playback: bool,
+    pub source_path: PathBuf,
+    pub last_frame_time: Instant,
+}
 
 /// Default poll interval; `+`/`-` move it in [`REFRESH_STEP`] steps.
 pub const DEFAULT_REFRESH: Duration = Duration::from_secs(2);
@@ -742,6 +762,9 @@ pub struct App {
     /// and `main.rs` should not need to reach back into `App` beyond taking
     /// this one field.
     pub clipboard_request: Option<String>,
+    pub recording: Option<ActiveRecording>,
+    pub replay_state: Option<ReplayState>,
+    pub state_dir: Option<PathBuf>,
     pub should_quit: bool,
 }
 
@@ -812,6 +835,9 @@ impl App {
             help_open: false,
             launch_psql_requested: false,
             clipboard_request: None,
+            recording: None,
+            replay_state: None,
+            state_dir: None,
             should_quit: false,
         };
         resort(&mut app);
@@ -906,6 +932,93 @@ impl App {
         let items = self.snapshot.unified_progress();
         items.get(unified_idx).cloned()
     }
+
+    /// Toggles incident recording mode (Flight Recorder).
+    pub fn toggle_recording(&mut self) {
+        if self.replay_state.is_some() {
+            self.admin_feedback = Some(AdminFeedback {
+                text: "recording is disabled during replay".to_string(),
+                error: false,
+                expires_at_tick: self.tick_count + ADMIN_FEEDBACK_TICKS,
+            });
+            return;
+        }
+        if let Some(rec) = self.recording.take() {
+            match rec.writer.finish() {
+                Ok((path, count, bytes)) => {
+                    let path_str = path.display().to_string();
+                    self.clipboard_request = Some(path_str.clone());
+                    let kb = bytes as f64 / 1024.0;
+                    self.admin_feedback = Some(AdminFeedback {
+                        text: format!("Recording saved ({count} frames, {kb:.1} KB): {path_str}"),
+                        error: false,
+                        expires_at_tick: self.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                    });
+                }
+                Err(e) => {
+                    self.admin_feedback = Some(AdminFeedback {
+                        text: format!("Recording save failed: {e}"),
+                        error: true,
+                        expires_at_tick: self.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                    });
+                }
+            }
+        } else {
+            let writer_res = if let Some(ref dir) = self.state_dir {
+                pg_lens_core::recording::RecordingWriter::create_in(&self.host, &dir.join("recordings"))
+            } else {
+                pg_lens_core::recording::RecordingWriter::new(&self.host)
+            };
+            match writer_res {
+                Ok(mut writer) => {
+                    let _ = writer.append(&self.snapshot);
+                    self.recording = Some(ActiveRecording {
+                        writer,
+                        started_at: Instant::now(),
+                    });
+                    self.admin_feedback = Some(AdminFeedback {
+                        text: "\u{25cf} Recording started (Shift+R to stop)".to_string(),
+                        error: false,
+                        expires_at_tick: self.tick_count + ADMIN_FEEDBACK_TICKS,
+                    });
+                }
+                Err(e) => {
+                    self.admin_feedback = Some(AdminFeedback {
+                        text: format!("Recording failed to start: {e}"),
+                        error: true,
+                        expires_at_tick: self.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Exports current snapshot bookmark to pretty JSON in state directory.
+    pub fn export_snapshot(&mut self) {
+        let export_res = if let Some(ref dir) = self.state_dir {
+            pg_lens_core::recording::export_snapshot_to(&self.snapshot, &self.host, &dir.join("exports"))
+        } else {
+            pg_lens_core::recording::export_snapshot(&self.snapshot, &self.host)
+        };
+        match export_res {
+            Ok(path) => {
+                let path_str = path.display().to_string();
+                self.clipboard_request = Some(path_str.clone());
+                self.admin_feedback = Some(AdminFeedback {
+                    text: format!("Exported snapshot to {path_str}"),
+                    error: false,
+                    expires_at_tick: self.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                });
+            }
+            Err(e) => {
+                self.admin_feedback = Some(AdminFeedback {
+                    text: format!("Snapshot export failed: {e}"),
+                    error: true,
+                    expires_at_tick: self.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                });
+            }
+        }
+    }
 }
 
 /// v0.16 (`y`): resolves the text `y` should copy for whatever the active
@@ -983,6 +1096,9 @@ pub fn update(app: &mut App, action: Action) {
     match action {
         Action::Key(key) => handle_key(app, key),
         Action::Snapshot(snapshot) => {
+            if let Some(ref mut rec) = app.recording {
+                let _ = rec.writer.append(&snapshot);
+            }
             if app.paused {
                 // Frozen: park the newest arrival (last-wins) instead of
                 // applying it. `last_snapshot_at` stays put on purpose —
@@ -1004,8 +1120,17 @@ pub fn update(app: &mut App, action: Action) {
             });
         }
         Action::ClipboardCopied { text } => {
+            let message = if let Some(existing) = app.admin_feedback.take() {
+                if existing.text.contains("Exported snapshot") || existing.text.contains("Recording saved") {
+                    format!("{} ({})", existing.text, text)
+                } else {
+                    text
+                }
+            } else {
+                text
+            };
             app.admin_feedback = Some(AdminFeedback {
-                text,
+                text: message,
                 error: false,
                 expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
             });
@@ -1020,8 +1145,35 @@ pub fn update(app: &mut App, action: Action) {
             {
                 app.admin_feedback = None;
             }
+            let mut snap_to_apply = None;
+            if let Some(ref mut replay) = app.replay_state {
+                if !replay.is_paused && replay.frames.len() > 1 {
+                    let step_millis = (1000.0 / replay.speed.max(0.1)) as u128;
+                    if replay.last_frame_time.elapsed().as_millis() >= step_millis {
+                        replay.last_frame_time = Instant::now();
+                        let next_idx = replay.current_idx + 1;
+                        if next_idx < replay.frames.len() {
+                            replay.current_idx = next_idx;
+                            snap_to_apply = Some(replay.frames[replay.current_idx].clone());
+                        } else if replay.loop_playback {
+                            replay.current_idx = 0;
+                            snap_to_apply = Some(replay.frames[0].clone());
+                        } else {
+                            replay.is_paused = true;
+                        }
+                    }
+                }
+            }
+            if let Some(snap) = snap_to_apply {
+                apply_snapshot(app, snap);
+            }
         }
-        Action::Quit => app.should_quit = true,
+        Action::Quit => {
+            if let Some(rec) = app.recording.take() {
+                let _ = rec.writer.finish();
+            }
+            app.should_quit = true;
+        }
     }
 }
 
@@ -1029,7 +1181,7 @@ pub fn update(app: &mut App, action: Action) {
 /// admin-result feedback, re-sorts and selection clamps. Shared by the
 /// live path (`Action::Snapshot` while not paused) and [`resume`] (which
 /// applies the parked `pending_snapshot`).
-fn apply_snapshot(app: &mut App, snapshot: Arc<DbSnapshot>) {
+pub fn apply_snapshot(app: &mut App, snapshot: Arc<DbSnapshot>) {
     app.snapshot = snapshot;
     app.last_snapshot_at = Some(Instant::now());
     // First Ok snapshot ever: leave the splash for the dashboard,
@@ -1462,7 +1614,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // lens, like `d`; every overlay above already returned before this
         // match, so no overlay is ever left dangling underneath psql.
         KeyCode::Char('!') => {
-            if app.is_mock {
+            if app.replay_state.is_some() {
+                app.admin_feedback = Some(AdminFeedback {
+                    text: "replay mode: no live connection for psql".to_string(),
+                    error: false,
+                    expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+                });
+            } else if app.is_mock {
                 app.admin_feedback = Some(AdminFeedback {
                     text: "mock mode: no real connection for psql".to_string(),
                     error: false,
@@ -1551,19 +1709,96 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // silently swallow the first snapshot with no indicator on screen.
         // Picker/confirm-modal inertness falls out of their own keymaps
         // (both return before this match).
+        // Space: pause/resume the display refresh (UI-side freeze; the
+        // poller keeps its cadence — see `App::paused`). In replay mode:
+        // toggles playback play/pause.
         KeyCode::Char(' ') => {
-            if !app.show_splash() {
+            let mut snap_to_apply = None;
+            if let Some(ref mut replay) = app.replay_state {
+                if replay.is_paused {
+                    // If we're at the very end of the recording and user hits Play (Space),
+                    // rewind back to frame 0 and restart playback from the beginning.
+                    if replay.current_idx + 1 >= replay.frames.len() && !replay.frames.is_empty() {
+                        replay.current_idx = 0;
+                        snap_to_apply = Some(replay.frames[0].clone());
+                    }
+                    replay.is_paused = false;
+                    replay.last_frame_time = Instant::now();
+                } else {
+                    replay.is_paused = true;
+                }
+            } else if !app.show_splash() {
                 toggle_pause(app);
             }
+            if let Some(snap) = snap_to_apply {
+                apply_snapshot(app, snap);
+            }
         }
-        // `R` (uppercase, deliberately distinct from the lowercase keys):
-        // request an immediate schema re-collection. Allowed from any lens —
-        // it is harmless, and the fresh data is ready when the user tabs in.
-        // While paused the signal still goes out (the poller recollects as
-        // usual) but the result stays parked in `pending_snapshot` until
-        // resume — a deliberate, documented freeze-wins choice.
+        // `B` (uppercase, Shift+B): request an immediate schema & bloat re-collection.
+        // Allowed from any lens — fresh data is ready when the user tabs in.
+        KeyCode::Char('B') => {
+            if app.replay_state.is_none() {
+                app.schema_refresh_requests += 1;
+            }
+        }
+        // `Shift+R` (`R`) or `Ctrl+R`: toggle incident recording mode (Flight Recorder).
         KeyCode::Char('R') => {
-            app.schema_refresh_requests += 1;
+            app.toggle_recording();
+        }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.toggle_recording();
+        }
+        // `E`: export point-in-time snapshot to JSON bookmark.
+        KeyCode::Char('E') => {
+            app.export_snapshot();
+        }
+        // Replay stepping: Left/Right arrows step frame backward/forward
+        KeyCode::Left => {
+            let mut snap_to_apply = None;
+            if let Some(ref mut replay) = app.replay_state {
+                replay.is_paused = true;
+                if replay.current_idx > 0 {
+                    replay.current_idx -= 1;
+                    snap_to_apply = Some(replay.frames[replay.current_idx].clone());
+                }
+            }
+            if let Some(snap) = snap_to_apply {
+                apply_snapshot(app, snap);
+            }
+        }
+        KeyCode::Right => {
+            let mut snap_to_apply = None;
+            if let Some(ref mut replay) = app.replay_state {
+                replay.is_paused = true;
+                if replay.current_idx + 1 < replay.frames.len() {
+                    replay.current_idx += 1;
+                    snap_to_apply = Some(replay.frames[replay.current_idx].clone());
+                }
+            }
+            if let Some(snap) = snap_to_apply {
+                apply_snapshot(app, snap);
+            }
+        }
+        // Replay speed adjustments: [ slows down, ] speeds up
+        KeyCode::Char('[') => {
+            if let Some(ref mut replay) = app.replay_state {
+                replay.speed = (replay.speed / 2.0).max(0.25);
+                app.admin_feedback = Some(AdminFeedback {
+                    text: format!("Playback speed: {:.2}x", replay.speed),
+                    error: false,
+                    expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+                });
+            }
+        }
+        KeyCode::Char(']') => {
+            if let Some(ref mut replay) = app.replay_state {
+                replay.speed = (replay.speed * 2.0).min(16.0);
+                app.admin_feedback = Some(AdminFeedback {
+                    text: format!("Playback speed: {:.2}x", replay.speed),
+                    error: false,
+                    expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+                });
+            }
         }
         KeyCode::Char('+') | KeyCode::Char('=') => {
             app.refresh_interval = (app.refresh_interval + REFRESH_STEP).min(REFRESH_MAX);
@@ -1588,6 +1823,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 /// keys in a view module would not be enforcement (the model is the only
 /// place state mutates); this early return is it.
 fn open_confirm(app: &mut App, terminate: bool) {
+    if app.replay_state.is_some() {
+        return;
+    }
     let (pid, username, database) = if app.active_tab == Tab::MicroLens && app.micro_view == MicroView::Activity {
         let Some(row) = app.selected_row() else { return; };
         (row.pid, row.username.clone(), row.database.clone())
@@ -1674,6 +1912,14 @@ fn handle_confirm_key(app: &mut App, key: KeyEvent) {
 /// nothing to pick from yet; the key simply does nothing rather than open an
 /// empty, useless overlay.
 fn open_db_picker(app: &mut App) {
+    if app.replay_state.is_some() {
+        app.admin_feedback = Some(AdminFeedback {
+            text: "replay mode: cannot switch database".to_string(),
+            error: false,
+            expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+        });
+        return;
+    }
     let Some(databases) = app.snapshot.databases.clone() else {
         return;
     };
@@ -3876,24 +4122,148 @@ mod tests {
     }
 
     #[test]
-    fn uppercase_r_requests_schema_recollection_from_any_lens() {
+    fn uppercase_b_requests_schema_recollection_from_any_lens() {
         let mut app = App::new();
         assert_eq!(app.schema_refresh_requests, 0);
 
-        // Macro Lens: R counts (documented decision: works from any lens).
-        update(&mut app, press(KeyCode::Char('R')));
+        // Macro Lens: B counts (documented decision: works from any lens).
+        update(&mut app, press(KeyCode::Char('B')));
         assert_eq!(app.schema_refresh_requests, 1);
 
-        // Schema Lens: R keeps counting; lowercase r does nothing.
+        // Schema Lens: B keeps counting; lowercase b jumps to BlocksLens.
         for _ in 0..4 {
             update(&mut app, press(KeyCode::Tab));
         }
         assert_eq!(app.active_tab, Tab::SchemaLens);
-        update(&mut app, press(KeyCode::Char('R')));
-        assert_eq!(app.schema_refresh_requests, 2);
-        update(&mut app, press(KeyCode::Char('r')));
+        update(&mut app, press(KeyCode::Char('B')));
         assert_eq!(app.schema_refresh_requests, 2);
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn shift_r_and_ctrl_r_toggle_recording() {
+        let mut app = App::new();
+        let test_dir = std::env::current_dir().unwrap().join("target/test_state_rec");
+        app.state_dir = Some(test_dir);
+        assert!(app.recording.is_none());
+
+        // Shift+R starts recording
+        update(&mut app, press(KeyCode::Char('R')));
+        assert!(app.recording.is_some());
+        assert_eq!(app.recording.as_ref().unwrap().writer.frame_count(), 1);
+
+        // Incoming snapshot appends to recording
+        let next_snap = Arc::new(DbSnapshot::mock());
+        update(&mut app, Action::Snapshot(next_snap));
+        assert_eq!(app.recording.as_ref().unwrap().writer.frame_count(), 2);
+
+        // Shift+R stops recording and queues path to clipboard
+        update(&mut app, press(KeyCode::Char('R')));
+        assert!(app.recording.is_none());
+        assert!(app.clipboard_request.is_some());
+
+        // Ctrl+R starts recording again
+        update(
+            &mut app,
+            Action::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+        );
+        assert!(app.recording.is_some());
+        // Clean up: stop recording
+        update(&mut app, press(KeyCode::Char('R')));
+        assert!(app.recording.is_none());
+    }
+
+    #[test]
+    fn e_exports_snapshot_bookmark() {
+        let mut app = App::new();
+        let test_dir = std::env::current_dir().unwrap().join("target/test_state_exp");
+        app.state_dir = Some(test_dir);
+        assert!(app.clipboard_request.is_none());
+
+        update(&mut app, press(KeyCode::Char('E')));
+        assert!(app.clipboard_request.is_some());
+        let path = app.clipboard_request.unwrap();
+        assert!(path.ends_with(".json"));
+        assert!(path.contains("snapshot-"));
+    }
+
+    #[test]
+    fn replay_mode_navigation_and_playback_controls() {
+        let mut app = App::new();
+        let frame1 = Arc::new(DbSnapshot::mock());
+        let frame2 = Arc::new(DbSnapshot::mock());
+        let frame3 = Arc::new(DbSnapshot::mock());
+        let frames = vec![frame1, frame2, frame3];
+
+        app.replay_state = Some(ReplayState {
+            frames: frames.clone(),
+            current_idx: 0,
+            is_paused: false,
+            speed: 1.0,
+            loop_playback: false,
+            source_path: PathBuf::from("test.jsonl"),
+            last_frame_time: Instant::now(),
+        });
+
+        // Space pauses playback
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert!(app.replay_state.as_ref().unwrap().is_paused);
+
+        // Right arrow steps forward
+        update(&mut app, press(KeyCode::Right));
+        assert_eq!(app.replay_state.as_ref().unwrap().current_idx, 1);
+
+        // Right arrow steps forward again
+        update(&mut app, press(KeyCode::Right));
+        assert_eq!(app.replay_state.as_ref().unwrap().current_idx, 2);
+
+        // Right arrow at end stays at end
+        update(&mut app, press(KeyCode::Right));
+        assert_eq!(app.replay_state.as_ref().unwrap().current_idx, 2);
+
+        // Left arrow steps backward
+        update(&mut app, press(KeyCode::Left));
+        assert_eq!(app.replay_state.as_ref().unwrap().current_idx, 1);
+
+        // Left arrow steps backward to start
+        update(&mut app, press(KeyCode::Left));
+        assert_eq!(app.replay_state.as_ref().unwrap().current_idx, 0);
+
+        // Left arrow at start stays at 0
+        update(&mut app, press(KeyCode::Left));
+        assert_eq!(app.replay_state.as_ref().unwrap().current_idx, 0);
+
+        // Advance to end (frame 2 of 3)
+        update(&mut app, press(KeyCode::Right));
+        update(&mut app, press(KeyCode::Right));
+        assert_eq!(app.replay_state.as_ref().unwrap().current_idx, 2);
+        assert!(app.replay_state.as_ref().unwrap().is_paused);
+
+        // Space at the end restarts from frame 0 and unpauses
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert_eq!(app.replay_state.as_ref().unwrap().current_idx, 0);
+        assert!(!app.replay_state.as_ref().unwrap().is_paused);
+
+        // Space in the middle pauses without rewinding
+        update(&mut app, press(KeyCode::Char(' ')));
+        assert!(app.replay_state.as_ref().unwrap().is_paused);
+        assert_eq!(app.replay_state.as_ref().unwrap().current_idx, 0);
+
+        // ] increases speed
+        update(&mut app, press(KeyCode::Char(']')));
+        assert!((app.replay_state.as_ref().unwrap().speed - 2.0).abs() < f64::EPSILON);
+
+        // [ decreases speed
+        update(&mut app, press(KeyCode::Char('[')));
+        assert!((app.replay_state.as_ref().unwrap().speed - 1.0).abs() < f64::EPSILON);
+
+        // In replay mode, B does not bump schema_refresh_requests
+        update(&mut app, press(KeyCode::Char('B')));
+        assert_eq!(app.schema_refresh_requests, 0);
+
+        // In replay mode, recording is disabled
+        update(&mut app, press(KeyCode::Char('R')));
+        assert!(app.recording.is_none());
     }
 
     #[test]
@@ -4182,7 +4552,9 @@ mod tests {
         for code in [
             KeyCode::Tab,
             KeyCode::Char('s'),
+            KeyCode::Char('B'),
             KeyCode::Char('R'),
+            KeyCode::Char('E'),
             KeyCode::Char('+'),
             KeyCode::Char('-'),
         ] {
@@ -4825,10 +5197,10 @@ mod tests {
     }
 
     #[test]
-    fn r_still_counts_requests_while_paused() {
+    fn b_still_counts_requests_while_paused() {
         let mut app = App::new();
         update(&mut app, press(KeyCode::Char(' ')));
-        update(&mut app, press(KeyCode::Char('R')));
+        update(&mut app, press(KeyCode::Char('B')));
         assert_eq!(app.schema_refresh_requests, 1, "signal still goes out");
         assert!(app.paused, "data stays frozen regardless");
     }
