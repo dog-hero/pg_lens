@@ -3,7 +3,7 @@
 > **A blazing-fast, modern TUI for PostgreSQL observability.**
 > *A microscopic view into your PostgreSQL performance.*
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: FSL-1.1-MIT](https://img.shields.io/badge/License-FSL--1.1--MIT-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-2024_edition-orange?logo=rust)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-13%2B-336791?logo=postgresql&logoColor=white)
 
@@ -970,15 +970,20 @@ Release history lives in [CHANGELOG.md](CHANGELOG.md); the forward plan in
 
 Issues and pull requests are welcome. Before submitting:
 
-1. `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` must pass.
-2. Keep `pg_lens_core` free of any UI dependency — it must compile for
+1. Read and agree to the [Contributor License Agreement (CLA)](CLA.md). All pull requests require agreement to the CLA.
+2. `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` must pass.
+3. Keep `pg_lens_core` free of any UI dependency — it must compile for
    headless consumers.
-3. New SQL must be version-gated (see `pg_lens_core/queries/`); minimum
+4. New SQL must be version-gated (see `pg_lens_core/queries/`); minimum
    supported PostgreSQL is 13.
 
 ## License
 
-[MIT](LICENSE)
+`pg_lens` is licensed under the [Functional Source License, Version 1.1, MIT Future License (FSL-1.1-MIT)](LICENSE).
+
+- **Fair Source:** Free to use, run, inspect, and modify for any internal, educational, or non-competing purpose.
+- **Commercial Protection:** You may not offer the software as a competing commercial product or service.
+- **Automatic Conversion:** Each release automatically converts to the standard permissive **[MIT License](LICENSE)** on the second anniversary of its release date.
 
 ## Acknowledgements
 

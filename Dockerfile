@@ -30,7 +30,7 @@ RUN cargo build --release -p pg_lens_tui \
 FROM alpine:3.24
 LABEL org.opencontainers.image.source="https://github.com/dog-hero/pg_lens" \
       org.opencontainers.image.description="A blazing-fast TUI and web dashboard for live PostgreSQL observability" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="FSL-1.1-MIT"
 COPY --from=builder /pg_lens /usr/local/bin/pg_lens
 # nobody:nobody — the server never needs to write to the filesystem.
 USER 65534:65534

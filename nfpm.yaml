@@ -27,7 +27,7 @@ description: |-
   embedded web dashboard (pg_lens serve). Supports PostgreSQL 13+.
 vendor: Leonardo Benedet
 homepage: https://github.com/dog-hero/pg_lens
-license: MIT
+license: FSL-1.1-MIT
 contents:
   - src: pkg/${NFPM_ARCH}/pg_lens
     dst: /usr/bin/pg_lens

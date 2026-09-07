@@ -105,7 +105,7 @@ ${body}
     </main>
     <footer>
       <div class="wrap">
-        <span>MIT licensed · PostgreSQL 13+</span>
+        <span>FSL-1.1-MIT licensed · PostgreSQL 13+</span>
         <nav>
           <a href="${up}">Home</a>
           <a href="${REPO_URL}#readme">Full README</a>

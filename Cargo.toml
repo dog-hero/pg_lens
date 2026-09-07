@@ -6,7 +6,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.17.2"
 edition = "2024"
-license = "MIT"
+license = "FSL-1.1-MIT"
 repository = "https://github.com/dog-hero/pg_lens"
 authors = ["Leonardo Benedet"]
 rust-version = "1.87"
