@@ -202,6 +202,21 @@ pre code {
   font-size: 0.8rem;
 }
 
+a.pill {
+  text-decoration: none;
+  transition: border-color 0.15s, color 0.15s, transform 0.15s;
+}
+a.pill:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.pill.version-pill {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  font-weight: 600;
+}
+
 .cta-row {
   display: flex;
   flex-wrap: wrap;

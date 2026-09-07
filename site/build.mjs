@@ -89,6 +89,7 @@ function page({ title, body, depth }) {
         <nav>
           <a href="${up}#features">Features</a>
           <a href="${up}#install">Install</a>
+          <a href="${up}docs/changelog.html">Changelog</a>
           <a href="${up}demo/">Live demo</a>
           <a href="${REPO_URL}">GitHub</a>
           <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle light / dark theme" title="Toggle light / dark theme">
@@ -108,6 +109,7 @@ ${body}
         <span>FSL-1.1-MIT licensed · PostgreSQL 13+</span>
         <nav>
           <a href="${up}">Home</a>
+          <a href="${up}docs/changelog.html">Changelog</a>
           <a href="${REPO_URL}#readme">Full README</a>
           <a href="${REPO_URL}">GitHub</a>
         </nav>

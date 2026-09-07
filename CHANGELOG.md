@@ -4,6 +4,18 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.17.3] — 2026-09-07 — "FSL-1.1-MIT & Governance"
+
+### Added
+- **Contributor License Agreement (`CLA.md`)** — formal Contributor License Agreement based on the standard Apache-style CLA, establishing contribution terms and IP clarity for future commercial and open-source releases.
+- **Third-Party License Audit (`pg_lens licenses`)** — CLI subcommand and script generator (`scripts/generate_licenses.py`) generating complete open-source acknowledgements and third-party notices (`THIRD_PARTY_LICENSES.md`).
+- **CI Automated License Enforcement** — integrated `cargo-deny check licenses` into `.github/workflows/ci.yml` and `deny.toml` ensuring strict compliance with permissive and fair-source policies.
+- **Engineering Multi-Agent Architecture Guide (`AGENTS.md`)** — repository-level specification documenting the 4 specialized agent roles (`release-manager`, `lens-builder`, `qa-tester`, `feature-discovery`), hard architectural invariants, and mandatory quality gates.
+- **Direct Changelog Navigation** — integrated direct links to rendered release notes (`docs/changelog.html`) across site navigation, hero badge, and documentation footer.
+
+### Changed
+- **License transition to FSL-1.1-MIT** — adopted Functional Source License, Version 1.1 with MIT Future License (`FSL-1.1-MIT`), offering complete freedom for internal and educational use while protecting core commercial exclusivity, automatically converting to full MIT after two years.
+
 ## [0.17.2] — 2026-09-06 — "Column Colors & Duration Severity"
 
 ### Changed

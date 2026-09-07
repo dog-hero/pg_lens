@@ -14,78 +14,90 @@ Enter
 Sleep 3.5s
 Show
 
-# Macro Lens: vitals, sparklines, checkpointer + WAL generation, pg_stat_io,
+# 1. Macro Lens: vitals, sparklines, checkpointer + WAL generation, pg_stat_io,
 # replication summary
-Sleep 4.5s
+Sleep 4s
 
 # Database selector: pick a database on the cluster (d), then Esc out (mock)
 Type "d"
-Sleep 2s
+Sleep 1.5s
 Escape
-Sleep 800ms
+Sleep 600ms
 
-# Micro Lens: activity + top-waits strip. Dwell here — every row is colored
-# by session state, with red/orange overriding it for long-running queries
-# and blocked sessions winning over both.
+# 2. Micro Lens: activity + top-waits strip. Column colors & duration severity.
 Tab
-Sleep 5s
-# filter live
+Sleep 3.5s
+# Filter live (/)
 Type "/"
-Sleep 500ms
-Type "bench"
-Sleep 1.5s
-Enter
-Sleep 1.5s
-# `\` clears the active lens's filter in one key
-Type "\"
-Sleep 1.5s
-# full waits panel (w), then close
-Type "w"
-Sleep 2.5s
-Type "w"
-Sleep 500ms
-# idle-in-transaction census (I), then close
-Type "I"
-Sleep 2.5s
-Type "I"
-Sleep 500ms
-# a query detail, then `y` yanks the selected session's query to the clipboard
-Type "j"
 Sleep 400ms
+Type "bench"
+Sleep 1.2s
 Enter
-Sleep 1.8s
+Sleep 1.2s
+# Clear filter (\)
+Type "\"
+Sleep 1.2s
+# Full waits panel (w), then close
+Type "w"
+Sleep 2s
+Type "w"
+Sleep 500ms
+# Session query detail (Enter), yank (y), close (Esc)
+Type "j"
+Sleep 300ms
+Enter
+Sleep 1.5s
 Type "y"
-Sleep 2s
+Sleep 1.2s
 Escape
-Sleep 600ms
+Sleep 500ms
 
-# Replication Lens: senders + all slots (scrollable)
+# 3. Blocks & Locks Lens: wait-for tree + active locks table
 Tab
 Sleep 3s
-
-# Schema Lens: tables, then the full Vacuum sub-view (v)
-Tab
-Sleep 2s
-Type "v"
-Sleep 3s
-Type "v"
+# Toggle between wait tree and active locks table (p)
+Type "p"
+Sleep 2.5s
+Type "p"
 Sleep 600ms
 
-# Index Lens: advisor findings + detail
+# 4. Replication Lens: senders + all replication slots
+Tab
+Sleep 2.5s
+
+# 5. Schema Lens: tables, vacuum health sub-view (v), and refresh (B)
+Tab
+Sleep 2.5s
+Type "v"
+Sleep 2.5s
+Type "v"
+Sleep 500ms
+Type "B"
+Sleep 1.2s
+
+# 6. Index Lens: advisor findings + detail
 Tab
 Sleep 2s
 Type "j"
 Sleep 300ms
 Enter
-Sleep 2s
+Sleep 1.5s
 Escape
-Sleep 600ms
+Sleep 500ms
 
-# Query Lens: pg_stat_statements
+# 7. Query Lens: pg_stat_statements metrics & temp spills
 Tab
 Sleep 2.5s
 
-# help overlay (?): the full key map, then close
+# 8. Progress Lens: live DDL & maintenance tracking gauges
+Tab
+Sleep 2.5s
+Enter
+Sleep 1.5s
+Escape
+Sleep 500ms
+
+# Help overlay (?): the full key map, then close
 Type "?"
 Sleep 3s
 Escape

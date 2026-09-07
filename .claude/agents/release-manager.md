@@ -20,7 +20,7 @@ authorizes the release and names the version.
    - Read `ROADMAP.md` Shipped/in-progress to write an accurate tag message.
    - SemVer sanity: features → minor bump, fixes only → patch.
 
-2. **Docs sync — the docs must ship WITH the code, never lag it**
+2. **Docs & Assets sync — docs, demo gif, and site must ship WITH the code, never lag it**
    Do this before the version bump so it lands in the same release commit.
    - **`CHANGELOG.md`** — add a `## [X.Y.Z] — <YYYY-MM-DD>[ — "<codename>"]`
      section at the top (Keep a Changelog format: `### Added` / `### Changed`
@@ -28,18 +28,33 @@ authorizes the release and names the version.
      `git log` since the previous tag (`git log vPREV..HEAD --oneline`). Every
      user-visible change gets a line; match the voice of existing entries.
    - **`README.md`** — reconcile against what actually shipped:
-     - the **Keybindings** table (this has gone stale before — audit every
-       key the TUI binds: tabs, `d`/`w`/`v`/`R`/`/`/`s`/`?`, admin `c`/`K`,
+     - the **Keybindings** table (audit every key the TUI binds: tabs, `d`/`w`/`v`/`B`/`R`/`E`/`/`/`s`/`?`, admin `c`/`K`,
        pause, quit — grep `event.rs`/`app.rs` for `KeyCode::` if unsure);
-     - the feature/lens list and any screenshots or the demo gif reference if
-       the UI changed (flag a gif re-record as a TODO if the layout moved —
-       do not attempt vhs yourself);
-     - CLI flags / env vars if any were added.
+     - the feature/lens list, CLI flags / env vars if any were added;
+     - license badge and notice.
+   - **`docs/demo.gif` (VHS Demo Recording)**:
+     - If the TUI UI, lenses, tabs, or keybindings changed, update `docs/demo.tape`
+       and regenerate the demo gif:
+       `cargo build --release -p pg_lens_tui && vhs docs/demo.tape`
+       Commit the updated `docs/demo.gif` and `docs/demo.tape`.
+    - **`site/` (GitHub Pages Landing & Docs)**:
+      - Reconcile `site/index.html` with what shipped:
+        - Update the lens count (e.g. "Eight lenses over one connection", `1`–`8`);
+        - Verify version pill in hero matches the new release version (`vX.Y.Z — Changelog →`);
+        - Verify header navigation (`<header class="site-top">`) and footer navigation link to `docs/changelog.html`;
+        - Verify CLI commands in "Run it" match all active CLI tools (`pg_lens --dsn`, `--mock`, `replay`, `licenses`, `serve`);
+        - Verify all new shortcuts and incident features are in the incident checklist (`Shift+R`, `E`, `y` OSC 52, `!`, `🔒` SSL, `d` db picker);
+        - Verify footer license matches active license (`FSL-1.1-MIT licensed`);
+        - Update `site/build.mjs` if new doc pages were added to `DOCS`.
+      - Verify site build: `node site/build.mjs`.
+   - **`THIRD_PARTY_LICENSES.md` & License Compliance**:
+     - Run `python3 scripts/generate_licenses.py` and `cargo-deny check licenses`.
+     - Ensure `git diff --exit-code THIRD_PARTY_LICENSES.md` is clean.
    - **`docs/`** — if the release adds a user-facing capability (a new
      connection method, a permission requirement, a new mode), update or add
      the relevant doc page and link it from the README.
-   - Verify no doc still claims something the release changed (e.g. "5 tabs"
-     after a 6th ships). Grep for version strings and counts.
+   - Verify no doc still claims something the release changed (e.g. "6 tabs"
+     after an 8th ships). Grep for version strings, counts, and stale keys.
 
 3. **Version bump — all four places or the tag will be broken**
    - `Cargo.toml` (workspace) `version = "X.Y.Z"`
@@ -53,6 +68,7 @@ authorizes the release and names the version.
    ```sh
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
+   cargo-deny check licenses
    python3 scripts/e2e_pty.py
    ```
    If the frontend changed since the last release:

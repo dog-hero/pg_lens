@@ -56,6 +56,14 @@
         <polyline points="7,9 10,12 7,15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
         <line x1="12" y1="15" x2="17" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
       </symbol>
+      <symbol id="icon-blocks" viewBox="0 0 24 24">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" fill="none" stroke="currentColor" stroke-width="2" />
+        <path d="M7 11V7a5 5 0 0 1 10 0v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
+      <symbol id="icon-progress" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" />
+        <polyline points="12,7 12,12 16,14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
       <symbol id="icon-sun" viewBox="0 0 24 24">
         <circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2" />
         <g stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -89,6 +97,7 @@
           <a href="#features">Features</a>
           <a href="#install">Install</a>
           <a href="#docs">Docs</a>
+          <a href="docs/changelog.html">Changelog</a>
           <a href="./demo/">Live demo</a>
           <a href="https://github.com/dog-hero/pg_lens">GitHub</a>
           <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle light / dark theme" title="Toggle light / dark theme">
@@ -111,7 +120,8 @@
           <a href="https://ratatui.rs">ratatui</a>.
         </p>
         <div class="badges">
-          <span class="pill">MIT licensed</span>
+          <a class="pill version-pill" href="docs/changelog.html">v0.17.3 — Changelog &rarr;</a>
+          <span class="pill">FSL-1.1-MIT licensed</span>
           <span class="pill">PostgreSQL 13+</span>
           <span class="pill">Rust 2024 edition</span>
           <span class="pill">~4 MiB static binary</span>
@@ -133,17 +143,16 @@
         </div>
         <figure class="shot">
           <img src="assets/demo.gif" alt="pg_lens TUI recording: live activity, vitals and lenses in a terminal" width="1200" />
-          <figcaption>The TUI: instance vitals, per-backend activity, and six lenses — all in a terminal.</figcaption>
+          <figcaption>The TUI: instance vitals, per-backend activity, and eight lenses — all in a terminal.</figcaption>
         </figure>
       </div>
 
       <section id="features">
         <div class="wrap">
-          <h2>Six lenses over one connection</h2>
+          <h2>Eight lenses over one connection</h2>
           <p class="lede">
-            Every lens is a focused view over the same live snapshot. Press <code>1</code>–<code>6</code>
-            in the TUI to jump straight to one; the Web Lens merges Macro and Micro into a single
-            Activity tab.
+            Every lens is a focused view over the same live snapshot. Press <code>1</code>–<code>8</code>
+            in the TUI to jump straight to one; the Web Lens matches each view in dedicated tabs.
           </p>
           <div class="grid">
             <article class="card">
@@ -166,6 +175,22 @@
               </p>
             </article>
             <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-blocks"></use></svg> Blocks &amp; Locks Lens</h3>
+              <p>
+                Real-time wait-for dependency tree showing exact blocker-to-waiter relationships,
+                root blocker detection with descendant counts, lock-table capacity pressure gauge, and an
+                active locks table by lock type and relation. Press <code>p</code> to toggle views.
+              </p>
+            </article>
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-replication"></use></svg> Replication Lens</h3>
+              <p>
+                Every WAL sender/receiver (<code>pg_stat_replication</code> state, sync mode, replay
+                lag in bytes and time) and every replication slot (active/inactive, retained WAL,
+                <code>wal_status</code>, safe WAL size), with tiered yellow/red severity.
+              </p>
+            </article>
+            <article class="card">
               <h3><svg aria-hidden="true"><use href="#icon-schema"></use></svg> Schema Lens</h3>
               <p>
                 Per-table <code>pg_stat_user_tables</code> counters and on-disk sizes on a separate
@@ -174,16 +199,7 @@
                 <code>Enter</code> for the full table structure — psql’s <code>\d</code>, in
                 pg_lens’s own style.
               </p>
-              <p>Estimated bloat is on-demand only: the queries are heavy, so they run when you press <code>R</code>.</p>
-            </article>
-            <article class="card">
-              <h3><svg aria-hidden="true"><use href="#icon-queries"></use></svg> Query Lens</h3>
-              <p>
-                Top normalized statements from <code>pg_stat_statements</code>: calls, total/mean
-                time, rows, shared-buffer hit%, a temp-spill column and a full I/O breakdown in the
-                detail panel. When the extension is missing or older than 1.8, the lens shows the
-                exact <code>CREATE EXTENSION</code> steps instead of an error.
-              </p>
+              <p>Estimated bloat is on-demand only: the queries are heavy, so they run when you press <code>B</code> (Shift+B).</p>
             </article>
             <article class="card">
               <h3><svg aria-hidden="true"><use href="#icon-indexes"></use></svg> Index Lens</h3>
@@ -195,17 +211,31 @@
               </p>
             </article>
             <article class="card">
-              <h3><svg aria-hidden="true"><use href="#icon-replication"></use></svg> Replication Lens</h3>
+              <h3><svg aria-hidden="true"><use href="#icon-queries"></use></svg> Query Lens</h3>
               <p>
-                Every WAL sender/receiver (<code>pg_stat_replication</code> state, sync mode, replay
-                lag in bytes and time) and every replication slot (active/inactive, retained WAL,
-                <code>wal_status</code>, safe WAL size), with tiered yellow/red severity.
+                Top normalized statements from <code>pg_stat_statements</code>: calls, total/mean
+                time, rows, shared-buffer hit%, a temp-spill column and a full I/O breakdown in the
+                detail panel. When the extension is missing or older than 1.8, the lens shows the
+                exact <code>CREATE EXTENSION</code> steps instead of an error.
+              </p>
+            </article>
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-progress"></use></svg> Progress Lens</h3>
+              <p>
+                Unified live progress monitor for long-running maintenance: in-flight DDL operations
+                (<code>CREATE INDEX [CONCURRENTLY]</code>, <code>CLUSTER</code>, <code>ANALYZE</code>) and
+                <code>VACUUM</code> with visual ASCII progress gauges, current phase, and ETA.
               </p>
             </article>
           </div>
 
           <h2 style="margin-top: 2.5rem">And the things that catch incidents</h2>
           <ul class="checks">
+            <li><strong>Column Color System &amp; Duration Severity</strong> — intuitive terminal color system where state colors are distinct, and time-based severity coloring is applied strictly to duration so you spot stuck transactions instantly.</li>
+            <li><strong>Copy to clipboard over SSH (OSC 52)</strong> — press <code>y</code> to copy the full SQL query, verbatim <code>CREATE INDEX</code> definition, or table schema directly to your system clipboard from anywhere — works seamlessly over remote SSH sessions and tmux without needing X11 or Wayland.</li>
+            <li><strong>Instant <code>psql</code> shell (<code>!</code>)</strong> — drop straight into an interactive <code>psql</code> console on the exact same connection and credentials at the press of a single key.</li>
+            <li><strong>SSL / TLS connection inspection</strong> — <code>pg_stat_ssl</code> integration flags encrypted vs plaintext sessions with a <code>🔒</code> lock badge, surfacing cipher suite and protocol version in the session detail overlay.</li>
+            <li><strong>Interactive Database Picker (<code>d</code>)</strong> — switch target databases on the fly within the cluster without disconnecting or restarting pg_lens.</li>
             <li><strong>Problem-transaction hunting</strong> — transaction-age column and headline for the oldest <code>idle in transaction</code> session, blocking chains with deadlock-cycle warning, and an orphaned two-phase-commit watch: the usual causes of XID wraparound and lock pile-ups.</li>
             <li><strong>Idle connection / connection-age census</strong> — the sessions the activity table normally filters out, ranked oldest-first: the diagnostic for the classic pool-exhaustion incident.</li>
             <li><strong>Vacuum health &amp; XID wraparound</strong> — cluster and per-table vacuum age, live vacuum progress, and prepared-transaction watch.</li>
@@ -305,9 +335,9 @@ cargo build --release -p pg_lens_tui
           <h2 style="margin-top: 2.5rem">Run it</h2>
           <div class="install-grid">
             <article class="card">
-              <h3>Terminal</h3>
+              <h3>Terminal (Live TUI)</h3>
 <pre><code>pg_lens --dsn "host=localhost user=postgres dbname=postgres"
-pg_lens --mock            # no database needed</code></pre>
+pg_lens --mock            # instant mock sandbox, no DB needed</code></pre>
             </article>
             <article class="card">
               <h3>Web dashboard</h3>
@@ -316,6 +346,11 @@ pg_lens --mock            # no database needed</code></pre>
                 pg_lens refuses to bind a non-loopback address without
                 <code>PG_LENS_AUTH_TOKEN</code> set.
               </p>
+            </article>
+            <article class="card">
+              <h3>Compliance &amp; Licenses</h3>
+<pre><code>pg_lens licenses          # audit all third-party licenses</code></pre>
+              <p>Verify third-party licenses and compliance directly in your terminal.</p>
             </article>
           </div>
           <p class="note" style="margin-top: 1.2rem">
@@ -361,9 +396,10 @@ pg_lens --mock            # no database needed</code></pre>
 
     <footer>
       <div class="wrap">
-        <span>MIT licensed · PostgreSQL 13+ · built with Rust and ratatui</span>
+        <span>FSL-1.1-MIT licensed · PostgreSQL 13+ · built with Rust and ratatui</span>
         <nav>
           <a href="./demo/">Live demo</a>
+          <a href="docs/changelog.html">Changelog</a>
           <a href="https://github.com/dog-hero/pg_lens">GitHub</a>
           <a href="https://github.com/dog-hero/pg_lens/releases">Releases</a>
           <a href="https://github.com/dog-hero/pg_lens/blob/main/LICENSE">License</a>

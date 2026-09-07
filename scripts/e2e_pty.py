@@ -171,9 +171,9 @@ def main():
         # must list the table's indexes with their bloat estimates.
         send("\r"); pump(0.6); snaps["s3_schema_detail"] = screen.snapshot()
         send("\r"); pump(0.6); snaps["s4_detail_closed"] = screen.snapshot()
-        # R forces a schema re-collection: wait until the footer staleness
+        # B forces a schema re-collection: wait until the footer staleness
         # climbed to >= 4s (the mock recollects naturally every 5 ticks =
-        # 10s, so 4..7s is a natural-refresh-free window), press R, and the
+        # 10s, so 4..7s is a natural-refresh-free window), press B, and the
         # staleness must drop back below it despite the wait in between.
         stale_re = re.compile(r"collected (\d+)s ago")
         before = None
@@ -184,10 +184,10 @@ def main():
             if m and 4 <= int(m.group(1)) <= 7:
                 before = int(m.group(1))
                 break
-        snaps["s5_before_R"] = screen.snapshot()
-        send("R"); pump(2.8)
-        snaps["s6_after_R"] = screen.snapshot()
-        m = stale_re.search(snaps["s6_after_R"])
+        snaps["s5_before_B"] = screen.snapshot()
+        send("B"); pump(2.8)
+        snaps["s6_after_B"] = screen.snapshot()
+        m = stale_re.search(snaps["s6_after_B"])
         after = int(m.group(1)) if m else None
     # U1: fourth Tab reaches the Index Lens (also in BASIC, proving the
     # 80x24 layout doesn't panic).
@@ -334,9 +334,9 @@ def main():
               and "order_items_pkey" in snaps["s3_schema_detail"])
         check("Enter closed the table detail again",
               "order_items_pkey" not in snaps["s4_detail_closed"])
-        check("staleness climbed into the 4..7s window before R",
+        check("staleness climbed into the 4..7s window before B",
               before is not None)
-        check(f"R reset the collection staleness ({before}s -> {after}s "
+        check(f"B reset the collection staleness ({before}s -> {after}s "
               "despite 2.8s more elapsing)",
               before is not None and after is not None and after < before
               and after <= 3)
@@ -388,7 +388,7 @@ def main():
     # --- v0.9: keyboard help overlay (`?`) ----------------------------------
     check("? opened the keyboard help overlay (known bindings visible)",
           "keyboard help" in snaps["h1_help_open"]
-          and "cancel the query" in snaps["h1_help_open"])
+          and "cycle lenses" in snaps["h1_help_open"])
     check("Esc closed the help overlay again",
           "keyboard help" not in snaps["h2_help_closed"])
     check("q exited cleanly (EXIT_CODE=0)", code == 0)
