@@ -17,7 +17,7 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 and a [live interactive demo](https://dog-hero.github.io/pg_lens/demo/) of the
 Web Lens dashboard running on recorded data (no database required).
 
-![pg_lens TUI demo](docs/demo.gif)
+![pg_lens TUI demo](https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=0.18.0)
 
 <details>
 <summary>Web Lens dashboard (<code>pg_lens serve</code>)</summary>
@@ -1000,8 +1000,10 @@ v0.17 "Blocks & Locks Lens" (dedicated Blocks & Locks lens in position 3
 between Micro Lens and Replication with wait-for tree and active locks table,
 in-flight DDL & maintenance progress, and SSL/TLS connection security indicators),
 v0.17.1 "Progress Lens" (dedicated Progress Lens for live maintenance & DDL
-tracking, ASCII progress gauges, and tab consistency), and v0.17.2 "Column Colors &
-Duration Severity" (pg_activity-style column color system, time coloring strictly on Duration).
+tracking, ASCII progress gauges, and tab consistency), v0.17.2 "Column Colors &
+Duration Severity" (pg_activity-style column color system, time coloring strictly on Duration),
+v0.17.3 "FSL-1.1-MIT License & Governance" (adoption of Fair Source licensing, CLA, automated license compliance), and
+v0.18.0 "Incident Recording & Flight Recorder" (continuous JSONL flight recording, offline replay CLI, and snapshot bookmark export).
 See [ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Changelog

@@ -4,7 +4,7 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
-## [Unreleased]
+## [0.18.0] — 2026-09-07 — "Incident Recording & Flight Recorder"
 
 ### Added
 - **Incident Flight Recorder (`Shift+R` / `Ctrl+R`)** — background recording mode capturing structured JSONL snapshot frames directly into `~/.local/state/pg_lens/recordings/` with a live header indicator (`● REC`) and frame counters.

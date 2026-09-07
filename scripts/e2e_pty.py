@@ -84,7 +84,7 @@ def main():
     master, slave = pty.openpty()
     import fcntl, struct, termios
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
-    env = dict(os.environ, TERM="xterm-256color")
+    env = dict(os.environ, TERM="xterm-256color", PG_LENS_STATE_DIR="/tmp/pg_lens_e2e_state")
     proc = subprocess.Popen([BIN, "--mock"], stdin=slave, stdout=slave,
                             stderr=slave, env=env, close_fds=True)
     os.close(slave)
@@ -128,11 +128,16 @@ def main():
         # frozen-screen comparison. Then: two captures 3.2s apart must be
         # identical (mock data changes every 2s) except the statusbar
         # staleness, which keeps counting up ON PURPOSE — mask it.
-        fade_deadline = time.time() + 14
-        while time.time() < fade_deadline and (
-                "query cancelled (PID" in screen.snapshot()
-                or "cancel sent to PID" in screen.snapshot()):
+        faded = False
+        fade_deadline = time.time() + 25
+        while time.time() < fade_deadline:
+            snap = screen.snapshot()
+            if "query cancelled (PID" not in snap and "cancel sent to PID" not in snap:
+                faded = True
+                break
             pump(0.5)
+        if not faded:
+            print("WARNING: admin feedback line did not fade within 25s")
         stale_data_re = re.compile(r"data: (\d+)s ago")
         def masked(snap):
             return stale_data_re.sub("data: Xs ago", snap)
@@ -166,9 +171,9 @@ def main():
         # must list the table's indexes with their bloat estimates.
         send("\r"); pump(0.6); snaps["s3_schema_detail"] = screen.snapshot()
         send("\r"); pump(0.6); snaps["s4_detail_closed"] = screen.snapshot()
-        # R forces a schema re-collection: wait until the footer staleness
+        # B forces a schema re-collection: wait until the footer staleness
         # climbed to >= 4s (the mock recollects naturally every 5 ticks =
-        # 10s, so 4..7s is a natural-refresh-free window), press R, and the
+        # 10s, so 4..7s is a natural-refresh-free window), press B, and the
         # staleness must drop back below it despite the wait in between.
         stale_re = re.compile(r"collected (\d+)s ago")
         before = None
@@ -179,11 +184,16 @@ def main():
             if m and 4 <= int(m.group(1)) <= 7:
                 before = int(m.group(1))
                 break
-        snaps["s5_before_R"] = screen.snapshot()
-        send("R"); pump(2.8)
-        snaps["s6_after_R"] = screen.snapshot()
-        m = stale_re.search(snaps["s6_after_R"])
+        snaps["s5_before_B"] = screen.snapshot()
+        send("B"); pump(2.8)
+        snaps["s6_after_B"] = screen.snapshot()
+        m = stale_re.search(snaps["s6_after_B"])
         after = int(m.group(1)) if m else None
+        # R toggles incident recording mode: REC appears in header
+        send("R"); pump(0.6); snaps["rec_started"] = screen.snapshot()
+        send("R"); pump(0.6); snaps["rec_stopped"] = screen.snapshot()
+        # E exports snapshot bookmark
+        send("E"); pump(0.6); snaps["snapshot_exported"] = screen.snapshot()
     # U1: fourth Tab reaches the Index Lens (also in BASIC, proving the
     # 80x24 layout doesn't panic).
     send("\t"); pump(0.9); snaps["x1_index_lens"] = screen.snapshot()
@@ -196,6 +206,12 @@ def main():
         # Enter: statement detail with the highlighted full query + queryid.
         send("\r"); pump(0.6); snaps["q4_query_detail"] = screen.snapshot()
         send("\r"); pump(0.6); snaps["q5_detail_closed"] = screen.snapshot()
+    # v0.17.1: Progress Lens (in-flight maintenance & DDL): seventh Tab reaches it (also in BASIC).
+    send("\t"); pump(0.9); snaps["pr1_progress_lens"] = screen.snapshot()
+    if not BASIC:
+        # Enter: opens detail panel on selected row, Enter closes it.
+        send("\r"); pump(0.6); snaps["pr2_progress_detail"] = screen.snapshot()
+        send("\r"); pump(0.6); snaps["pr3_detail_closed"] = screen.snapshot()
     # v0.9: `?` opens the keyboard help overlay (static, works at any grid
     # size); Esc closes it again without disturbing the dashboard underneath.
     send("?"); pump(0.6); snaps["h1_help_open"] = screen.snapshot()
@@ -208,9 +224,10 @@ def main():
         proc.kill()
         code = "KILLED (did not exit on q)"
 
+    os.makedirs("target/e2e_snaps", exist_ok=True)
     for name, snap in snaps.items():
         try:
-            with open(f"/tmp/pg_lens_{name}.txt", "w") as f:
+            with open(f"target/e2e_snaps/{name}.txt", "w") as f:
                 f.write(snap + "\n")
         except OSError:
             pass
@@ -323,12 +340,16 @@ def main():
               and "order_items_pkey" in snaps["s3_schema_detail"])
         check("Enter closed the table detail again",
               "order_items_pkey" not in snaps["s4_detail_closed"])
-        check("staleness climbed into the 4..7s window before R",
+        check("staleness climbed into the 4..7s window before B",
               before is not None)
-        check(f"R reset the collection staleness ({before}s -> {after}s "
+        check(f"B reset the collection staleness ({before}s -> {after}s "
               "despite 2.8s more elapsing)",
               before is not None and after is not None and after < before
               and after <= 3)
+        check("R toggled incident recording mode (REC indicator in header)",
+              "REC" in snaps["rec_started"] and "REC" not in snaps["rec_stopped"])
+        check("E exported snapshot bookmark (toast feedback)",
+              "snapshot" in snaps["snapshot_exported"].lower())
     # --- U1: Index Lens ------------------------------------------------------
     check("Tab x5 reached the Index Lens (its own tab now, Flag column)",
           "Indexes" in snaps["x1_index_lens"] and "Flag" in snaps["x1_index_lens"])
@@ -364,10 +385,20 @@ def main():
               and "pg_sleep" in snaps["q4_query_detail"])
         check("Enter closed the statement detail again",
               "Statement — queryid" not in snaps["q5_detail_closed"])
+    # --- v0.17.1: Progress Lens --------------------------------------------
+    check("Tab x7 reached the Progress Lens (Progress tab & columns)",
+          "Progress" in snaps["pr1_progress_lens"]
+          and ("Command" in snaps["pr1_progress_lens"] or "CREATE INDEX" in snaps["pr1_progress_lens"]))
+    if not BASIC:
+        check("Enter opened the progress detail panel",
+              "Detail" in snaps["pr2_progress_detail"]
+              and "Enter/Esc: close" in snaps["pr2_progress_detail"])
+        check("Enter closed the progress detail panel again",
+              "Enter/Esc: close" not in snaps["pr3_detail_closed"])
     # --- v0.9: keyboard help overlay (`?`) ----------------------------------
     check("? opened the keyboard help overlay (known bindings visible)",
           "keyboard help" in snaps["h1_help_open"]
-          and "terminate the backend" in snaps["h1_help_open"])
+          and "cycle lenses" in snaps["h1_help_open"])
     check("Esc closed the help overlay again",
           "keyboard help" not in snaps["h2_help_closed"])
     check("q exited cleanly (EXIT_CODE=0)", code == 0)
