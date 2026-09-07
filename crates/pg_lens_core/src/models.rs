@@ -29,7 +29,7 @@ fn jitter(seq: u64, salt: u64, range: u64) -> u64 {
 
 /// One row of `pg_stat_activity`, mirroring the columns produced by the
 /// pg_activity reference query (`get_pg_activity_post_140000.sql`).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActivityRow {
     pub pid: i32,
     pub application_name: String,
@@ -94,7 +94,7 @@ pub struct ProgressUnifiedRow {
 
 /// One blocked session from the blocking query (`pg_blocking_pids` based):
 /// which pid is blocked, by whom, and on what.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LockRow {
     /// The *blocked* backend.
     pub pid: i32,
@@ -129,7 +129,7 @@ pub struct ActiveLockRow {
 }
 
 /// Server-wide vitals feeding the Macro Lens dashboard.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServerVitals {
     pub server_version: String,
     /// `current_database()` — the database this connection observes. The
@@ -164,7 +164,7 @@ pub struct ServerVitals {
 /// aside, `None` on 17+ — moved to `pg_stat_io`), and the derived fields are
 /// computed by the poller from tick-to-tick deltas, mirroring
 /// `ServerVitals::tps`.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckpointerStats {
     // --- cumulative counters (since server start, or the last stats reset) ---
     pub checkpoints_timed: i64,
@@ -212,7 +212,7 @@ pub struct CheckpointerStats {
 /// view, not per-backend — no reason to burden the 2s fast tick), so the
 /// rates are effectively "per second, averaged over the last schema
 /// interval" rather than a true instantaneous rate.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IoStatRow {
     pub backend_type: String,
     pub context: String,
@@ -254,7 +254,7 @@ pub struct IoStatRow {
 /// role or a hidden view degrades to "no WAL panel this tick", never a poll
 /// fault): unlike [`IoStatRow`]'s slow cadence, this is one tiny single-row
 /// catalog read, and WAL generation is genuinely spiky/useful live.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WalStats {
     // --- cumulative counters (since server start, or the last stats reset) ---
     pub wal_records: i64,
@@ -286,7 +286,7 @@ pub struct WalStats {
 /// One row of the Schema Lens table-stats query
 /// (`queries/table_stats_post_130000.sql`): `pg_stat_user_tables` counters
 /// plus on-disk sizes, for one user table of the *connected database*.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TableStatRow {
     /// The table's `pg_class.oid`. Used by the poller as the key for the
     /// per-table size-growth ring (`crate::schema_growth`) — stabler than
@@ -388,7 +388,7 @@ pub struct TableStatRow {
 /// One estimated-bloat row (table or btree index), shaped after the output
 /// of ioguix/pgsql-bloat-estimation. Defined in Fase S1 so the snapshot
 /// schema is final; the vectors stay empty until Fase S2 runs the queries.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BloatRow {
     pub schema: String,
     /// Table name, or index name for `index_bloat` rows.
@@ -415,7 +415,7 @@ pub struct BloatRow {
 /// Collected on the slow schema cadence (`queries/vacuum_cluster_age.sql`) —
 /// cheap catalog read, but cluster-wide by nature, not per-connected-db like
 /// the rest of the Schema Lens.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VacuumClusterAge {
     pub max_age_xids: i64,
     pub worst_database: String,
@@ -424,7 +424,7 @@ pub struct VacuumClusterAge {
 /// One table's XID age + dead-tuple ratio ("vacuum debt"), F2. Worst N of
 /// the connected database's user tables, collected alongside `tables` on
 /// the same slow cadence (`queries/vacuum_table_ages.sql`).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VacuumTableRow {
     pub schema: String,
     pub name: String,
@@ -438,7 +438,7 @@ pub struct VacuumTableRow {
 /// PostgreSQL cannot switch databases without reconnecting, so picking a row
 /// asks the poller to reconnect with a different `dbname` rather than
 /// running an in-place query.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DatabaseRow {
     pub name: String,
     /// `pg_database_size(datname)`, best-effort per row: `None` when the
@@ -470,7 +470,7 @@ pub struct VacuumProgressRow {
 /// silent incident that blocks vacuum forever. Collected on the FAST tick,
 /// best-effort (see [`DbSnapshot::prepared_xacts`]); severity tiers live in
 /// `crate::prepared_xacts` (mirrored by the TUI/web frontends).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreparedXactRow {
     pub gid: String,
     pub owner: String,
@@ -488,7 +488,7 @@ pub struct PreparedXactRow {
 /// `crate::lock_capacity::compute`, never in SQL. Collected on the FAST
 /// tick, best-effort (see [`DbSnapshot::lock_capacity`]); severity tiers
 /// live in `crate::lock_capacity` (mirrored by the TUI/web frontends).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LockCapacity {
     pub locks_held: i64,
     pub max_locks_per_xact: i64,
@@ -507,7 +507,7 @@ pub struct LockCapacity {
 /// pool-exhaustion suspect (`connections_total` near `max_connections` but
 /// few active). Ranked oldest-first by `idle_age_secs`; severity tiers live
 /// in `crate::idle_sessions` (mirrored by the TUI/web frontends).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IdleSessionRow {
     pub pid: i32,
     pub application_name: String,
@@ -530,7 +530,7 @@ pub struct IdleSessionRow {
 
 /// Health of the *slow* schema collection, separate from [`PollerStatus`]:
 /// a failing schema query must never taint the 2s activity pipeline.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SchemaStatus {
     Ok,
     Error(String),
@@ -540,7 +540,7 @@ pub enum SchemaStatus {
 /// not verdict"): a flag plus, for duplicates, WHICH other index makes it
 /// one, so the detail panel can show the evidence rather than a bare label.
 /// Computed purely in [`crate::index_advisor::classify`], never in SQL.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, Deserialize)]
 pub enum IndexFinding {
     /// `pg_index.indisvalid = false` or `indisready = false` — a `CREATE
     /// INDEX CONCURRENTLY` was interrupted (crash, cancel) and left a dead
@@ -571,7 +571,7 @@ pub enum IndexFinding {
 /// deliberately NOT part of this model — see
 /// [`crate::index_advisor::IndexCatalogRow`], which never survives past
 /// `index_advisor::build_index_rows`.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IndexRow {
     pub schema: String,
     pub table: String,
@@ -606,7 +606,7 @@ pub struct IndexRow {
 /// of the connected database, collected on its own slow cadence (default
 /// 60s). Wrapped in an `Arc` inside [`DbSnapshot`] so the fast ticks that
 /// do *not* recollect it reuse the previous collection for free.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SchemaSnapshot {
     /// When this collection ran (Unix epoch milliseconds) — the staleness
     /// indicator frontends show ("collected Xs ago").
@@ -1232,7 +1232,7 @@ impl SchemaSnapshot {
 /// One row of the Query Lens statements query (`queries/statements.sql`):
 /// cumulative per-normalized-query counters from `pg_stat_statements`,
 /// filtered to the connected database (the extension is cluster-wide).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatementRow {
     /// `queryid::text` — shipped as TEXT on purpose: the raw int8 can exceed
     /// JavaScript's `Number.MAX_SAFE_INTEGER` (2^53-1), and the web frontend
@@ -1277,7 +1277,7 @@ pub struct StatementRow {
 /// 1.8 — the version that introduced `total_exec_time`, shipped with PG 13).
 /// The string carries the human-readable reason/hint frontends render as a
 /// calm per-lens explainer, never an error banner.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StatementsStatus {
     Ok,
     /// Extension missing or too old; the payload says why and what to do.
@@ -1290,7 +1290,7 @@ pub enum StatementsStatus {
 /// connected database. Collected on the SAME slow cadence as the Schema
 /// Lens (one shared timer — `R` force-refreshes both) and wrapped in an
 /// `Arc` inside [`DbSnapshot`] so fast ticks reuse it at pointer cost.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatementsSnapshot {
     /// When this collection ran (Unix epoch ms) — staleness indicator.
     pub collected_at_epoch_ms: u64,
@@ -1459,7 +1459,7 @@ impl StatementsSnapshot {
 /// `queries/table_detail_columns.sql`): name, type, nullability, default —
 /// psql's own `\d` shape, minus the parts that need no extra query
 /// (comment, storage) which pg_lens does not surface.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TableDetailColumn {
     pub name: String,
     /// `format_type(atttypid, atttypmod)` — e.g. `character varying(255)`.
@@ -1490,7 +1490,7 @@ pub struct TableDetailColumn {
 /// table that points back at this one (`referencing_table: Some(other)`) —
 /// psql's "Referenced by" section. `definition` is `pg_get_constraintdef`'s
 /// verbatim output, never reconstructed from parts.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TableDetailConstraint {
     pub name: String,
     /// Friendly label (`PRIMARY KEY`/`FOREIGN KEY`/`UNIQUE`/`CHECK`/
@@ -1508,7 +1508,7 @@ pub struct TableDetailConstraint {
 /// output, fetched fresh rather than reused from the (slow-cadence,
 /// cluster-wide-capped) Index Lens collection, for coherence with the rest
 /// of this on-demand fetch.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TableDetailIndex {
     pub name: String,
     pub definition: String,
@@ -1527,7 +1527,7 @@ pub struct TableDetailIndex {
 /// like `schema`/`statements`. The poller caches the last requested detail
 /// and keeps stamping it onto every snapshot until a different table is
 /// requested or a `TableDetailRequest::Clear` arrives.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TableDetail {
     pub oid: i64,
     pub schema: String,
@@ -1701,7 +1701,7 @@ impl TableDetail {
 /// display — the poller trusts the oid for the actual catalog lookup);
 /// `Clear` drops the cached detail (e.g. the overlay closed) so a stale
 /// table's catalog info does not linger in every snapshot forever.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TableDetailRequest {
     Fetch { oid: i64, schema: String, name: String },
     Clear,
@@ -1711,7 +1711,7 @@ pub enum TableDetailRequest {
 /// the DB client) over a `tokio::sync::mpsc` channel — the reverse direction
 /// of the snapshot `watch`, same message-passing-only rule. TUI-only today:
 /// the web frontend stays read-only by design (its API has no such channel).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdminCommand {
     /// `SELECT pg_cancel_backend($1)` — cancel the backend's current query.
     CancelBackend(i32),
@@ -1735,14 +1735,14 @@ impl AdminCommand {
 }
 
 /// Which admin function ran (mirrors [`AdminCommand`], minus the pid).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdminKind {
     Cancel,
     Terminate,
 }
 
 /// What `pg_cancel_backend`/`pg_terminate_backend` said.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AdminOutcome {
     /// The function's boolean return: `true` = signal sent; `false` = the
     /// PID no longer exists (pg_* may also return false without the
@@ -1756,7 +1756,7 @@ pub enum AdminOutcome {
 /// The result of one [`AdminCommand`], reported back INSIDE the snapshot
 /// envelope (no side channel): the poller stamps its most recent result on
 /// every snapshot it publishes; frontends dedupe by `at_epoch_ms`.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AdminActionResult {
     pub kind: AdminKind,
     pub pid: i32,
@@ -1769,7 +1769,7 @@ pub struct AdminActionResult {
 /// `queries/replication.sql`). Lag is reported both ways because either can
 /// matter: bytes for how much WAL is outstanding, seconds for how stale the
 /// replica's view is.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WalSenderRow {
     /// `application_name` the replica reports (often its `cluster_name`).
     pub application_name: String,
@@ -1788,7 +1788,7 @@ pub struct WalSenderRow {
 
 /// The standby side (`pg_stat_wal_receiver` + last replay position,
 /// `queries/wal_receiver.sql`).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WalReceiverRow {
     /// `streaming`, `waiting`, `stopping`, …
     pub status: String,
@@ -1810,7 +1810,7 @@ pub struct WalReceiverRow {
 /// the classic full-disk incident (nothing is consuming it, so WAL piles up
 /// in `pg_wal`). See `pg_lens_tui::ui::macro_lens` (and its web mirror) for
 /// the severity rule.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReplicationSlotRow {
     pub slot_name: String,
     /// `"physical"` or `"logical"`.
@@ -1833,7 +1833,7 @@ pub struct ReplicationSlotRow {
 /// Replication role and topology, refreshed every fast tick (the queries are
 /// a few rows and cheap). Absent (`DbSnapshot.replication == None`) only
 /// before the first successful poll of a session.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReplicationInfo {
     /// This server is a primary; lists its connected replicas (may be empty,
     /// in which case the Macro Lens hides the panel).
@@ -1846,7 +1846,7 @@ pub enum ReplicationInfo {
 
 /// Health of the poller loop, carried inside every snapshot so that all
 /// frontends can surface collection errors without a side channel.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PollerStatus {
     Ok,
     /// First connection attempt still in flight — no data yet.
@@ -1856,7 +1856,7 @@ pub enum PollerStatus {
 
 /// One complete observation of the monitored server. Published by the real
 /// poller (Fase 3) or, in `--mock` mode, by [`DbSnapshot::mock`].
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DbSnapshot {
     pub vitals: ServerVitals,
     pub activity: Vec<ActivityRow>,

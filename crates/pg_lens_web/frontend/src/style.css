@@ -1713,6 +1713,28 @@ table#statements {
   border-color: var(--warn);
   color: var(--warn);
 }
+.ghost-btn.recording {
+  border-color: var(--bad);
+  color: var(--bad);
+  font-weight: 600;
+}
+.record-dot {
+  color: var(--fg-dim);
+}
+.ghost-btn.recording .record-dot {
+  color: var(--bad);
+  animation: pulse-rec-dot 1.2s ease-in-out infinite;
+}
+@keyframes pulse-rec-dot {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+}
 h2 .ghost-btn {
   float: right;
   margin-top: -4px;

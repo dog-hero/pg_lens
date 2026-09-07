@@ -61,10 +61,12 @@ pub enum Tab {
 
 impl Tab {
     // v0.12: number-prefixed so the tab bar is self-documenting about the
+    // `1`-`7` direct-jump keys (see `handle_key`'s digit arm). The prefix is
     // `1`-`8` direct-jump keys (see `handle_key`'s digit arm). The prefix is
     // additive on top of the original title text (never replaces it) so
     // every pre-existing `screen.contains("Macro Lens")`-style assertion
     // keeps matching unchanged.
+    pub const TITLES: [&'static str; 7] = [
     pub const TITLES: [&'static str; 8] = [
         "1 Macro Lens",
         "2 Micro Lens",
@@ -89,6 +91,8 @@ impl Tab {
         }
     }
 
+    /// Inverse of [`Tab::index`] — used by the `1`-`7` direct-jump keys.
+    /// `None` for anything outside `0..7`.
     /// Inverse of [`Tab::index`] — used by the `1`-`8` direct-jump keys.
     /// `None` for anything outside `0..8`.
     pub fn from_index(index: usize) -> Option<Self> {
@@ -113,6 +117,7 @@ impl Tab {
             Tab::ReplicationLens => Tab::SchemaLens,
             Tab::SchemaLens => Tab::IndexLens,
             Tab::IndexLens => Tab::QueryLens,
+            Tab::QueryLens => Tab::MacroLens,
             Tab::QueryLens => Tab::ProgressLens,
             Tab::ProgressLens => Tab::MacroLens,
         }
@@ -122,6 +127,7 @@ impl Tab {
     /// [`Tab::next`].
     pub fn prev(self) -> Self {
         match self {
+            Tab::MacroLens => Tab::QueryLens,
             Tab::MacroLens => Tab::ProgressLens,
             Tab::MicroLens => Tab::MacroLens,
             Tab::BlocksLens => Tab::MicroLens,
@@ -1263,6 +1269,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // earlier in this function), so it can never hijack a digit typed
         // into the filter editor or a confirm-modal keystroke. A no-op if
         // already on that tab (nothing to remember as "previous").
+        KeyCode::Char(c @ '1'..='7') => {
         KeyCode::Char(c @ '1'..='8') => {
             if let Some(tab) = Tab::from_index(c as usize - '1' as usize)
                 && tab != app.active_tab
@@ -1319,6 +1326,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // overloaded: closes overlays, then arms the quit barrier — adding
         // a THIRD meaning would make a stray Esc unpredictable) and over a
         // digit/letter already claimed by v0.12's own navigation batch
+        // (`1`-`6`, `g`/`G`, Backspace, BackTab) or by an existing lens key
         // (`1`-`8`, `g`/`G`, Backspace, BackTab) or by an existing lens key
         // (`c`/`d`/`s`/`v`/`w`/`I`/`R`/`K`/`!`/`?`). `\` is unused anywhere
         // in `handle_key` and reads naturally as "cancel/undo the slash".
@@ -1763,6 +1771,7 @@ enum FilterLens {
 
 /// `None` when no filter is being edited — defensive; `handle_key` only
 /// routes into [`handle_filter_key`] when at least one `*_filter_editing`
+/// flag is set, and the three flags are mutually exclusive by construction
 /// flag is set, and the flags are mutually exclusive by construction
 /// (only one `/` arm can fire per keypress, each setting exactly one).
 fn active_filter_lens(app: &App) -> Option<FilterLens> {
@@ -1792,6 +1801,7 @@ fn resort_for(app: &mut App, lens: FilterLens) {
 }
 
 /// Keymap while editing ANY lens's filter (`app.filter_editing` /
+/// `schema_filter_editing` / `statements_filter_editing` — exactly one is
 /// `schema_filter_editing` / `statements_filter_editing` / `progress_filter_editing` — exactly one is
 /// true when this is reached): every printable char edits that lens's own
 /// filter live (its table re-filters on each keystroke), Backspace deletes,
@@ -2952,6 +2962,7 @@ mod tests {
     }
 
     #[test]
+    fn tab_cycles_the_seven_lenses() {
     fn tab_cycles_the_eight_lenses() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::MacroLens);
@@ -2977,6 +2988,7 @@ mod tests {
     // --- v0.12: navigation & scroll polish ----------------------------------
 
     #[test]
+    fn back_tab_cycles_the_seven_lenses_backward() {
     fn back_tab_cycles_the_eight_lenses_backward() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::MacroLens);

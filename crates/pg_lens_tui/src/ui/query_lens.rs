@@ -312,7 +312,7 @@ fn draw_footer(app: &App, statements: &StatementsSnapshot, frame: &mut Frame, ar
         / 1_000;
     let line = Line::from(format!(
         " db: {db} \u{b7} {n} statements \u{b7} collected {staleness_secs}s ago \u{b7} \
-         current database only \u{b7} R: recollect",
+         current database only \u{b7} B: recollect",
         db = app.snapshot.vitals.database,
         n = statements.statements.len(),
     ))

@@ -40,3 +40,30 @@ const EDITABLE_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 export function isEditableTag(tagName: string): boolean {
   return EDITABLE_TAGS.has(tagName);
 }
+
+export interface KeyEventLike {
+  key: string;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  altKey?: boolean;
+  shiftKey?: boolean;
+}
+
+/** `Shift+R` (`R`) or `Ctrl+R`: toggle incident recording mode (Flight Recorder). */
+export function isRecordKey(event: KeyEventLike): boolean {
+  if (event.altKey) return false;
+  if (event.ctrlKey && (event.key === "r" || event.key === "R")) return true;
+  return event.key === "R" && !event.ctrlKey && !event.metaKey;
+}
+
+/** `E`: export point-in-time snapshot bookmark to JSON. */
+export function isExportKey(event: KeyEventLike): boolean {
+  if (event.ctrlKey || event.metaKey || event.altKey) return false;
+  return event.key === "E";
+}
+
+/** `B`: trigger Schema Lens recollect + bloat refresh. */
+export function isSchemaRefreshKey(event: KeyEventLike): boolean {
+  if (event.ctrlKey || event.metaKey || event.altKey) return false;
+  return event.key === "B";
+}

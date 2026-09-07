@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use pg_lens_core::DbSnapshot;
@@ -63,6 +63,26 @@ enum Command {
     /// connection flags are global (see [`ConnArgs`]), so they live on the
     /// top-level `Cli` — this variant carries none of its own.
     Tui,
+
+    /// Replay an incident recording (.jsonl) or single snapshot (.json) offline.
+    Replay {
+        /// Path to the recording file (.jsonl) or snapshot file (.json).
+        file: PathBuf,
+
+        /// Initial playback speed multiplier (e.g. 0.5, 1.0, 2.0).
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+
+        /// Loop playback when reaching the end of the recording.
+        #[arg(long)]
+        loop_playback: bool,
+    },
+
+    /// View an exported snapshot (.json) or recording (.jsonl) offline.
+    View {
+        /// Path to the recording file (.jsonl) or snapshot file (.json).
+        file: PathBuf,
+    },
 
     /// Serve the web UI and JSON/SSE API over HTTP (read-only).
     #[cfg(feature = "web")]
@@ -928,6 +948,12 @@ async fn main() -> color_eyre::Result<()> {
         // connection flags are global, so they always live on `cli.conn`
         // regardless of whether a subcommand was given or where the flag sat.
         None | Some(Command::Tui) => run_tui(cli.conn).await,
+        Some(Command::Replay {
+            file,
+            speed,
+            loop_playback,
+        }) => run_replay(file, speed, loop_playback).await,
+        Some(Command::View { file }) => run_replay(file, 1.0, false).await,
         #[cfg(feature = "web")]
         Some(Command::Serve(args)) => run_serve(cli.conn, args).await,
         Some(Command::Licenses) | Some(Command::Completions { .. }) => unreachable!("handled above"),
@@ -955,6 +981,59 @@ see THIRD_PARTY_LICENSES.md included with this release or online at:
 https://github.com/dog-hero/pg_lens/blob/main/THIRD_PARTY_LICENSES.md"#
     );
 }
+
+async fn run_replay(file: PathBuf, speed: f64, loop_playback: bool) -> color_eyre::Result<()> {
+    let raw_frames = pg_lens_core::recording::RecordingReader::load(&file)?;
+    if raw_frames.is_empty() {
+        color_eyre::eyre::bail!("recording file {} contains no snapshots", file.display());
+    }
+    let frames: Vec<Arc<DbSnapshot>> = raw_frames.into_iter().map(Arc::new).collect();
+
+    let mut app = App::new();
+    let initial_frame = frames[0].clone();
+    app.host = format!("replay: {}", file.file_name().unwrap_or_default().to_string_lossy());
+    app.read_only = true;
+    app.replay_state = Some(crate::app::ReplayState {
+        frames: frames.clone(),
+        current_idx: 0,
+        is_paused: false,
+        speed,
+        loop_playback,
+        source_path: file,
+        last_frame_time: Instant::now(),
+    });
+
+    crate::app::apply_snapshot(&mut app, initial_frame);
+
+    let (tx, mut actions) = mpsc::channel::<Action>(64);
+    let _input_task = event::spawn_input(tx.clone());
+
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    let mut terminal = ratatui::init();
+
+    while !app.should_quit {
+        terminal.draw(|frame| ui::draw(&mut app, frame))?;
+
+        tokio::select! {
+            maybe_action = actions.recv() => match maybe_action {
+                Some(action) => update(&mut app, action),
+                None => update(&mut app, Action::Quit),
+            },
+            _ = tick.tick() => update(&mut app, Action::Tick),
+        }
+
+        if let Some(text) = app.clipboard_request.take() {
+            let mut stdout = std::io::stdout();
+            let toast = clipboard::copy_to_clipboard(&mut stdout, &text)
+                .unwrap_or_else(|e| format!("clipboard write failed: {e}"));
+            update(&mut app, Action::ClipboardCopied { text: toast });
+        }
+    }
+
+    ratatui::restore();
+    Ok(())
+}
+
 async fn run_tui(conn_args: ConnArgs) -> color_eyre::Result<()> {
     // `config.toml` (for `remote_config`) and the `--config-url` fetch both
     // have to happen before `--list-services`/the picker so they see the

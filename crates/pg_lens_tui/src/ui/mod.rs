@@ -133,21 +133,32 @@ fn draw_status_banner(app: &App, frame: &mut Frame, area: Rect) {
 
 fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
     let vitals = &app.snapshot.vitals;
-    // `db {vitals.database}` names the ACTUAL connected database — distinct
-    // from `app.host` (the connection label: user@host, never changes on a
-    // database switch). U2's picker reconnects to a different `dbname`, so
-    // this is the one header field that must visibly follow it — confirming
-    // a switch landed without needing to open the Schema Lens.
-    let text = format!(
-        " pg_lens v{} \u{2502} PG {} @ {} \u{2502} db {} \u{2502} up {} \u{2502} {}/{} conns",
-        env!("CARGO_PKG_VERSION"),
-        vitals.server_version,
-        app.host,
-        vitals.database,
-        format::human_uptime(vitals.uptime_secs),
-        vitals.connections_total,
-        vitals.max_connections,
-    );
+    let text = if let Some(ref replay) = app.replay_state {
+        let file_name = replay
+            .source_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        format!(
+            " pg_lens v{} \u{2502} REPLAY: {} \u{2502} db {} \u{2502} frame {}/{}",
+            env!("CARGO_PKG_VERSION"),
+            file_name,
+            vitals.database,
+            replay.current_idx + 1,
+            replay.frames.len(),
+        )
+    } else {
+        format!(
+            " pg_lens v{} \u{2502} PG {} @ {} \u{2502} db {} \u{2502} up {} \u{2502} {}/{} conns",
+            env!("CARGO_PKG_VERSION"),
+            vitals.server_version,
+            app.host,
+            vitals.database,
+            format::human_uptime(vitals.uptime_secs),
+            vitals.connections_total,
+            vitals.max_connections,
+        )
+    };
     let mut spans = vec![Span::raw(text).bold()];
     // Read-only mode is a permanent header marker, not a transient toast —
     // the mode must always be visible, not just at the moment `c`/`K` is
@@ -157,24 +168,59 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled("RO", Style::new().fg(Color::Yellow).bold()));
     }
     let header = Line::from(spans);
-    // Right side: the pause control. The hint lives HERE, not in the
-    // statusbar — that bar was fought down to a ~4-column margin at 120
-    // cols and cannot take another 15 characters on any lens. While frozen
-    // the hint grows into the loud PAUSED indicator (yellow: the staleness
-    // that follows is deliberate, not a fault).
-    let pause = pause_indicator(app);
-    let pause_width = pause.width() as u16;
-    let [left_area, pause_area] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(pause_width)]).areas(area);
+    // Right side: recording indicator and/or pause / replay playback control.
+    let right = right_header_indicator(app);
+    let right_width = right.width() as u16;
+    let [left_area, right_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(area);
     frame.render_widget(Paragraph::new(header), left_area);
-    frame.render_widget(Paragraph::new(pause), pause_area);
+    frame.render_widget(Paragraph::new(right), right_area);
 }
 
-/// The header's right-side pause control: `Space: pause` while live,
-/// `▮▮ PAUSED · Space: resume` (yellow, loud) while frozen.
-fn pause_indicator(app: &App) -> Line<'static> {
+/// The header's right-side controls: recording banner (`● REC [MM:SS | N frames]`)
+/// and pause / replay playback control.
+fn right_header_indicator(app: &App) -> Line<'static> {
     let mut spans: Vec<Span> = Vec::new();
-    if app.paused {
+
+    if let Some(ref rec) = app.recording {
+        let elapsed = rec.started_at.elapsed().as_secs();
+        let mm = elapsed / 60;
+        let ss = elapsed % 60;
+        let frames = rec.writer.frame_count();
+        spans.push(Span::styled(
+            format!("\u{25cf} REC [{mm:02}:{ss:02} | {frames} frames]"),
+            Style::new().fg(Color::Red).bold(),
+        ));
+        spans.push(Span::styled(" \u{2502} ", style::label_style()));
+    }
+
+    if let Some(ref replay) = app.replay_state {
+        let state_str = if replay.is_paused {
+            "\u{25ae}\u{25ae} PAUSED"
+        } else {
+            "\u{25b6} PLAY"
+        };
+        let style = if replay.is_paused {
+            Style::new().fg(Color::Yellow).bold()
+        } else {
+            Style::new().fg(Color::Green).bold()
+        };
+        let speed = replay.speed;
+        spans.push(Span::styled(format!("{state_str} {speed:.2}x"), style));
+        spans.push(Span::styled(" \u{b7} ", style::label_style()));
+        let space_desc = if replay.is_paused {
+            if replay.current_idx + 1 >= replay.frames.len() {
+                ": restart"
+            } else {
+                ": play"
+            }
+        } else {
+            ": pause"
+        };
+        let [k, d] = style::hint("Space", space_desc);
+        spans.push(k);
+        spans.push(d);
+    } else if app.paused {
         spans.push(Span::styled(
             "\u{25ae}\u{25ae} PAUSED",
             Style::new().fg(Color::Yellow).bold(),
@@ -289,6 +335,30 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         (Some(i), len) if len > 0 => format!("{}/{len}", i + 1),
         _ => "-".to_string(),
     };
+    // Replay mode takes over statusbar with playback & stepping controls.
+    if let Some(ref replay) = app.replay_state {
+        let sep = Span::styled(" \u{2502} ", style::label_style());
+        let mut spans: Vec<Span> = Vec::new();
+        let push_hint = |spans: &mut Vec<Span<'static>>, key: &str, desc: String, lead: bool| {
+            if lead {
+                spans.push(sep.clone());
+            }
+            let [k, d] = style::hint(key, desc);
+            spans.push(k);
+            spans.push(d);
+        };
+        push_hint(&mut spans, "q/Esc", ": quit".into(), false);
+        push_hint(&mut spans, "?", ": help".into(), true);
+        push_hint(&mut spans, "Tab", ": tab".into(), true);
+        push_hint(&mut spans, "j/k", format!(": row {row}"), true);
+        push_hint(&mut spans, "\u{2190}/\u{2192}", ": step".into(), true);
+        push_hint(&mut spans, "[/]", format!(": {:.2}x", replay.speed), true);
+        push_hint(&mut spans, "E", ": export".into(), true);
+        push_hint(&mut spans, "Enter", ": detail".into(), true);
+        push_hint(&mut spans, "y", ": copy".into(), true);
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     // Filter editing takes over the whole statusbar with a focused keymap —
     // the lens hints are inert while typing anyway.
     if app.filter_editing || app.progress_filter_editing {
@@ -361,14 +431,14 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         push_hint(&mut spans, "s", format!(": sort={sort_label}"), true);
     }
     if slow_lens_extra {
-        // `R` refreshes the slow lenses and, on the Schema Lens, runs the
+        // `B` refreshes the slow lenses and, on the Schema Lens, runs the
         // on-demand estimated-bloat queries (too slow for the auto cadence).
         let desc = if app.active_tab == Tab::SchemaLens {
             ": refresh + bloat"
         } else {
             ": recollect"
         };
-        push_hint(&mut spans, "R", desc.into(), true);
+        push_hint(&mut spans, "B", desc.into(), true);
     }
     push_hint(
         &mut spans,
@@ -710,7 +780,7 @@ mod tests {
         // and the on-demand re-estimate hint.
         eprintln!("{screen}");
         assert!(screen.contains("ESTIMATED"), "estimate label is mandatory");
-        assert!(screen.contains("R: refresh + bloat"), "schema R hint: {screen}");
+        assert!(screen.contains("B: refresh + bloat"), "schema B hint: {screen}");
     }
 
     /// v0.15's per-table lock indicator: the mock fixture ships one
@@ -1224,7 +1294,7 @@ mod tests {
         assert!(screen.contains("db: shop"));
         assert!(screen.contains("8 statements"));
         assert!(screen.contains("current database only"));
-        assert!(screen.contains("R: recollect"));
+        assert!(screen.contains("B: recollect"));
         assert!(screen.contains("sort=total"));
     }
 
@@ -1704,7 +1774,8 @@ mod tests {
         // `\`'s new clear-filter row), so the terminal grew again. v0.15
         // added the `x` cross-lens-jump row, one more. v0.16 added the `y`
         // copy-to-clipboard row, one more still. v0.17 added `b` and `p`.
-        let backend = TestBackend::new(120, 48);
+        // v0.18 added `Shift+R / Ctrl+R`, `E`, and replay controls.
+        let backend = TestBackend::new(120, 54);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal.draw(|frame| draw(&mut app, frame)).expect("draw");
         let screen: String = terminal
@@ -1720,6 +1791,10 @@ mod tests {
         assert!(screen.contains("terminate the backend"), "{screen}");
         assert!(screen.contains("psql shell"), "{screen}");
         assert!(screen.contains("Esc / ?: close"), "{screen}");
+        // v0.18: incident recording, snapshot bookmark, and bloat refresh
+        assert!(screen.contains("Shift+R / Ctrl+R"), "{screen}");
+        assert!(screen.contains("force schema/bloat refresh"), "{screen}");
+        assert!(screen.contains("export current snapshot"), "{screen}");
         // The dashboard underneath is still there (overlay, not full-screen).
         assert!(screen.contains("Macro Lens"), "{screen}");
         // v0.12: navigation & scroll polish is listed too.
@@ -1797,4 +1872,39 @@ mod tests {
         assert!(screen.contains("keyboard help"), "{screen}");
     }
 
+    #[test]
+    fn recording_header_indicator_renders() {
+        let mut app = App::new();
+        let test_dir = std::env::current_dir().unwrap().join("target/test_state_ui_rec");
+        app.state_dir = Some(test_dir);
+        app.toggle_recording();
+        assert!(app.recording.is_some());
+
+        let screen = render(&mut app);
+        assert!(screen.contains("REC"), "header has recording indicator: {screen}");
+        assert!(screen.contains("frames"), "header reports frame count: {screen}");
+    }
+
+    #[test]
+    fn replay_header_and_statusbar_render() {
+        let mut app = App::new();
+        let frame1 = std::sync::Arc::new(pg_lens_core::DbSnapshot::mock());
+        let frame2 = std::sync::Arc::new(pg_lens_core::DbSnapshot::mock());
+        app.replay_state = Some(crate::app::ReplayState {
+            frames: vec![frame1, frame2],
+            current_idx: 0,
+            is_paused: false,
+            speed: 1.0,
+            loop_playback: false,
+            source_path: std::path::PathBuf::from("incident.jsonl"),
+            last_frame_time: std::time::Instant::now(),
+        });
+
+        let screen = render(&mut app);
+        assert!(screen.contains("REPLAY: incident.jsonl"), "header shows replay source: {screen}");
+        assert!(screen.contains("PLAY"), "header shows playback status: {screen}");
+        assert!(screen.contains("step"), "statusbar shows stepping hint: {screen}");
+        assert!(screen.contains("export"), "statusbar shows export hint: {screen}");
+    }
 }
+

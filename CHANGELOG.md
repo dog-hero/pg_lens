@@ -4,6 +4,17 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [Unreleased]
+
+### Added
+- **Incident Flight Recorder (`Shift+R` / `Ctrl+R`)** — background recording mode capturing structured JSONL snapshot frames directly into `~/.local/state/pg_lens/recordings/` with a live header indicator (`● REC`) and frame counters.
+- **Snapshot Bookmark Export (`E`)** — exports the current tick's snapshot to a single-frame `.jsonl` file with clipboard path copy and visual toast feedback.
+- **Offline Incident Replay (`pg_lens replay <file>`)** — deterministic interactive replay of recorded incident `.jsonl` files across all eight lenses with play/pause (`Space`), frame scrubbing (`←`/`→`), playback speed adjustment (`[`/`]`), and auto-looping on reaching the final frame.
+
+### Changed
+- **VHS Demo Recording (`docs/demo.gif`)** — updated showcase recording to demonstrate continuous incident flight recording (`Shift+R`), snapshot bookmark export (`E`), and offline replay across all eight lenses.
+- **Landing Page & Documentation (`site/index.html`)** — added Incident Replay card to "Run it" section and continuous recording highlights to the incident checklist.
+
 ## [0.17.3] — 2026-09-07 — "FSL-1.1-MIT & Governance"
 
 ### Added

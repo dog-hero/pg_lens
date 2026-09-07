@@ -1,5 +1,5 @@
 # --- Rust ---
-/target
+target/
 /target-musl-*
 
 # --- Node (web frontend) ---

@@ -628,9 +628,9 @@ fn draw_footer(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
     // only the table stats, so the footer says how to get bloat, or that the
     // shown estimate is on-demand.
     let bloat_note = if schema.table_bloat.is_empty() && schema.index_bloat.is_empty() {
-        "R: estimate bloat (slow, on-demand)"
+        "B: estimate bloat (slow, on-demand)"
     } else {
-        "ESTIMATED bloat (needs fresh ANALYZE) \u{b7} R: re-estimate"
+        "ESTIMATED bloat (needs fresh ANALYZE) \u{b7} B: re-estimate"
     };
     let partitions_note = partitions_hint(schema, app.schema_show_partitions);
     let line = Line::from(format!(

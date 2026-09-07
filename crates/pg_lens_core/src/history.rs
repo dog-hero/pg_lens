@@ -127,10 +127,16 @@ pub const TREND_LOOKBACK_TICKS: usize = 150;
 
 /// Ring buffer of [`HistoryPoint`]s: pushing beyond the capacity evicts the
 /// oldest sample. Iteration order is oldest → newest.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SnapshotHistory {
+    #[serde(default = "default_history_cap")]
     cap: usize,
+    #[serde(default)]
     points: VecDeque<HistoryPoint>,
+}
+
+fn default_history_cap() -> usize {
+    DEFAULT_CAP
 }
 
 impl Default for SnapshotHistory {

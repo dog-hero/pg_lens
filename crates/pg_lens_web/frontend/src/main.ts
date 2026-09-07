@@ -44,7 +44,14 @@ import {
   type StreamHandle,
 } from "./stream";
 import { loadStoredTheme, nextTheme, resolveInitialTheme, saveTheme, type Theme } from "./theme";
-import { filterInputIdForPanel, isEditableTag, tabIdForKey } from "./keyboard";
+import {
+  filterInputIdForPanel,
+  isEditableTag,
+  isExportKey,
+  isRecordKey,
+  isSchemaRefreshKey,
+  tabIdForKey,
+} from "./keyboard";
 import { humanCount } from "./format";
 
 function el<T extends HTMLElement>(id: string): T {
@@ -69,6 +76,9 @@ const toast = el<HTMLSpanElement>("toast");
 const pauseBtn = el<HTMLButtonElement>("pause-btn");
 const pauseBtnIcon = pauseBtn.querySelector("use");
 const pauseBtnLabel = pauseBtn.querySelector("span");
+const recordBtn = el<HTMLButtonElement>("record-btn");
+const recordBtnLabel = el<HTMLSpanElement>("record-btn-label");
+const exportBtn = el<HTMLButtonElement>("export-btn");
 const schemaRefreshBtn = el<HTMLButtonElement>("schema-refresh-btn");
 const themeToggleBtn = el<HTMLButtonElement>("theme-toggle");
 const themeToggleIcon = themeToggleBtn.querySelector("use");
@@ -284,7 +294,6 @@ for (const [button] of tabs) {
 // blurs whatever's focused. Suppressed while a text-consuming element
 // already has focus (Esc is the one exception — it must still blur).
 window.addEventListener("keydown", (event) => {
-  if (event.metaKey || event.ctrlKey || event.altKey) return;
   const active = document.activeElement;
   const editing = active instanceof HTMLElement && isEditableTag(active.tagName);
   if (event.key === "Escape") {
@@ -295,6 +304,24 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (editing) return;
+
+  if (isRecordKey(event)) {
+    event.preventDefault();
+    toggleRecording();
+    return;
+  }
+  if (isExportKey(event)) {
+    event.preventDefault();
+    exportSnapshot();
+    return;
+  }
+  if (isSchemaRefreshKey(event)) {
+    event.preventDefault();
+    schemaRefreshBtn.click();
+    return;
+  }
+
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
   // v0.14: while a moment is pinned, Left/Right steps it one history sample
   // at a time — a lightweight way to walk through an incident tick by tick.
   if (pinnedEpochMs !== null && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
@@ -379,7 +406,39 @@ function onCopyResult(ok: boolean, chars: number): void {
   }
 }
 
+let latestSnapshot: DbSnapshot | null = null;
+let isRecording = false;
+let recordedFrames: DbSnapshot[] = [];
+let recordStartEpochMs = 0;
+let recordTimer: number | undefined;
+
+function formatElapsed(elapsedMs: number): string {
+  const totalSec = Math.max(0, Math.floor(elapsedMs / 1000));
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${String(min).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
+function updateRecordButton(): void {
+  if (!isRecording) {
+    recordBtn.classList.remove("recording");
+    recordBtn.title = "Toggle incident recording mode (Shift+R / Ctrl+R)";
+    recordBtnLabel.textContent = "Record";
+    return;
+  }
+  recordBtn.classList.add("recording");
+  const elapsed = formatElapsed(Date.now() - recordStartEpochMs);
+  const count = recordedFrames.length;
+  recordBtn.title = `Incident recording in progress (${count} frames, ${elapsed}) — click or Shift+R to stop and save`;
+  recordBtnLabel.textContent = `REC ${elapsed} (${count})`;
+}
+
 function onSnapshot(snapshot: DbSnapshot): void {
+  latestSnapshot = snapshot;
+  if (isRecording) {
+    recordedFrames.push(snapshot);
+    updateRecordButton();
+  }
   if (paused) {
     pending = snapshot;
     return;
@@ -523,6 +582,79 @@ schemaRefreshBtn.addEventListener("click", () => {
     );
   });
 });
+
+function downloadBlob(content: string, filename: string, mimeType: string): void {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function formatFilenameTimestamp(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const yr = d.getFullYear();
+  const mo = pad(d.getMonth() + 1);
+  const da = pad(d.getDate());
+  const hr = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  const se = pad(d.getSeconds());
+  return `${yr}${mo}${da}-${hr}${mi}${se}`;
+}
+
+function exportSnapshot(): void {
+  if (latestSnapshot === null) {
+    showToast("No snapshot available to export", true);
+    return;
+  }
+  const db = latestSnapshot.vitals?.database || "pg";
+  const safeDb = db.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const ts = formatFilenameTimestamp(new Date());
+  const filename = `snapshot-${safeDb}-${ts}.json`;
+  const content = JSON.stringify(latestSnapshot, null, 2);
+  downloadBlob(content, filename, "application/json");
+  showToast(`Exported snapshot bookmark: ${filename}`);
+}
+
+function toggleRecording(): void {
+  if (isRecording) {
+    isRecording = false;
+    if (recordTimer !== undefined) {
+      clearInterval(recordTimer);
+      recordTimer = undefined;
+    }
+    updateRecordButton();
+    if (recordedFrames.length === 0) {
+      showToast("Recording stopped (0 frames captured)");
+      return;
+    }
+    const db = latestSnapshot?.vitals?.database || "pg";
+    const safeDb = db.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const ts = formatFilenameTimestamp(new Date());
+    const filename = `rec-${safeDb}-${ts}.jsonl`;
+    const jsonl = recordedFrames.map((f) => JSON.stringify(f)).join("\n") + "\n";
+    downloadBlob(jsonl, filename, "application/x-ndjson");
+    showToast(`Saved recording: ${filename} (${recordedFrames.length} frames)`);
+    recordedFrames = [];
+  } else {
+    isRecording = true;
+    recordedFrames = [];
+    recordStartEpochMs = Date.now();
+    if (latestSnapshot !== null) {
+      recordedFrames.push(latestSnapshot);
+    }
+    updateRecordButton();
+    recordTimer = window.setInterval(updateRecordButton, 1000);
+    showToast("Incident recording started (Shift+R to stop)");
+  }
+}
+
+recordBtn.addEventListener("click", toggleRecording);
+exportBtn.addEventListener("click", exportSnapshot);
 
 async function onAdmin(kind: AdminKind, row: ActivityRow): Promise<void> {
   // Defense in depth only: the table already hides the Actions column while

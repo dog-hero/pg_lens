@@ -120,6 +120,11 @@
         <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" />
         <polyline points="12,7 12,12 15,15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
       </symbol>
+      <symbol id="icon-export" viewBox="0 0 24 24">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        <polyline points="7 10 12 15 17 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        <line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
     </svg>
 
     <div id="app">
@@ -162,6 +167,24 @@
           <button id="pause-btn" class="ghost-btn" type="button" title="Freeze the live view (Space)">
             <svg class="icon" aria-hidden="true"><use href="#icon-pause"></use></svg>
             <span>Pause</span>
+          </button>
+          <button
+            id="record-btn"
+            class="ghost-btn record-btn"
+            type="button"
+            title="Toggle incident recording mode (Shift+R / Ctrl+R)"
+          >
+            <svg class="icon record-dot" aria-hidden="true"><use href="#icon-dot"></use></svg>
+            <span id="record-btn-label">Record</span>
+          </button>
+          <button
+            id="export-btn"
+            class="ghost-btn export-btn"
+            type="button"
+            title="Export snapshot bookmark to JSON (E)"
+          >
+            <svg class="icon" aria-hidden="true"><use href="#icon-export"></use></svg>
+            <span>Export</span>
           </button>
           <span id="conn-state" class="conn-state" data-state="connecting">connecting…</span>
         </div>
@@ -216,9 +239,9 @@
               <span class="legend-item"><svg class="icon legend-dot warn" aria-hidden="true"><use href="#icon-dot"></use></svg>warn</span>
               <span class="legend-item"><svg class="icon legend-dot bad" aria-hidden="true"><use href="#icon-dot"></use></svg>bad</span>
             </p>
-            <p class="kbd-hint" title="1-7 jump sections, / focuses the filter, Esc clears focus">
+            <p class="kbd-hint" title="1-7 jump sections, / focuses the filter, R records incident, E exports bookmark, B refreshes schema, Esc clears focus">
               <svg class="icon" aria-hidden="true"><use href="#icon-keyboard"></use></svg>
-              <span><kbd>1</kbd>-<kbd>7</kbd> nav · <kbd>/</kbd> filter · <kbd>Esc</kbd> clear</span>
+              <span><kbd>1</kbd>-<kbd>7</kbd> nav · <kbd>/</kbd> filter · <kbd>R</kbd> rec · <kbd>E</kbd> export · <kbd>B</kbd> schema</span>
             </p>
           </div>
         </nav>
