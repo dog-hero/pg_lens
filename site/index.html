@@ -64,6 +64,12 @@
         <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" />
         <polyline points="12,7 12,12 16,14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
       </symbol>
+      <symbol id="icon-records" viewBox="0 0 24 24">
+        <rect x="2" y="4" width="20" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+        <circle cx="8" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2" />
+        <circle cx="16" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2" />
+        <line x1="8" y1="12" x2="16" y2="12" stroke="currentColor" stroke-width="2" />
+      </symbol>
       <symbol id="icon-sun" viewBox="0 0 24 24">
         <circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2" />
         <g stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -120,7 +126,7 @@
           <a href="https://ratatui.rs">ratatui</a>.
         </p>
         <div class="badges">
-          <a class="pill version-pill" href="docs/changelog.html">v0.18.0 — Changelog &rarr;</a>
+          <a class="pill version-pill" href="docs/changelog.html">v0.18.1 — Changelog &rarr;</a>
           <span class="pill">FSL-1.1-MIT licensed</span>
           <span class="pill">PostgreSQL 13+</span>
           <span class="pill">Rust 2024 edition</span>
@@ -142,17 +148,17 @@
           </a>
         </div>
         <figure class="shot">
-          <img src="assets/demo.gif?v=0.18.0" alt="pg_lens TUI recording: live activity, vitals and lenses in a terminal" width="1200" />
-          <figcaption>The TUI: instance vitals, per-backend activity, and eight lenses — all in a terminal.</figcaption>
+          <img src="assets/demo.gif?v=0.18.1" alt="pg_lens TUI recording: live activity, vitals and lenses in a terminal" width="1200" />
+          <figcaption>The TUI: instance vitals, per-backend activity, and nine lenses — all in a terminal.</figcaption>
         </figure>
       </div>
 
       <section id="features">
         <div class="wrap">
-          <h2>Eight lenses over one connection</h2>
+          <h2>Nine lenses over one connection</h2>
           <p class="lede">
-            Every lens is a focused view over the same live snapshot. Press <code>1</code>–<code>8</code>
-            in the TUI to jump straight to one; the Web Lens matches each view in dedicated tabs.
+            Every lens is a focused view over the same live snapshot. Press <code>1</code>–<code>9</code>
+            in the TUI to jump straight to one; the Web Lens matches each view in dedicated tabs (1–8).
           </p>
           <div class="grid">
             <article class="card">
@@ -227,11 +233,19 @@
                 <code>VACUUM</code> with visual ASCII progress gauges, current phase, and ETA.
               </p>
             </article>
+            <article class="card">
+              <h3><svg aria-hidden="true"><use href="#icon-records"></use></svg> Records Lens</h3>
+              <p>
+                Integrated flight recorder archive: browse incident recordings, inspect file sizes and
+                compression badges (<code>.gz</code>), launch interactive replays with <code>Enter</code>,
+                copy paths (<code>y</code>), and manage retention (<code>x</code>) directly from your terminal or browser.
+              </p>
+            </article>
           </div>
 
           <h2 style="margin-top: 2.5rem">And the things that catch incidents</h2>
           <ul class="checks">
-            <li><strong>Incident Flight Recorder &amp; Offline Replay</strong> — continuous background incident recording with <code>Shift+R</code> (<code>● REC</code>) writing structured <code>.jsonl</code> frames, snapshot bookmark export (<code>E</code>), and deterministic offline replay with <code>pg_lens replay &lt;file&gt;</code>.</li>
+            <li><strong>Incident Flight Recorder &amp; Offline Replay</strong> — continuous background recording with <code>Shift+R</code> (<code>● REC</code>) writing structured frames, real-time streaming gzip compression (<code>--record-compress</code>), auto-split rotation (<code>--record-max-mb</code>), automated retention pruning, snapshot bookmark export (<code>E</code>), visual scrubber track, and deterministic offline replay with <code>pg_lens replay &lt;file&gt;</code>.</li>
             <li><strong>Column Color System &amp; Duration Severity</strong> — intuitive terminal color system where state colors are distinct, and time-based severity coloring is applied strictly to duration so you spot stuck transactions instantly.</li>
             <li><strong>Copy to clipboard over SSH (OSC 52)</strong> — press <code>y</code> to copy the full SQL query, verbatim <code>CREATE INDEX</code> definition, or table schema directly to your system clipboard from anywhere — works seamlessly over remote SSH sessions and tmux without needing X11 or Wayland.</li>
             <li><strong>Instant <code>psql</code> shell (<code>!</code>)</strong> — drop straight into an interactive <code>psql</code> console on the exact same connection and credentials at the press of a single key.</li>
@@ -344,7 +358,7 @@ pg_lens --mock            # instant mock sandbox, no DB needed</code></pre>
               <h3>Incident Replay (Offline)</h3>
 <pre><code>pg_lens replay ~/.local/state/pg_lens/recordings/rec-123.jsonl
 # Space: pause/play | &larr;/&rarr;: step | [/]: speed</code></pre>
-              <p>Replay recorded incidents frame-by-frame across all eight lenses.</p>
+              <p>Replay recorded incidents frame-by-frame across all nine lenses.</p>
             </article>
             <article class="card">
               <h3>Web dashboard</h3>

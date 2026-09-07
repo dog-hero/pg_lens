@@ -4,6 +4,21 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.18.1] — 2026-09-07 — "Records Lens & Streaming Compression"
+
+### Added
+- **Records Lens (TUI Tab 9 & Web Tab 8)** — dedicated management view for browsing, searching, replaying, copying, and deleting incident recordings:
+  - TUI Tab 9 (`9 Records Lens`, direct jump `9`): table view with status indicators, creation timestamps, file sizes, compression badges (`.gz`), search filter (`/` and `\`), interactive replay launch (`Enter`), clipboard path copy (`y`), and interactive deletion (`x`) with safety confirmation modals.
+  - Web Tab 8 (`Records`, shortcut `8`): responsive dashboard panel with live search filtering, file metadata, direct download endpoint (`GET /api/records/download/{filename}`), and token-gated deletion (`DELETE /api/records/{filename}`) strictly blocked under `--read-only`.
+- **Real-Time Streaming Compression (`.jsonl.gz`)** — pure-Rust streaming gzip compression powered by `flate2` (`RecordSink::Gz`), reducing recording disk footprint by up to 90% with near-zero runtime CPU overhead; enabled via `--record-compress` CLI flag and `record_compress = true` config setting.
+- **Transparent Format Detection** — `RecordingReader::load` auto-detects gzip vs plain JSONL files via magic header bytes (`0x1f 0x8b`) or file extension, allowing seamless replay of both `.jsonl` and `.jsonl.gz` recordings.
+- **Recording Auto-Split & Retention Policies** — automatic file rotation when a recording exceeds `--record-max-mb` (default 100 MB), configurable retention window (`--record-retention-days`, default 30 days), and maximum total recording storage cap (`--record-max-total-mb`, default 1000 MB) with FIFO auto-pruning that protects currently active recording files.
+- **Visual Replay Scrubber & Controls** — visual playback timeline track (`[████░░░] 42%`) in TUI replay mode displaying current frame, total frames, frame timestamp, speed multiplier, loop indicator, jump to start (`Home`/`g`), jump to end (`End`/`G`), and loop toggle (`l`/`L`).
+
+### Changed
+- **TUI & Web Lens Tab Navigation** — TUI now features 9 lenses (`1`..=`9` direct jump, with `9` Records), and Web Lens features 8 tabs (`1`..=`8` direct jump, with `8` Records). Keyboard help overlay (`?`) updated.
+- **Demo & Documentation** — regenerated showcase recording and updated landing page highlighting the 9 lenses, streaming compression, and recording retention.
+
 ## [0.18.0] — 2026-09-07 — "Incident Recording & Flight Recorder"
 
 ### Added

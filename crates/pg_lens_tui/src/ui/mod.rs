@@ -18,6 +18,8 @@ mod style;
 mod vacuum;
 mod blocks_lens;
 mod progress_lens;
+mod records_lens;
+mod replay_scrubber;
 
 use pg_lens_core::PollerStatus;
 use ratatui::{
@@ -55,13 +57,15 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     // Transient admin-action feedback ("cancel sent…" / outcome): its own
     // one-line row under the poller banner, collapsing to zero when absent.
     let feedback_height = u16::from(app.admin_feedback.is_some());
-    let [header_area, tabs_area, banner_area, feedback_area, body_area, statusbar_area] =
+    let scrubber_height = u16::from(app.replay_state.is_some());
+    let [header_area, tabs_area, banner_area, feedback_area, body_area, scrubber_area, statusbar_area] =
         Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(banner_height),
             Constraint::Length(feedback_height),
             Constraint::Min(0),
+            Constraint::Length(scrubber_height),
             Constraint::Length(1),
         ])
         .areas(frame.area());
@@ -83,12 +87,19 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         Tab::IndexLens => index_lens::draw(app, frame, body_area),
         Tab::QueryLens => query_lens::draw(app, frame, body_area),
         Tab::ProgressLens => progress_lens::draw(app, frame, body_area),
+        Tab::RecordsLens => records_lens::draw(app, frame, body_area),
+    }
+    if scrubber_height > 0 {
+        replay_scrubber::draw(app, frame, scrubber_area);
     }
     draw_statusbar(app, frame, statusbar_area);
     // Overlays draw over everything else, last — mutually exclusive by
     // construction (`app::handle_key` never lets both be `Some` at once).
     if app.confirm.is_some() {
         confirm::draw(app, frame);
+    }
+    if app.delete_record_target.is_some() {
+        confirm::draw_delete_record(app, frame);
     }
     if app.db_picker.is_some() {
         db_picker::draw(app, frame);
@@ -322,6 +333,12 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             None,
             false,
         ),
+        Tab::RecordsLens => (
+            app.records_table_state.selected(),
+            app.records_row_order.len(),
+            Some(app.records_sort_mode.label()),
+            false,
+        ),
         // Micro Lens counts the FILTERED display order (`row_order`), so the
         // `row X/N` indicator matches what an active filter shows.
         _ => (
@@ -418,6 +435,11 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(d);
         push_hint(&mut spans, "Enter", ": detail".into(), true);
         push_hint(&mut spans, "y", ": copy".into(), true);
+    } else if app.active_tab == Tab::RecordsLens {
+        push_hint(&mut spans, "Enter", ": replay".into(), true);
+        push_hint(&mut spans, "y", ": copy".into(), true);
+        push_hint(&mut spans, "d/x", ": delete".into(), true);
+        push_hint(&mut spans, "b/B", ": rescan".into(), true);
     } else {
         push_hint(&mut spans, "Enter", ": detail".into(), true);
     }
@@ -613,6 +635,19 @@ mod tests {
             .collect()
     }
 
+    fn render_wide(app: &mut App) -> String {
+        let backend = TestBackend::new(160, 36);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| draw(app, frame)).expect("draw");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
     #[test]
     fn macro_lens_renders_header_tabs_and_widgets() {
         let mut app = App::new();
@@ -629,24 +664,24 @@ mod tests {
         assert!(screen.contains("pressure"), "{screen}");
     }
 
-    /// U1: all eight tabs render in the tab bar, in the documented order.
+    /// All nine tabs render in the tab bar, in the documented order.
     #[test]
-    fn eight_lens_titles_render_in_the_tab_bar() {
+    fn nine_lens_titles_render_in_the_tab_bar() {
         let mut app = App::new();
-        let screen = render(&mut app);
+        let screen = render_wide(&mut app);
         for title in Tab::TITLES {
             assert!(screen.contains(title), "missing tab {title}: {screen}");
         }
     }
 
-    /// v0.12: the tab bar carries `1`-`8` number hints so the direct-jump
+    /// v0.12: the tab bar carries `1`-`9` number hints so the direct-jump
     /// keys are self-documenting — each `Tab::TITLES` entry already starts
     /// with its digit (see `Tab::TITLES`'s doc comment).
     #[test]
     fn tab_bar_shows_the_direct_jump_number_hints() {
         let mut app = App::new();
-        let screen = render(&mut app);
-        for (digit, title) in ["1", "2", "3", "4", "5", "6", "7", "8"].into_iter().zip(Tab::TITLES) {
+        let screen = render_wide(&mut app);
+        for (digit, title) in ["1", "2", "3", "4", "5", "6", "7", "8", "9"].into_iter().zip(Tab::TITLES) {
             assert!(
                 title.starts_with(digit),
                 "Tab::TITLES entry {title:?} must start with {digit}"
@@ -1903,6 +1938,7 @@ mod tests {
         let screen = render(&mut app);
         assert!(screen.contains("REPLAY: incident.jsonl"), "header shows replay source: {screen}");
         assert!(screen.contains("PLAY"), "header shows playback status: {screen}");
+        assert!(screen.contains("Frame 1/2"), "scrubber shows frame count: {screen}");
         assert!(screen.contains("step"), "statusbar shows stepping hint: {screen}");
         assert!(screen.contains("export"), "statusbar shows export hint: {screen}");
     }

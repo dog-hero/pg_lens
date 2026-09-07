@@ -181,6 +181,44 @@ struct ConnArgs {
     #[arg(long, global = true)]
     read_only: bool,
 
+    /// Incident recording max file size in megabytes before automatic rotation
+    /// to a new file (minimum 1 MB). [default: 100, or config.toml]
+    #[arg(
+        long,
+        value_name = "MB",
+        env = "PG_LENS_RECORD_MAX_MB",
+        global = true
+    )]
+    record_max_mb: Option<u64>,
+
+    /// Incident recording compression using gzip (.jsonl.gz). [default: false, or config.toml]
+    #[arg(
+        long,
+        env = "PG_LENS_RECORD_COMPRESS",
+        global = true
+    )]
+    record_compress: bool,
+
+    /// Incident recording max total storage limit across all files in MB before auto-pruning.
+    /// [default: none, or config.toml]
+    #[arg(
+        long,
+        value_name = "MB",
+        env = "PG_LENS_RECORD_MAX_TOTAL_MB",
+        global = true
+    )]
+    record_max_total_mb: Option<u64>,
+
+    /// Incident recording retention days limit before auto-pruning.
+    /// [default: none, or config.toml]
+    #[arg(
+        long,
+        value_name = "DAYS",
+        env = "PG_LENS_RECORD_RETENTION_DAYS",
+        global = true
+    )]
+    record_retention_days: Option<u64>,
+
     /// Load the services file (see `--services-file`) from a remote,
     /// read-only source instead of (or merged with) the local file — for
     /// teams that want to share one curated connection list. Two schemes:
@@ -344,6 +382,32 @@ impl ConnArgs {
     /// discipline `settings.rs` uses).
     fn read_only(&self, config: &settings::AppConfig) -> bool {
         resolve_read_only(self.read_only, &self.spec().env, config.read_only)
+    }
+
+    /// `--record-max-mb`, then env, then `config.toml`, then 100 MB default —
+    /// floored at 1 MB. Returns max bytes.
+    fn record_max_bytes(&self, config: &settings::AppConfig) -> usize {
+        let mb = self.record_max_mb.or(config.record_max_mb).unwrap_or(100).max(1);
+        (mb as usize) * 1024 * 1024
+    }
+
+    /// `--record-compress`, then env, then `config.toml`. Returns true if compressed.
+    fn record_compress(&self, config: &settings::AppConfig) -> bool {
+        self.record_compress || config.record_compress.unwrap_or(false)
+    }
+
+    /// `--record-max-total-mb`, then env, then `config.toml`. Returns max total bytes.
+    fn record_max_total_bytes(&self, config: &settings::AppConfig) -> Option<u64> {
+        self.record_max_total_mb
+            .or(config.record_max_total_mb)
+            .map(|mb| mb.max(1) * 1024 * 1024)
+    }
+
+    /// `--record-retention-days`, then env, then `config.toml`. Returns max retention days.
+    fn record_retention_days(&self, config: &settings::AppConfig) -> Option<u64> {
+        self.record_retention_days
+            .or(config.record_retention_days)
+            .map(|d| d.max(1))
     }
 
     /// `--config-url`, then `PG_LENS_CONFIG_URL` (both already merged into
@@ -1211,9 +1275,15 @@ async fn run(
     let interval = conn_args.interval(config);
     let schema_interval = conn_args.schema_interval(config);
     let schema_table_limit = conn_args.schema_table_limit(config);
+    let record_max_bytes = conn_args.record_max_bytes(config);
     let mut app = App::new();
     app.refresh_interval = interval;
     app.read_only = conn_args.read_only(config);
+    app.record_max_bytes = record_max_bytes;
+    app.record_compress = conn_args.record_compress(config);
+    app.record_max_total_bytes = conn_args.record_max_total_bytes(config);
+    app.record_retention_days = conn_args.record_retention_days(config);
+    app.prune_records();
 
     let (tx, mut actions) = mpsc::channel::<Action>(64);
     // `mut`/kept (not detached like the bridge tasks below): `!` (v0.11)
@@ -1587,6 +1657,64 @@ mod tests {
         assert!(!cli.conn.read_only);
     }
 
+    #[test]
+    fn record_max_mb_flag_parses_and_resolves() {
+        let cli = Cli::try_parse_from(["pg_lens", "--record-max-mb", "250"]).expect("parse");
+        assert_eq!(cli.conn.record_max_mb, Some(250));
+        let config = settings::AppConfig::default();
+        assert_eq!(cli.conn.record_max_bytes(&config), 250 * 1024 * 1024);
+
+        // default is 100 MB
+        let bare = Cli::try_parse_from(["pg_lens"]).expect("parse bare");
+        assert_eq!(bare.conn.record_max_bytes(&config), 100 * 1024 * 1024);
+
+        // config applies when flag absent
+        let with_conf = settings::AppConfig {
+            record_max_mb: Some(50),
+            ..Default::default()
+        };
+        assert_eq!(bare.conn.record_max_bytes(&with_conf), 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn record_retention_and_quota_and_compression_flags_parse_and_resolve() {
+        let cli = Cli::try_parse_from([
+            "pg_lens",
+            "--record-compress",
+            "--record-max-total-mb",
+            "500",
+            "--record-retention-days",
+            "14",
+        ])
+        .expect("parse record flags");
+
+        assert!(cli.conn.record_compress);
+        assert_eq!(cli.conn.record_max_total_mb, Some(500));
+        assert_eq!(cli.conn.record_retention_days, Some(14));
+
+        let config = settings::AppConfig::default();
+        assert!(cli.conn.record_compress(&config));
+        assert_eq!(cli.conn.record_max_total_bytes(&config), Some(500 * 1024 * 1024));
+        assert_eq!(cli.conn.record_retention_days(&config), Some(14));
+
+        // Defaults when unset
+        let bare = Cli::try_parse_from(["pg_lens"]).expect("parse bare");
+        assert!(!bare.conn.record_compress(&config));
+        assert_eq!(bare.conn.record_max_total_bytes(&config), None);
+        assert_eq!(bare.conn.record_retention_days(&config), None);
+
+        // Fallback to config
+        let with_conf = settings::AppConfig {
+            record_compress: Some(true),
+            record_max_total_mb: Some(200),
+            record_retention_days: Some(7),
+            ..Default::default()
+        };
+        assert!(bare.conn.record_compress(&with_conf));
+        assert_eq!(bare.conn.record_max_total_bytes(&with_conf), Some(200 * 1024 * 1024));
+        assert_eq!(bare.conn.record_retention_days(&with_conf), Some(7));
+    }
+
     // --- --config-url: flag → env → config precedence -------------------------
 
     #[test]
@@ -1618,6 +1746,10 @@ mod tests {
             mock: false,
             read_only: false,
             config_url: Some("https://example.com/from-flag.toml".to_string()),
+            record_max_mb: None,
+            record_compress: false,
+            record_max_total_mb: None,
+            record_retention_days: None,
         };
         let config = settings::AppConfig {
             remote_config: Some("https://example.com/from-config-toml".to_string()),
@@ -1642,6 +1774,10 @@ mod tests {
             mock: false,
             read_only: false,
             config_url: None,
+            record_max_mb: None,
+            record_compress: false,
+            record_max_total_mb: None,
+            record_retention_days: None,
         };
         let config = settings::AppConfig {
             remote_config: Some("https://example.com/from-config-toml".to_string()),
@@ -1667,6 +1803,10 @@ mod tests {
             mock: false,
             read_only: false,
             config_url: None,
+            record_max_mb: None,
+            record_compress: false,
+            record_max_total_mb: None,
+            record_retention_days: None,
         };
         let overlay = conn
             .resolve_remote_overlay(&settings::AppConfig::default())

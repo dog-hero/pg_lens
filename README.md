@@ -17,7 +17,7 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 and a [live interactive demo](https://dog-hero.github.io/pg_lens/demo/) of the
 Web Lens dashboard running on recorded data (no database required).
 
-![pg_lens TUI demo](https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=0.18.0)
+![pg_lens TUI demo](https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=0.18.1)
 
 <details>
 <summary>Web Lens dashboard (<code>pg_lens serve</code>)</summary>
@@ -58,6 +58,10 @@ Web Lens dashboard running on recorded data (no database required).
   visual progress gauges (`[=====>    ] 50%`), step counters, operational details,
   selection, and administrator cancellation/termination (`c`/`K`). Direct jump via key `8`.
   Web Lens mirrors on tab `7 Progress`.
+- **Records Lens (`9 Records Lens`)** — dedicated incident recording archive manager:
+  browse, search (`/`), replay (`Enter`), copy path (`y`), and safely delete (`x`) incident flight
+  recordings with size indicators and compression badges (`.gz`). Direct jump via key `9`.
+  Web Lens mirrors on tab `8 Records` with real-time filtering, direct download, and token-gated deletion.
 - **In-flight DDL & maintenance progress (`pg_stat_progress_*`)** — live progress
   monitoring for `CREATE INDEX` (and reindex), `ANALYZE`, and `pg_basebackup`.
   Surfaced inside the Micro Lens detail panel (`Enter`), in the dedicated Progress Lens (`8`),
@@ -655,29 +659,29 @@ they ever drift, trust the overlay.
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift+Tab` | Cycle lenses forward / backward (Macro → Micro → Blocks & Locks → Replication → Schema → Indexes → Queries → Progress → Macro) |
-| `1`–`8` | Jump directly to a lens: `1` Macro, `2` Micro, `3` Blocks & Locks, `4` Replication, `5` Schema, `6` Indexes, `7` Queries, `8` Progress |
+| `Tab` / `Shift+Tab` | Cycle lenses forward / backward (Macro → Micro → Blocks & Locks → Replication → Schema → Indexes → Queries → Progress → Records → Macro) |
+| `1`–`9` | Jump directly to a lens: `1` Macro, `2` Micro, `3` Blocks & Locks, `4` Replication, `5` Schema, `6` Indexes, `7` Queries, `8` Progress, `9` Records |
 | `b` | Jump directly to Blocks & Locks Lens |
 | `Backspace` | Jump back to the previously active lens (browser-back style) |
 | `j` / `↓` | Move selection down |
 | `k` / `↑` | Move selection up |
-| `g` / `Home` | Jump selection to the first row |
-| `G` / `End` | Jump selection to the last row |
+| `g` / `Home` | Jump selection to the first row (in replay mode: jump to first frame) |
+| `G` / `End` | Jump selection to the last row (in replay mode: jump to last frame) |
 | `PgUp` / `PgDn` | Move selection by a page |
-| `Enter` | Open/close the selected row's detail panel — on the Schema Lens Tables view this also fetches and shows the table's structure (columns, constraints, referencing FKs, index definitions), fetched on demand; on the Blocks Lens this shows full lock and blocking details; on the Progress Lens this shows operation metrics and session activity; `j`/`k` scroll *inside* an open detail overlay once it's taller than the screen |
-| `/` | Filter the current table — Micro Lens (pid, database, user, application, client, state, wait or query text), Schema Lens Tables view (schema/table name), Query Lens (query text), or Progress Lens (command, relation, phase, detail); each lens keeps its own filter state; `Enter` applies, `Esc` reverts |
+| `Enter` | Open/close detail panel — Schema Lens: table structure; Blocks Lens: lock details; Progress Lens: operation metrics; Records Lens: launch interactive replay for selected recording; `j`/`k` scroll inside open detail |
+| `/` | Filter current table — Micro Lens, Schema Lens, Query Lens, Progress Lens, or Records Lens (file name); `Enter` applies, `Esc` reverts |
 | `\` | Clear the active lens's committed filter |
 | `w` | Full waits panel (Micro Lens only) |
 | `I` | Idle-connection census (Micro Lens only) — swaps the body to a list of idle sessions ranked oldest-first; `Esc` closes it |
 | `v` | Vacuum sub-view (Schema Lens only) |
-| `p` / `o` | Switch active pane between wait-for tree and active locks table (Blocks Lens); show/hide leaf partitions of a collapsed partitioned table (Schema Lens Tables view only) |
-| `x` | Jump to the Query Lens filtered (substring match) to statements mentioning the selected table (Schema Lens Tables view only); `Backspace` returns, `\` clears the seeded filter |
+| `p` / `o` | Switch active pane between wait-for tree and active locks table (Blocks Lens); show/hide leaf partitions (Schema Lens Tables view) |
+| `x` | Schema Lens: jump to Query Lens for table; Records Lens: delete selected recording file (asks for confirmation first) |
 | `d` | Database picker (any lens) — reconnects the poller to the chosen database |
 | `!` | Open a `psql` shell on the same connection (any lens) — see [The `psql` shell](#the-psql-shell) |
-| `y` | Copy the current selection to the clipboard via OSC 52 — the Micro Lens's full selected query, the Query Lens's full statement, the Index Lens's `CREATE INDEX` definition, the Blocks Lens's selected query, the Progress Lens's selected command & relation, or the Schema Lens's selected table's qualified name (its column list instead, once the structure detail overlay is open); see [Copy to clipboard](#copy-to-clipboard) |
+| `y` | Copy selection to clipboard via OSC 52 — Micro query, Query statement, Index definition, Blocks query, Progress command, Schema table name, or Records file path; see [Copy to clipboard](#copy-to-clipboard) |
 | `?` | Keyboard help overlay — lists every binding |
 | `B` / `Shift+B` | Force schema/query-stats & bloat refresh (any lens) |
-| `Shift+R` / `Ctrl+R` | Toggle incident recording mode (Flight Recorder to `.jsonl`) |
+| `Shift+R` / `Ctrl+R` | Toggle incident recording mode (Flight Recorder to `.jsonl` or `.jsonl.gz`) |
 | `E` | Export snapshot bookmark to JSON (`~/.local/state/pg_lens/exports/*.json`) |
 | `s` | Cycle sort column (Micro Lens / Schema Lens tables / Query Lens; inert on Index, Replication, and the Vacuum sub-view) |
 | `+` / `=` | Increase the poll interval |
@@ -685,6 +689,7 @@ they ever drift, trust the overlay.
 | `Space` | Pause / resume the display refresh (freeze for point-in-time analysis; in replay mode: toggle playback) |
 | `←` / `→` | Replay mode: step frames backward / forward |
 | `[` / `]` | Replay mode: decrease / increase playback speed (0.25x – 16.0x) |
+| `l` / `L` | Replay mode: toggle loop playback |
 | `c` | Cancel the selected session's query (`pg_cancel_backend`, Micro / Blocks / Progress Lens) — asks for confirmation first |
 | `K` | Terminate the selected session's backend (`pg_terminate_backend`, kills the connection, Micro / Blocks / Progress Lens) — asks for confirmation first (uppercase on purpose; `k` stays navigation) |
 | `y` / `n` | Confirm / abort — only while a confirm modal is open |
@@ -750,25 +755,37 @@ such caveat.
 
 ### Incident Recording & Snapshot Bookmarks (Flight Recorder)
 
-When diagnosing transient incidents, connection spikes, locking cascades, or slow queries, pg_lens includes a built-in **Flight Recorder** and **Snapshot Export** mechanism that requires zero database-side extensions or external agents.
+When diagnosing transient incidents, connection spikes, locking cascades, or slow queries, pg_lens includes a built-in **Flight Recorder**, **Records Archive**, and **Snapshot Export** mechanism that requires zero database-side extensions or external agents.
 
 #### 1. Live Incident Recording (Flight Recorder)
 - Press **`Shift+R` (`R`)** or **`Ctrl+R`** (or click **● REC** in the Web Lens) to start recording.
 - While active, a bold red **`● REC [MM:SS | N frames]`** indicator pulses in the header.
-- On every poll tick, complete state frames (`DbSnapshot`) are appended to a `.jsonl` file in `$XDG_STATE_HOME/pg_lens/recordings/rec-<target>-<timestamp>.jsonl`.
+- On every poll tick, complete state frames (`DbSnapshot`) are appended to a `.jsonl` (or compressed `.jsonl.gz`) file in `$XDG_STATE_HOME/pg_lens/recordings/rec-<target>-<timestamp>.jsonl[.gz]`.
 - Press **`Shift+R` / `Ctrl+R`** again to stop. The recording file path is automatically queued to your clipboard via OSC 52.
+- **Streaming compression (`--record-compress`)**: transparently compresses recording frames on the fly with pure-Rust gzip (`flate2`), reducing disk space by up to ~90% with minimal CPU impact.
+- **Auto-split & rotation (`--record-max-mb <MB>`)**: automatically closes and rotates to a new segment when the active recording reaches the configured size cap (default 100 MB).
+- **Auto-pruning & retention**: automatically maintains recording disk hygiene on startup, rotation, and exports via `--record-retention-days <DAYS>` (default 30) and `--record-max-total-mb <MB>` (default 1000 MB), purging oldest files (FIFO) while protecting currently recording files.
 
-#### 2. Snapshot Bookmark Export
+#### 2. Records Lens (In-App Archive & Management)
+- TUI Tab 9 (**`9 Records Lens`**) and Web Tab 8 (**`Records`**):
+  - View all past recordings with created timestamp, duration, file size, and compression tags (`.gz`).
+  - Search / filter recordings by name with `/` (clear with `\`).
+  - Press **`Enter`** in TUI to immediately launch an interactive replay session for the selected recording.
+  - Press **`y`** to copy the recording's absolute path to the clipboard via OSC 52.
+  - Press **`x`** to safely delete a recording file (with confirmation modal; token-gated and blocked under `--read-only` in Web Lens).
+  - Direct download endpoint in Web Lens (`GET /api/records/download/{filename}`).
+
+#### 3. Snapshot Bookmark Export
 - Press **`E`** (or click **Export** in the Web Lens) at any moment (live or paused) to bookmark the current point-in-time state.
 - Formatted as pretty JSON in `$XDG_STATE_HOME/pg_lens/exports/snapshot-<target>-<timestamp>.json`.
 - The export file path is automatically queued to your clipboard via OSC 52.
 
-#### 3. Offline Replay & Inspection (`replay` / `view`)
-You can inspect or replay recordings completely offline on any machine, without a PostgreSQL connection:
+#### 4. Offline Replay & Inspection (`replay` / `view`)
+You can inspect or replay recordings completely offline on any machine, without a PostgreSQL connection (transparently supports both `.jsonl` and `.jsonl.gz`):
 
 ```sh
 # Interactive time-travel playback of an incident recording
-pg_lens replay ~/.local/state/pg_lens/recordings/rec-prod-db-20260906-220000.jsonl
+pg_lens replay ~/.local/state/pg_lens/recordings/rec-prod-db-20260906-220000.jsonl.gz
 
 # Adjust playback speed (e.g. 2x fast-forward) and loop indefinitely
 pg_lens replay ./rec-incident.jsonl --speed 2.0 --loop-playback
@@ -777,12 +794,16 @@ pg_lens replay ./rec-incident.jsonl --speed 2.0 --loop-playback
 pg_lens view ~/.local/state/pg_lens/exports/snapshot-prod-db-20260906-220500.json
 ```
 
-**Replay Controls**:
+**Replay Controls & Visual Scrubber**:
+- **Timeline bar**: interactive progress track (`[████░░░░░░] 42%`) in the header showing current frame, total frames, frame timestamp, speed multiplier, and loop mode.
 - `Space`: Pause / resume continuous playback.
 - `←` / `→`: Step frames backward and forward one by one.
 - `[` / `]`: Half / double playback speed (from 0.25x up to 16.0x).
+- `Home` / `g`: Jump to first frame.
+- `End` / `G`: Jump to last frame.
+- `l` / `L`: Toggle automatic loop playback.
 - `E`: Export a point-in-time JSON bookmark of the currently displayed frame.
-- All lenses (`1`–`8`), detail inspectors (`Enter`), and table scrolling (`j`/`k`, `PgUp`/`PgDn`) remain fully interactive across all frames.
+- All lenses (`1`–`9`), detail inspectors (`Enter`), and table scrolling (`j`/`k`, `PgUp`/`PgDn`) remain fully interactive across all frames.
 
 ### Read-only mode
 

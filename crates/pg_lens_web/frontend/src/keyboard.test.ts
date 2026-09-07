@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { filterInputIdForPanel, isEditableTag, isExportKey, isRecordKey, isSchemaRefreshKey, tabIdForKey } from "./keyboard.ts";
 
-test("tabIdForKey maps 1-7 to the seven nav tabs in order", () => {
+test("tabIdForKey maps 1-8 to the eight nav tabs in order", () => {
   assert.equal(tabIdForKey("1"), "tab-activity");
   assert.equal(tabIdForKey("2"), "tab-blocks");
   assert.equal(tabIdForKey("3"), "tab-replication");
@@ -11,19 +11,21 @@ test("tabIdForKey maps 1-7 to the seven nav tabs in order", () => {
   assert.equal(tabIdForKey("5"), "tab-indexes");
   assert.equal(tabIdForKey("6"), "tab-queries");
   assert.equal(tabIdForKey("7"), "tab-progress");
+  assert.equal(tabIdForKey("8"), "tab-records");
 });
 
-test("tabIdForKey is null for anything outside 1-7", () => {
-  assert.equal(tabIdForKey("8"), null);
+test("tabIdForKey is null for anything outside 1-8", () => {
+  assert.equal(tabIdForKey("9"), null);
   assert.equal(tabIdForKey("a"), null);
   assert.equal(tabIdForKey("/"), null);
 });
 
-test("filterInputIdForPanel resolves the four filterable panels", () => {
+test("filterInputIdForPanel resolves the five filterable panels", () => {
   assert.equal(filterInputIdForPanel("activity-panel"), "activity-filter");
   assert.equal(filterInputIdForPanel("schema-panel"), "schema-filter");
   assert.equal(filterInputIdForPanel("queries-panel"), "statements-filter");
   assert.equal(filterInputIdForPanel("progress-panel"), "progress-filter");
+  assert.equal(filterInputIdForPanel("records-panel"), "records-filter");
 });
 
 test("filterInputIdForPanel is null for panels without a filter", () => {

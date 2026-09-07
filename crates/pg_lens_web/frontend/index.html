@@ -125,6 +125,12 @@
         <polyline points="7 10 12 15 17 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
         <line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
       </symbol>
+      <symbol id="icon-records" viewBox="0 0 24 24">
+        <rect x="2" y="4" width="20" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+        <circle cx="8" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2" />
+        <circle cx="16" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2" />
+        <line x1="8" y1="12" x2="16" y2="12" stroke="currentColor" stroke-width="2" />
+      </symbol>
     </svg>
 
     <div id="app">
@@ -233,15 +239,20 @@
             <span class="nav-label">Progress</span>
             <span class="nav-key">7</span>
           </button>
+          <button id="tab-records" class="nav-btn" role="tab" aria-selected="false" aria-controls="records-panel">
+            <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-records"></use></svg>
+            <span class="nav-label">Records</span>
+            <span class="nav-key">8</span>
+          </button>
           <div class="sidenav-footer">
             <p class="legend">
               <span class="legend-item"><svg class="icon legend-dot ok" aria-hidden="true"><use href="#icon-dot"></use></svg>ok</span>
               <span class="legend-item"><svg class="icon legend-dot warn" aria-hidden="true"><use href="#icon-dot"></use></svg>warn</span>
               <span class="legend-item"><svg class="icon legend-dot bad" aria-hidden="true"><use href="#icon-dot"></use></svg>bad</span>
             </p>
-            <p class="kbd-hint" title="1-7 jump sections, / focuses the filter, R records incident, E exports bookmark, B refreshes schema, Esc clears focus">
+            <p class="kbd-hint" title="1-8 jump sections, / focuses the filter, R records incident, E exports bookmark, B refreshes schema, Esc clears focus">
               <svg class="icon" aria-hidden="true"><use href="#icon-keyboard"></use></svg>
-              <span><kbd>1</kbd>-<kbd>7</kbd> nav · <kbd>/</kbd> filter · <kbd>R</kbd> rec · <kbd>E</kbd> export · <kbd>B</kbd> schema</span>
+              <span><kbd>1</kbd>-<kbd>8</kbd> nav · <kbd>/</kbd> filter · <kbd>R</kbd> rec · <kbd>E</kbd> export · <kbd>B</kbd> schema</span>
             </p>
           </div>
         </nav>
@@ -429,6 +440,39 @@
                     <th>Progress</th>
                     <th class="num">Step</th>
                     <th>Detail</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+          <section id="records-panel" class="panel" role="tabpanel" hidden>
+            <div class="panel-header-row">
+              <h2>Records <span class="panel-note">incident recordings &amp; bookmarks</span></h2>
+              <button id="records-refresh-btn" class="btn btn-sm" title="Refresh file list">Refresh</button>
+            </div>
+            <input
+              id="records-filter"
+              class="filter-input"
+              type="search"
+              placeholder="Filter by target, filename or kind… (/)"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <p id="records-placeholder" class="placeholder">No incident recordings or snapshot bookmarks found.</p>
+            <div class="table-wrap">
+              <table id="records-table">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Target</th>
+                    <th>Filename</th>
+                    <th class="num">Size</th>
+                    <th class="num">Frames</th>
+                    <th>Started</th>
+                    <th>Ended</th>
+                    <th>Duration</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody></tbody>

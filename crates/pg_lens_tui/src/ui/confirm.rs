@@ -74,6 +74,47 @@ pub fn draw(app: &App, frame: &mut Frame) {
     frame.render_widget(panel, area);
 }
 
+pub fn draw_delete_record(app: &App, frame: &mut Frame) {
+    let Some(target) = app.delete_record_target.as_ref() else {
+        return;
+    };
+    let filename = &target.filename;
+    let area = centered(frame.area(), 68, 6);
+
+    let title = " Delete recording ";
+    let border = Style::new().fg(Color::Red).bold();
+    let question = format!("Delete recording file {filename}?");
+    let warning = "This will permanently remove the file from disk.";
+
+    let mut lines = vec![
+        Line::from(question).centered().bold(),
+        Line::from(warning)
+            .centered()
+            .style(Style::new().fg(Color::Red)),
+    ];
+    let [yk, yd] = style::hint("y", ": confirm delete");
+    let [nk, nd] = style::hint("n/Esc", ": cancel");
+    lines.push(
+        Line::from(vec![
+            yk,
+            yd,
+            Span::styled(" \u{b7} ", style::label_style()),
+            nk,
+            nd,
+        ])
+        .centered(),
+    );
+
+    let panel = Paragraph::new(lines).block(
+        Block::bordered()
+            .title(title)
+            .title_style(border)
+            .border_style(border),
+    );
+    frame.render_widget(Clear, area);
+    frame.render_widget(panel, area);
+}
+
 /// A `width` x `height` rect centered in `area` (clamped to fit).
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [h] = Layout::horizontal([Constraint::Length(width.min(area.width))])

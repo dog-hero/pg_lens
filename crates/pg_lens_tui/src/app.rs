@@ -77,15 +77,17 @@ pub enum Tab {
     /// In-flight maintenance and progress (v0.17.1): `pg_stat_progress_*`
     /// (CREATE INDEX, VACUUM, CLUSTER, ANALYZE, REINDEX).
     ProgressLens,
+    /// Incident recordings & snapshot bookmarks (Tab 9).
+    RecordsLens,
 }
 
 impl Tab {
     // v0.12: number-prefixed so the tab bar is self-documenting about the
-    // `1`-`8` direct-jump keys (see `handle_key`'s digit arm). The prefix is
+    // `1`-`9` direct-jump keys (see `handle_key`'s digit arm). The prefix is
     // additive on top of the original title text (never replaces it) so
     // every pre-existing `screen.contains("Macro Lens")`-style assertion
     // keeps matching unchanged.
-    pub const TITLES: [&'static str; 8] = [
+    pub const TITLES: [&'static str; 9] = [
         "1 Macro Lens",
         "2 Micro Lens",
         "3 Blocks & Locks Lens",
@@ -94,6 +96,7 @@ impl Tab {
         "6 Indexes",
         "7 Query Lens",
         "8 Progress Lens",
+        "9 Records Lens",
     ];
 
     pub fn index(self) -> usize {
@@ -106,10 +109,11 @@ impl Tab {
             Tab::IndexLens => 5,
             Tab::QueryLens => 6,
             Tab::ProgressLens => 7,
+            Tab::RecordsLens => 8,
         }
     }
 
-    /// Inverse of [`Tab::index`] — used by the `1`-`8` direct-jump keys.
+    /// Inverse of [`Tab::index`] — used by the `1`-`9` direct-jump keys.
     /// `None` for anything outside `0..8`.
     pub fn from_index(index: usize) -> Option<Self> {
         match index {
@@ -121,6 +125,7 @@ impl Tab {
             5 => Some(Tab::IndexLens),
             6 => Some(Tab::QueryLens),
             7 => Some(Tab::ProgressLens),
+            8 => Some(Tab::RecordsLens),
             _ => None,
         }
     }
@@ -134,7 +139,8 @@ impl Tab {
             Tab::SchemaLens => Tab::IndexLens,
             Tab::IndexLens => Tab::QueryLens,
             Tab::QueryLens => Tab::ProgressLens,
-            Tab::ProgressLens => Tab::MacroLens,
+            Tab::ProgressLens => Tab::RecordsLens,
+            Tab::RecordsLens => Tab::MacroLens,
         }
     }
 
@@ -142,7 +148,7 @@ impl Tab {
     /// [`Tab::next`].
     pub fn prev(self) -> Self {
         match self {
-            Tab::MacroLens => Tab::ProgressLens,
+            Tab::MacroLens => Tab::RecordsLens,
             Tab::MicroLens => Tab::MacroLens,
             Tab::BlocksLens => Tab::MicroLens,
             Tab::ReplicationLens => Tab::BlocksLens,
@@ -150,6 +156,37 @@ impl Tab {
             Tab::IndexLens => Tab::SchemaLens,
             Tab::QueryLens => Tab::IndexLens,
             Tab::ProgressLens => Tab::QueryLens,
+            Tab::RecordsLens => Tab::ProgressLens,
+        }
+    }
+}
+
+/// Sort modes for the Records Lens (Tab 9).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecordsSortMode {
+    #[default]
+    StartedDesc,
+    StartedAsc,
+    SizeDesc,
+    NameAsc,
+}
+
+impl RecordsSortMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::StartedDesc => Self::StartedAsc,
+            Self::StartedAsc => Self::SizeDesc,
+            Self::SizeDesc => Self::NameAsc,
+            Self::NameAsc => Self::StartedDesc,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::StartedDesc => "started (newest)",
+            Self::StartedAsc => "started (oldest)",
+            Self::SizeDesc => "size (largest)",
+            Self::NameAsc => "name (A-Z)",
         }
     }
 }
@@ -591,6 +628,20 @@ pub struct App {
     pub progress_filter: String,
     pub progress_filter_saved: String,
     pub progress_filter_editing: bool,
+    /// Incident recordings and snapshot bookmarks (Tab 9: Records Lens).
+    pub records: Vec<pg_lens_core::recording::RecordingEntry>,
+    pub records_row_order: Vec<usize>,
+    pub records_table_state: TableState,
+    pub records_filter: String,
+    pub records_filter_saved: String,
+    pub records_filter_editing: bool,
+    pub records_sort_mode: RecordsSortMode,
+    pub record_max_bytes: usize,
+    pub record_compress: bool,
+    pub record_max_total_bytes: Option<u64>,
+    pub record_retention_days: Option<u64>,
+    pub delete_record_target: Option<pg_lens_core::recording::RecordingEntry>,
+    pub live_mode_saved_snapshot: Option<Arc<DbSnapshot>>,
     /// Whether the detail panel is open (Micro Lens: full query of the
     /// selected session; Schema Lens: full vacuum/analyze stats + index
     /// bloat of the selected table). While open: `j`/`k` still move the
@@ -797,6 +848,19 @@ impl App {
             progress_filter: String::new(),
             progress_filter_saved: String::new(),
             progress_filter_editing: false,
+            records: Vec::new(),
+            records_row_order: Vec::new(),
+            records_table_state: TableState::default().with_selected(0),
+            records_filter: String::new(),
+            records_filter_saved: String::new(),
+            records_filter_editing: false,
+            records_sort_mode: RecordsSortMode::default(),
+            record_max_bytes: pg_lens_core::recording::DEFAULT_MAX_RECORD_BYTES,
+            record_compress: false,
+            record_max_total_bytes: None,
+            record_retention_days: None,
+            delete_record_target: None,
+            live_mode_saved_snapshot: None,
             detail_open: false,
             table_detail_scroll: 0,
             table_detail_request: None,
@@ -846,6 +910,7 @@ impl App {
         resort_replication(&mut app);
         resort_statements(&mut app);
         resort_progress(&mut app);
+        app.refresh_records();
         app
     }
 }
@@ -933,6 +998,61 @@ impl App {
         items.get(unified_idx).cloned()
     }
 
+    /// The Records Lens recording or bookmark currently under the cursor (Tab 9).
+    pub fn selected_recording(&self) -> Option<&pg_lens_core::recording::RecordingEntry> {
+        let display_idx = self.records_table_state.selected()?;
+        let record_idx = *self.records_row_order.get(display_idx)?;
+        self.records.get(record_idx)
+    }
+
+    /// Prunes old recordings and snapshot bookmarks based on retention and quota settings.
+    pub fn prune_records(&mut self) {
+        if self.record_max_total_bytes.is_none() && self.record_retention_days.is_none() {
+            return;
+        }
+        let recordings_dir = self
+            .state_dir
+            .as_ref()
+            .map(|d| d.join("recordings"))
+            .or_else(pg_lens_core::recording::recordings_dir)
+            .unwrap_or_else(|| std::env::temp_dir().join("pg_lens").join("recordings"));
+        let exports_dir = self
+            .state_dir
+            .as_ref()
+            .map(|d| d.join("exports"))
+            .or_else(pg_lens_core::recording::exports_dir)
+            .unwrap_or_else(|| std::env::temp_dir().join("pg_lens").join("exports"));
+        let active_path = self.recording.as_ref().map(|r| r.writer.path());
+        let _ = pg_lens_core::recording::prune_recordings(
+            &recordings_dir,
+            &exports_dir,
+            self.record_max_total_bytes,
+            self.record_retention_days,
+            active_path,
+        );
+    }
+
+    /// Scans the state directories and refreshes available recordings and snapshot bookmarks.
+    pub fn refresh_records(&mut self) {
+        self.prune_records();
+        let recordings_dir = self
+            .state_dir
+            .as_ref()
+            .map(|d| d.join("recordings"))
+            .or_else(pg_lens_core::recording::recordings_dir)
+            .unwrap_or_else(|| std::env::temp_dir().join("pg_lens").join("recordings"));
+        let exports_dir = self
+            .state_dir
+            .as_ref()
+            .map(|d| d.join("exports"))
+            .or_else(pg_lens_core::recording::exports_dir)
+            .unwrap_or_else(|| std::env::temp_dir().join("pg_lens").join("exports"));
+        let active_path = self.recording.as_ref().map(|r| r.writer.path());
+        self.records = pg_lens_core::recording::list_recordings(&recordings_dir, &exports_dir, active_path);
+        resort_records(self);
+        clamp_selection(self);
+    }
+
     /// Toggles incident recording mode (Flight Recorder).
     pub fn toggle_recording(&mut self) {
         if self.replay_state.is_some() {
@@ -954,6 +1074,7 @@ impl App {
                         error: false,
                         expires_at_tick: self.tick_count + ADMIN_FEEDBACK_TICKS * 2,
                     });
+                    self.refresh_records();
                 }
                 Err(e) => {
                     self.admin_feedback = Some(AdminFeedback {
@@ -965,9 +1086,18 @@ impl App {
             }
         } else {
             let writer_res = if let Some(ref dir) = self.state_dir {
-                pg_lens_core::recording::RecordingWriter::create_in(&self.host, &dir.join("recordings"))
+                pg_lens_core::recording::RecordingWriter::create_in_full(
+                    &self.host,
+                    &dir.join("recordings"),
+                    self.record_max_bytes,
+                    self.record_compress,
+                )
             } else {
-                pg_lens_core::recording::RecordingWriter::new(&self.host)
+                pg_lens_core::recording::RecordingWriter::new_full(
+                    &self.host,
+                    self.record_max_bytes,
+                    self.record_compress,
+                )
             };
             match writer_res {
                 Ok(mut writer) => {
@@ -981,6 +1111,7 @@ impl App {
                         error: false,
                         expires_at_tick: self.tick_count + ADMIN_FEEDBACK_TICKS,
                     });
+                    self.refresh_records();
                 }
                 Err(e) => {
                     self.admin_feedback = Some(AdminFeedback {
@@ -1009,6 +1140,7 @@ impl App {
                     error: false,
                     expires_at_tick: self.tick_count + ADMIN_FEEDBACK_TICKS * 2,
                 });
+                self.refresh_records();
             }
             Err(e) => {
                 self.admin_feedback = Some(AdminFeedback {
@@ -1068,6 +1200,7 @@ pub fn clipboard_text(app: &App) -> Option<String> {
                 Some(format!("{} on {}", row.command, row.relation))
             }
         }
+        Tab::RecordsLens => app.selected_recording().map(|r| r.path.display().to_string()),
         _ => None,
     }
 }
@@ -1097,7 +1230,25 @@ pub fn update(app: &mut App, action: Action) {
         Action::Key(key) => handle_key(app, key),
         Action::Snapshot(snapshot) => {
             if let Some(ref mut rec) = app.recording {
-                let _ = rec.writer.append(&snapshot);
+                match rec.writer.append(&snapshot) {
+                    Ok(Some(new_path)) => {
+                        let path_str = new_path.display().to_string();
+                        app.admin_feedback = Some(AdminFeedback {
+                            text: format!("Recording rotated to {path_str}"),
+                            error: false,
+                            expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                        });
+                        app.refresh_records();
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        app.admin_feedback = Some(AdminFeedback {
+                            text: format!("Recording write failed: {e}"),
+                            error: true,
+                            expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                        });
+                    }
+                }
             }
             if app.paused {
                 // Frozen: park the newest arrival (last-wins) instead of
@@ -1196,6 +1347,9 @@ pub fn apply_snapshot(app: &mut App, snapshot: Arc<DbSnapshot>) {
     resort_replication(app);
     resort_statements(app);
     resort_progress(app);
+    if app.active_tab == Tab::RecordsLens && app.recording.is_some() {
+        app.refresh_records();
+    }
     clamp_selection(app);
 }
 
@@ -1298,6 +1452,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         handle_confirm_key(app, key);
         return;
     }
+    // Delete recording confirmation modal
+    if app.delete_record_target.is_some() {
+        handle_delete_record_confirm_key(app, key);
+        return;
+    }
     // In-session database picker (`d`, U2): j/k move, Enter selects, Esc
     // closes — an overlay like `confirm`, so every other key (including q)
     // is inert while it is open.
@@ -1307,11 +1466,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
     // Filter editing (`/`): printable keys edit the ACTIVE lens's filter
     // live, so its table narrows as you type; Enter commits, Esc reverts.
-    // Every lens keybinding is inert until then. v0.12: three independent
-    // filters (Micro/Schema/Query) share this shape but never their state —
-    // `filter_target` below picks which triple of fields is live, so typing
-    // on one lens can never leak into another's search term.
-    if app.filter_editing || app.schema_filter_editing || app.statements_filter_editing {
+    if active_filter_lens(app).is_some() {
         handle_filter_key(app, key);
         return;
     }
@@ -1324,7 +1479,15 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // for ESC_QUIT_WINDOW_TICKS; a second press inside that window
         // quits. `q` and Ctrl+C stay immediate (deliberate keys).
         KeyCode::Esc => {
-            if app.detail_open {
+            if let Some(snap) = app.live_mode_saved_snapshot.take() {
+                app.replay_state = None;
+                apply_snapshot(app, snap);
+                app.admin_feedback = Some(AdminFeedback {
+                    text: "Exited replay, returned to live view".to_string(),
+                    error: false,
+                    expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+                });
+            } else if app.detail_open {
                 app.detail_open = false;
             } else if app.waits_open {
                 app.waits_open = false;
@@ -1373,6 +1536,50 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 app.detail_open = false;
             } else if app.waits_open {
                 app.waits_open = false;
+            } else if app.active_tab == Tab::RecordsLens {
+                if let Some(entry) = app.selected_recording().cloned() {
+                    match pg_lens_core::recording::RecordingReader::load(&entry.path) {
+                        Ok(raw_frames) if !raw_frames.is_empty() => {
+                            let frames: Vec<Arc<DbSnapshot>> =
+                                raw_frames.into_iter().map(Arc::new).collect();
+                            let initial = frames[0].clone();
+                            app.live_mode_saved_snapshot = Some(app.snapshot.clone());
+                            app.replay_state = Some(ReplayState {
+                                frames,
+                                current_idx: 0,
+                                is_paused: false,
+                                speed: 1.0,
+                                loop_playback: false,
+                                source_path: entry.path.clone(),
+                                last_frame_time: Instant::now(),
+                            });
+                            apply_snapshot(app, initial);
+                            app.active_tab = Tab::MacroLens;
+                            app.admin_feedback = Some(AdminFeedback {
+                                text: format!(
+                                    "Replaying {} (Space: pause, \u{2190}/\u{2192}: step, Esc: exit replay)",
+                                    entry.filename
+                                ),
+                                error: false,
+                                expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                            });
+                        }
+                        Ok(_) => {
+                            app.admin_feedback = Some(AdminFeedback {
+                                text: format!("File {} contains no snapshots", entry.filename),
+                                error: true,
+                                expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                            });
+                        }
+                        Err(e) => {
+                            app.admin_feedback = Some(AdminFeedback {
+                                text: format!("Failed to read {}: {e}", entry.filename),
+                                error: true,
+                                expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                            });
+                        }
+                    }
+                }
             } else if (app.active_tab == Tab::MicroLens
                 && app.micro_view == MicroView::Activity
                 && app.table_state.selected().is_some())
@@ -1397,6 +1604,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.detail_open = false;
             app.waits_open = false;
             app.active_tab = app.active_tab.next();
+            if app.active_tab == Tab::RecordsLens {
+                app.refresh_records();
+            }
         }
         // v0.12: Shift+Tab cycles backward — the exact inverse of `Tab`,
         // same overlay-close-then-switch discipline (note `schema_view`/
@@ -1408,6 +1618,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.detail_open = false;
             app.waits_open = false;
             app.active_tab = app.active_tab.prev();
+            if app.active_tab == Tab::RecordsLens {
+                app.refresh_records();
+            }
         }
         // v0.12: direct tab jump, in `Tab::TITLES`/`Tab::index()` order (the
         // tab bar's number prefixes document this). Reached only when no
@@ -1415,7 +1628,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // earlier in this function), so it can never hijack a digit typed
         // into the filter editor or a confirm-modal keystroke. A no-op if
         // already on that tab (nothing to remember as "previous").
-        KeyCode::Char(c @ '1'..='8') => {
+        KeyCode::Char(c @ '1'..='9') => {
             if let Some(tab) = Tab::from_index(c as usize - '1' as usize)
                 && tab != app.active_tab
             {
@@ -1423,6 +1636,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 app.detail_open = false;
                 app.waits_open = false;
                 app.active_tab = tab;
+                if tab == Tab::RecordsLens {
+                    app.refresh_records();
+                }
             }
         }
         // v0.12: "go back" — swaps with `previous_tab` (browser-back), so a
@@ -1438,6 +1654,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 app.waits_open = false;
                 app.active_tab = prev;
                 app.previous_tab = Some(current);
+                if prev == Tab::RecordsLens {
+                    app.refresh_records();
+                }
             }
         }
         // `/` starts (or resumes) editing the active lens's own filter (see
@@ -1464,6 +1683,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('/') if app.active_tab == Tab::ProgressLens => {
             app.progress_filter_saved = app.progress_filter.clone();
             app.progress_filter_editing = true;
+        }
+        KeyCode::Char('/') if app.active_tab == Tab::RecordsLens => {
+            app.records_filter_saved = app.records_filter.clone();
+            app.records_filter_editing = true;
         }
         // v0.12: `\` clears the ACTIVE lens's committed filter in one key —
         // inert when there is nothing to clear (empty filter) or while
@@ -1497,6 +1720,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             Tab::ProgressLens if !app.progress_filter.is_empty() => {
                 app.progress_filter.clear();
                 resort_progress(app);
+                clamp_selection(app);
+            }
+            Tab::RecordsLens if !app.records_filter.is_empty() => {
+                app.records_filter.clear();
+                resort_records(app);
                 clamp_selection(app);
             }
             _ => {}
@@ -1602,6 +1830,29 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 });
             }
         }
+        // On Records Lens: `x` or `Delete` prompts deletion of selected recording.
+        // On all lenses: `d` opens the database picker.
+        KeyCode::Char('x') | KeyCode::Delete if app.active_tab == Tab::RecordsLens => {
+            if let Some(entry) = app.selected_recording() {
+                if entry.is_active {
+                    app.admin_feedback = Some(AdminFeedback {
+                        text: "Cannot delete active in-flight recording (stop recording first)".to_string(),
+                        error: true,
+                        expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+                    });
+                } else {
+                    app.delete_record_target = Some(entry.clone());
+                }
+            }
+        }
+        KeyCode::Char('b') | KeyCode::Char('B') if app.active_tab == Tab::RecordsLens => {
+            app.refresh_records();
+            app.admin_feedback = Some(AdminFeedback {
+                text: "Rescanned recordings directory".to_string(),
+                error: false,
+                expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+            });
+        }
         // `d` opens the database picker (U2) from ANY lens — reconnecting is
         // a cluster-wide, not a per-lens, action.
         KeyCode::Char('d') => open_db_picker(app),
@@ -1674,8 +1925,30 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // tick-based rather than wall-clock).
         KeyCode::PageUp => move_selection(app, -PAGE_SIZE),
         KeyCode::PageDown => move_selection(app, PAGE_SIZE),
-        KeyCode::Home | KeyCode::Char('g') => move_selection_to(app, 0),
-        KeyCode::End | KeyCode::Char('G') => move_selection_to(app, i64::MAX),
+        KeyCode::Home | KeyCode::Char('g') => {
+            if let Some(ref mut replay) = app.replay_state {
+                replay.is_paused = true;
+                replay.current_idx = 0;
+                if let Some(snap) = replay.frames.first().cloned() {
+                    apply_snapshot(app, snap);
+                }
+            } else {
+                move_selection_to(app, 0);
+            }
+        }
+        KeyCode::End | KeyCode::Char('G') => {
+            if let Some(ref mut replay) = app.replay_state {
+                replay.is_paused = true;
+                if !replay.frames.is_empty() {
+                    replay.current_idx = replay.frames.len() - 1;
+                    if let Some(snap) = replay.frames.last().cloned() {
+                        apply_snapshot(app, snap);
+                    }
+                }
+            } else {
+                move_selection_to(app, i64::MAX);
+            }
+        }
         // `s` cycles the sort of whichever lens is active (each keeps its
         // own mode, so tabbing away and back never loses the choice). The
         // Index Lens and Replication Lens have no sort mode of their own
@@ -1693,6 +1966,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             Tab::QueryLens => {
                 app.statements_sort_mode = app.statements_sort_mode.next();
                 resort_statements(app);
+            }
+            Tab::RecordsLens => {
+                app.records_sort_mode = app.records_sort_mode.next();
+                resort_records(app);
             }
             Tab::IndexLens | Tab::ReplicationLens => {}
             Tab::MicroLens if app.micro_view == MicroView::Idle => {}
@@ -1777,6 +2054,17 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             }
             if let Some(snap) = snap_to_apply {
                 apply_snapshot(app, snap);
+            }
+        }
+        KeyCode::Char('l') | KeyCode::Char('L') => {
+            if let Some(ref mut replay) = app.replay_state {
+                replay.loop_playback = !replay.loop_playback;
+                let status = if replay.loop_playback { "enabled" } else { "disabled" };
+                app.admin_feedback = Some(AdminFeedback {
+                    text: format!("Replay loop {status}"),
+                    error: false,
+                    expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+                });
             }
         }
         // Replay speed adjustments: [ slows down, ] speeds up
@@ -1906,6 +2194,40 @@ fn handle_confirm_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Keymap while confirming deletion of an incident recording file.
+fn handle_delete_record_confirm_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Some(target) = app.delete_record_target.take() {
+                match pg_lens_core::recording::delete_recording(&target.path) {
+                    Ok(()) => {
+                        app.admin_feedback = Some(AdminFeedback {
+                            text: format!("Deleted recording: {}", target.filename),
+                            error: false,
+                            expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                        });
+                        app.refresh_records();
+                    }
+                    Err(e) => {
+                        app.admin_feedback = Some(AdminFeedback {
+                            text: format!("Failed to delete {}: {e}", target.filename),
+                            error: true,
+                            expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS * 2,
+                        });
+                    }
+                }
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.delete_record_target = None;
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
+        _ => {}
+    }
+}
+
 /// Opens the in-session database picker (`d`). A no-op when the poller has
 /// not yet collected the database list (`snapshot.databases` is `None`
 /// before the first successful fast tick, or on any collection failure) —
@@ -2005,6 +2327,7 @@ enum FilterLens {
     Schema,
     Query,
     Progress,
+    Records,
 }
 
 /// `None` when no filter is being edited — defensive; `handle_key` only
@@ -2020,6 +2343,8 @@ fn active_filter_lens(app: &App) -> Option<FilterLens> {
         Some(FilterLens::Query)
     } else if app.progress_filter_editing {
         Some(FilterLens::Progress)
+    } else if app.records_filter_editing {
+        Some(FilterLens::Records)
     } else {
         None
     }
@@ -2034,6 +2359,7 @@ fn resort_for(app: &mut App, lens: FilterLens) {
         FilterLens::Schema => resort_schema(app),
         FilterLens::Query => resort_statements(app),
         FilterLens::Progress => resort_progress(app),
+        FilterLens::Records => resort_records(app),
     }
 }
 
@@ -2059,6 +2385,7 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
             FilterLens::Schema => app.schema_filter_editing = false,
             FilterLens::Query => app.statements_filter_editing = false,
             FilterLens::Progress => app.progress_filter_editing = false,
+            FilterLens::Records => app.records_filter_editing = false,
         },
         KeyCode::Esc => {
             match lens {
@@ -2078,6 +2405,10 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
                     app.progress_filter = std::mem::take(&mut app.progress_filter_saved);
                     app.progress_filter_editing = false;
                 }
+                FilterLens::Records => {
+                    app.records_filter = std::mem::take(&mut app.records_filter_saved);
+                    app.records_filter_editing = false;
+                }
             }
             resort_for(app, lens);
             clamp_selection(app);
@@ -2096,6 +2427,9 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
                 FilterLens::Progress => {
                     app.progress_filter.pop();
                 }
+                FilterLens::Records => {
+                    app.records_filter.pop();
+                }
             }
             resort_for(app, lens);
             clamp_selection(app);
@@ -2107,6 +2441,7 @@ fn handle_filter_key(app: &mut App, key: KeyEvent) {
                 FilterLens::Schema => app.schema_filter.push(c),
                 FilterLens::Query => app.statements_filter.push(c),
                 FilterLens::Progress => app.progress_filter.push(c),
+                FilterLens::Records => app.records_filter.push(c),
             }
             resort_for(app, lens);
             clamp_selection(app);
@@ -2248,6 +2583,10 @@ fn selection_target(app: &mut App) -> (&mut TableState, usize) {
         Tab::ProgressLens => (
             &mut app.progress_table_state,
             app.progress_row_order.len(),
+        ),
+        Tab::RecordsLens => (
+            &mut app.records_table_state,
+            app.records_row_order.len(),
         ),
         // v0.11: the idle census keeps its own cursor over its own row set.
         Tab::MicroLens if app.micro_view == MicroView::Idle => (
@@ -2429,6 +2768,19 @@ fn clamp_selection(app: &mut App) {
             .unwrap_or(0)
             .min(blocks_locks_len - 1);
         app.blocks_locks_state.select(Some(clamped));
+    }
+
+    // Records Lens (Tab 9): clamps records rows.
+    let records_len = app.records_row_order.len();
+    if records_len == 0 {
+        app.records_table_state.select(None);
+    } else {
+        let clamped = app
+            .records_table_state
+            .selected()
+            .unwrap_or(0)
+            .min(records_len - 1);
+        app.records_table_state.select(Some(clamped));
     }
 }
 
@@ -2684,6 +3036,59 @@ fn resort_progress(app: &mut App) {
         .filter(|&i| needle.is_empty() || progress_row_matches(&rows[i], &needle))
         .collect();
     app.progress_row_order = order;
+}
+
+fn records_row_matches(entry: &pg_lens_core::recording::RecordingEntry, needle: &str) -> bool {
+    entry.filename.to_lowercase().contains(needle)
+        || entry.target.to_lowercase().contains(needle)
+        || match entry.kind {
+            pg_lens_core::recording::RecordingKind::Recording => "recording rec",
+            pg_lens_core::recording::RecordingKind::Bookmark => "bookmark snapshot point",
+        }
+        .contains(needle)
+        || entry
+            .started_at
+            .as_deref()
+            .is_some_and(|s: &str| s.to_lowercase().contains(needle))
+        || entry
+            .ended_at
+            .as_deref()
+            .is_some_and(|s: &str| s.to_lowercase().contains(needle))
+}
+
+/// Recomputes `records_row_order` from available disk records + filter + sort mode.
+pub fn resort_records(app: &mut App) {
+    let rows = &app.records;
+    let needle = app.records_filter.to_lowercase();
+    let mut order: Vec<usize> = (0..rows.len())
+        .filter(|&i| needle.is_empty() || records_row_matches(&rows[i], &needle))
+        .collect();
+
+    match app.records_sort_mode {
+        RecordsSortMode::StartedDesc => order.sort_by(|&a, &b| {
+            rows[b]
+                .started_at_secs
+                .cmp(&rows[a].started_at_secs)
+                .then_with(|| rows[a].filename.cmp(&rows[b].filename))
+        }),
+        RecordsSortMode::StartedAsc => order.sort_by(|&a, &b| {
+            rows[a]
+                .started_at_secs
+                .cmp(&rows[b].started_at_secs)
+                .then_with(|| rows[a].filename.cmp(&rows[b].filename))
+        }),
+        RecordsSortMode::SizeDesc => order.sort_by(|&a, &b| {
+            rows[b]
+                .size_bytes
+                .cmp(&rows[a].size_bytes)
+                .then_with(|| rows[a].filename.cmp(&rows[b].filename))
+        }),
+        RecordsSortMode::NameAsc => order.sort_by(|&a, &b| {
+            rows[a].filename.cmp(&rows[b].filename)
+        }),
+    }
+
+    app.records_row_order = order;
 }
 
 #[cfg(test)]
@@ -3198,7 +3603,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_the_eight_lenses() {
+    fn tab_cycles_the_nine_lenses() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::MacroLens);
         update(&mut app, press(KeyCode::Tab));
@@ -3216,6 +3621,8 @@ mod tests {
         update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::ProgressLens);
         update(&mut app, press(KeyCode::Tab));
+        assert_eq!(app.active_tab, Tab::RecordsLens);
+        update(&mut app, press(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::MacroLens);
         assert!(!app.should_quit);
     }
@@ -3223,9 +3630,11 @@ mod tests {
     // --- v0.12: navigation & scroll polish ----------------------------------
 
     #[test]
-    fn back_tab_cycles_the_eight_lenses_backward() {
+    fn back_tab_cycles_the_nine_lenses_backward() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::MacroLens);
+        update(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.active_tab, Tab::RecordsLens);
         update(&mut app, press(KeyCode::BackTab));
         assert_eq!(app.active_tab, Tab::ProgressLens);
         update(&mut app, press(KeyCode::BackTab));
@@ -5322,5 +5731,147 @@ mod tests {
         let feedback = app.admin_feedback.as_ref().expect("feedback set");
         assert!(feedback.text.contains("copied 8 chars"));
         assert!(!feedback.error);
+    }
+
+    #[test]
+    fn tab_9_jumps_to_records_lens_and_cycles() {
+        let mut app = App::new();
+        assert_eq!(app.active_tab, Tab::MacroLens);
+        update(&mut app, press(KeyCode::Char('9')));
+        assert_eq!(app.active_tab, Tab::RecordsLens);
+        assert_eq!(app.active_tab.index(), 8);
+
+        // Next tab cycles back to MacroLens
+        assert_eq!(app.active_tab.next(), Tab::MacroLens);
+        // Prev tab goes to ProgressLens
+        assert_eq!(app.active_tab.prev(), Tab::ProgressLens);
+    }
+
+    #[test]
+    fn records_sort_and_filter_test() {
+        let mut app = App::new();
+        app.records = vec![
+            pg_lens_core::recording::RecordingEntry {
+                path: PathBuf::from("/tmp/rec-prod-20260907_100000.jsonl"),
+                filename: "rec-prod-20260907_100000.jsonl".to_string(),
+                target: "prod".to_string(),
+                kind: pg_lens_core::recording::RecordingKind::Recording,
+                size_bytes: 5_000,
+                started_at_secs: Some(100),
+                ended_at_secs: None,
+                started_at: Some("2026-09-07 10:00:00".to_string()),
+                ended_at: None,
+                duration_secs: None,
+                frame_count: Some(50),
+                is_active: false,
+            },
+            pg_lens_core::recording::RecordingEntry {
+                path: PathBuf::from("/tmp/snapshot-staging-20260907_120000.json"),
+                filename: "snapshot-staging-20260907_120000.json".to_string(),
+                target: "staging".to_string(),
+                kind: pg_lens_core::recording::RecordingKind::Bookmark,
+                size_bytes: 20_000,
+                started_at_secs: Some(200),
+                ended_at_secs: Some(200),
+                started_at: Some("2026-09-07 12:00:00".to_string()),
+                ended_at: Some("2026-09-07 12:00:00".to_string()),
+                duration_secs: Some(0),
+                frame_count: Some(1),
+                is_active: false,
+            },
+            pg_lens_core::recording::RecordingEntry {
+                path: PathBuf::from("/tmp/rec-analytics-20260907_080000.jsonl"),
+                filename: "rec-analytics-20260907_080000.jsonl".to_string(),
+                target: "analytics".to_string(),
+                kind: pg_lens_core::recording::RecordingKind::Recording,
+                size_bytes: 1_000,
+                started_at_secs: Some(50),
+                ended_at_secs: None,
+                started_at: Some("2026-09-07 08:00:00".to_string()),
+                ended_at: None,
+                duration_secs: None,
+                frame_count: Some(10),
+                is_active: false,
+            },
+        ];
+
+        // Default sort: StartedDesc (200, 100, 50) => indices 1, 0, 2
+        app.records_sort_mode = RecordsSortMode::StartedDesc;
+        resort_records(&mut app);
+        assert_eq!(app.records_row_order, vec![1, 0, 2]);
+
+        // StartedAsc => 2, 0, 1
+        app.records_sort_mode = RecordsSortMode::StartedAsc;
+        resort_records(&mut app);
+        assert_eq!(app.records_row_order, vec![2, 0, 1]);
+
+        // SizeDesc (20000, 5000, 1000) => 1, 0, 2
+        app.records_sort_mode = RecordsSortMode::SizeDesc;
+        resort_records(&mut app);
+        assert_eq!(app.records_row_order, vec![1, 0, 2]);
+
+        // NameAsc ("rec-analytics", "rec-prod", "snapshot-staging") => 2, 0, 1
+        app.records_sort_mode = RecordsSortMode::NameAsc;
+        resort_records(&mut app);
+        assert_eq!(app.records_row_order, vec![2, 0, 1]);
+
+        // Filter for "analytics"
+        app.records_filter = "analytics".to_string();
+        resort_records(&mut app);
+        assert_eq!(app.records_row_order, vec![2]);
+
+        // Filter for bookmark
+        app.records_filter = "bookmark".to_string();
+        resort_records(&mut app);
+        assert_eq!(app.records_row_order, vec![1]);
+    }
+
+    #[test]
+    fn records_clipboard_and_delete_confirm() {
+        let mut app = App::new();
+        app.active_tab = Tab::RecordsLens;
+        app.records = vec![pg_lens_core::recording::RecordingEntry {
+            path: PathBuf::from("/tmp/rec-prod-20260907_100000.jsonl"),
+            filename: "rec-prod-20260907_100000.jsonl".to_string(),
+            target: "prod".to_string(),
+            kind: pg_lens_core::recording::RecordingKind::Recording,
+            size_bytes: 5_000,
+            started_at_secs: Some(100),
+            ended_at_secs: None,
+            started_at: Some("2026-09-07 10:00:00".to_string()),
+            ended_at: None,
+            duration_secs: None,
+            frame_count: Some(50),
+            is_active: false,
+        }];
+        app.records_row_order = vec![0];
+        app.records_table_state.select(Some(0));
+
+        // 'y' copies the file path
+        update(&mut app, press(KeyCode::Char('y')));
+        assert_eq!(
+            app.clipboard_request,
+            Some("/tmp/rec-prod-20260907_100000.jsonl".to_string())
+        );
+
+        // 'Delete' prompts delete confirmation
+        update(&mut app, press(KeyCode::Delete));
+        assert!(app.delete_record_target.is_some());
+        assert_eq!(
+            app.delete_record_target.as_ref().unwrap().filename,
+            "rec-prod-20260907_100000.jsonl"
+        );
+
+        // 'n' cancels delete confirmation
+        update(&mut app, press(KeyCode::Char('n')));
+        assert!(app.delete_record_target.is_none());
+
+        // 'x' also prompts delete confirmation
+        update(&mut app, press(KeyCode::Char('x')));
+        assert!(app.delete_record_target.is_some());
+
+        // Esc cancels delete confirmation
+        update(&mut app, press(KeyCode::Esc));
+        assert!(app.delete_record_target.is_none());
     }
 }

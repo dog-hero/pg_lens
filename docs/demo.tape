@@ -97,6 +97,10 @@ Sleep 1.5s
 Escape
 Sleep 500ms
 
+# 9. Records Lens: flight recorder recordings archive
+Tab
+Sleep 2.5s
+
 # Incident Recording Mode: Shift+R (R) activates recording (REC indicator in header)
 Type "R"
 Sleep 2.5s

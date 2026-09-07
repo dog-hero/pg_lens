@@ -311,6 +311,11 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.18.1** — "Records Lens & Streaming Compression":
+  - **Records Lens**: dedicated recording archive manager in TUI (Tab 9 `9 Records Lens`) and Web Lens (Tab 8 `Records`) with search filtering (`/`), file metadata, in-app replay (`Enter`), path copy (`y`), and interactive/token-gated deletion (`x`).
+  - **Streaming Compression**: pure-Rust streaming gzip compression (`.jsonl.gz`) via `flate2` (`--record-compress`), transparently detected and read by `RecordingReader::load`.
+  - **Auto-Split & Retention Policies**: `--record-max-mb` file size auto-rotation (100 MB default), `--record-retention-days` (30 days default), `--record-max-total-mb` storage limit (1000 MB default), and FIFO auto-pruning.
+  - **Visual Replay Scrubber**: interactive timeline track (`[████░░░] 42%`) in TUI replay mode with `Home`/`End` frame jumping, loop toggle (`l`/`L`), and speed adjustment (`[`/`]`).
 - **v0.18.0** — "Incident Recording & Flight Recorder":
   - **Live Incident Recording**: continuous streaming capture of `DbSnapshot` frames to `.jsonl` (`~/.local/state/pg_lens/recordings/rec-<target>-<ts>.jsonl`) toggled via `Shift+R` (`R`) or `Ctrl+R` in TUI and `● REC` button in Web Lens, with live pulse timer and frame count; file path copied to clipboard via OSC 52 on stop.
   - **Snapshot Bookmark Export**: point-in-time pretty JSON bookmark (`~/.local/state/pg_lens/exports/snapshot-<target>-<ts>.json`) via `E` key (TUI) and `Export` button (Web Lens), with file path copied to clipboard via OSC 52.

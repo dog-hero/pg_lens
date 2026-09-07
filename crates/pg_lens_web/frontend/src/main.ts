@@ -31,6 +31,7 @@ import { VacuumPanel } from "./vacuum-panel";
 import { StatementsLens } from "./statements";
 import { initBlocksLens } from "./blocks-lens";
 import { initProgressLens } from "./progress-lens";
+import { initRecordsLens } from "./records-lens";
 import { renderReplication } from "./replication";
 import { renderWaits, renderWaitsList } from "./waits";
 import { renderOldestXact } from "./xact_age";
@@ -256,6 +257,11 @@ const statementsLens = new StatementsLens(
 
 const blocksLens = initBlocksLens(el<HTMLElement>("blocks-panel"));
 const progressLens = initProgressLens(el<HTMLElement>("progress-panel"));
+const recordsLens = initRecordsLens(
+  el<HTMLElement>("records-panel"),
+  () => activeToken,
+  () => readOnly,
+);
 
 // Tab switcher (U1: top-level tabs, mirroring the TUI's lenses —
 // Macro/Micro stay merged into "Activity" here, vitals cards + chart stay
@@ -268,6 +274,7 @@ const tabs: Array<[HTMLButtonElement, HTMLElement]> = [
   [el<HTMLButtonElement>("tab-indexes"), el<HTMLElement>("indexes-panel")],
   [el<HTMLButtonElement>("tab-queries"), el<HTMLElement>("queries-panel")],
   [el<HTMLButtonElement>("tab-progress"), el<HTMLElement>("progress-panel")],
+  [el<HTMLButtonElement>("tab-records"), el<HTMLElement>("records-panel")],
 ];
 /** Switches to the tab whose button has `id === tabId` (no-op if unknown —
  * used by both the click handlers below and the `1`-`5` keyboard shortcuts). */
@@ -276,6 +283,9 @@ function selectTab(tabId: string): void {
     const selected = button.id === tabId;
     button.setAttribute("aria-selected", String(selected));
     panel.hidden = !selected;
+  }
+  if (tabId === "tab-records") {
+    void recordsLens.load();
   }
 }
 

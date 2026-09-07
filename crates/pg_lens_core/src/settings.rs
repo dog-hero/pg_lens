@@ -412,6 +412,18 @@ pub struct AppConfig {
     /// this file). Only consulted when neither `PG_LENS_CONFIG_TOKEN` nor
     /// `GITHUB_TOKEN` is set.
     pub remote_config_token_cmd: Option<String>,
+    /// Maximum file size in megabytes before rotating to a new incident recording file
+    /// (`--record-max-mb` / `PG_LENS_RECORD_MAX_MB`). Default 100 MB when unset.
+    pub record_max_mb: Option<u64>,
+    /// Whether to compress recordings with gzip (.jsonl.gz)
+    /// (`--record-compress` / `PG_LENS_RECORD_COMPRESS`). Default false when unset.
+    pub record_compress: Option<bool>,
+    /// Maximum total storage quota in megabytes for all recordings and bookmarks
+    /// (`--record-max-total-mb` / `PG_LENS_RECORD_MAX_TOTAL_MB`). Default None (unlimited).
+    pub record_max_total_mb: Option<u64>,
+    /// Maximum retention in days for recording files before auto-pruning
+    /// (`--record-retention-days` / `PG_LENS_RECORD_RETENTION_DAYS`). Default None (unlimited).
+    pub record_retention_days: Option<u64>,
 }
 
 /// Locates `config.toml`: `PG_LENS_CONFIG_FILE`, else

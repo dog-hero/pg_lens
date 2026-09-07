@@ -173,6 +173,10 @@ pub fn router(
         .route("/db/switch", post(db_switch_handler))
         // v0.15: web parity for the TUI's Enter-on-a-table `\d` overlay.
         .route("/schema/detail", post(schema_detail_handler))
+        // Records Lens: list, download, and delete incident recordings/bookmarks
+        .route("/records", get(records_list_handler))
+        .route("/records/download/{filename}", get(records_download_handler))
+        .route("/records/{filename}", axum::routing::delete(records_delete_handler))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
         .nest("/api", api)
@@ -427,6 +431,125 @@ async fn admin(state: WebState, command: AdminCommand) -> Response {
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             "poller unavailable; try again",
+        )
+            .into_response(),
+    }
+}
+
+/// Safely resolves a record filename against the recordings and exports directories,
+/// preventing path traversal and non-record file access.
+fn resolve_safe_record_file(filename: &str) -> Option<std::path::PathBuf> {
+    if filename.is_empty()
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains("..")
+        || filename.contains('\0')
+    {
+        return None;
+    }
+    if !filename.ends_with(".jsonl")
+        && !filename.ends_with(".jsonl.gz")
+        && !filename.ends_with(".json")
+        && !filename.ends_with(".json.gz")
+    {
+        return None;
+    }
+
+    let candidates = [
+        pg_lens_core::recording::recordings_dir(),
+        pg_lens_core::recording::exports_dir(),
+        Some(std::env::temp_dir().join("pg_lens").join("recordings")),
+        Some(std::env::temp_dir().join("pg_lens").join("exports")),
+    ];
+    for dir in candidates.into_iter().flatten() {
+        let path = dir.join(filename);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// `GET /api/records` — returns all available incident recordings and snapshot bookmarks.
+async fn records_list_handler() -> Response {
+    let rec_dir = pg_lens_core::recording::recordings_dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("pg_lens").join("recordings"));
+    let exp_dir = pg_lens_core::recording::exports_dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("pg_lens").join("exports"));
+    let mut list = pg_lens_core::recording::list_recordings(&rec_dir, &exp_dir, None);
+    let fallback_rec = std::env::temp_dir().join("pg_lens").join("recordings");
+    let fallback_exp = std::env::temp_dir().join("pg_lens").join("exports");
+    if fallback_rec != rec_dir && fallback_rec.exists() {
+        let extra = pg_lens_core::recording::list_recordings(&fallback_rec, &fallback_exp, None);
+        for item in extra {
+            if !list.iter().any(|e| e.filename == item.filename) {
+                list.push(item);
+            }
+        }
+    }
+    Json(list).into_response()
+}
+
+/// `GET /api/records/download/{filename}` — streams a record file with Content-Disposition attachment.
+async fn records_download_handler(Path(filename): Path<String>) -> Response {
+    let Some(path) = resolve_safe_record_file(&filename) else {
+        return (StatusCode::NOT_FOUND, "record file not found").into_response();
+    };
+
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let content_type = if filename.ends_with(".gz") {
+                "application/gzip"
+            } else {
+                "application/json"
+            };
+            let disposition = format!("attachment; filename=\"{filename}\"");
+            (
+                [
+                    (header::CONTENT_TYPE, content_type),
+                    (header::CONTENT_DISPOSITION, &disposition),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to read file: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// `DELETE /api/records/{filename}` — deletes a record file. Refused in read-only mode or without token.
+async fn records_delete_handler(
+    State(state): State<WebState>,
+    Path(filename): Path<String>,
+) -> Response {
+    if state.read_only {
+        return (
+            StatusCode::FORBIDDEN,
+            "server is running in read-only mode: record deletion is disabled",
+        )
+            .into_response();
+    }
+    if state.token.is_none() {
+        return (
+            StatusCode::FORBIDDEN,
+            "record deletion requires PG_LENS_AUTH_TOKEN to be set",
+        )
+            .into_response();
+    }
+
+    let Some(path) = resolve_safe_record_file(&filename) else {
+        return (StatusCode::NOT_FOUND, "record file not found").into_response();
+    };
+
+    match pg_lens_core::recording::delete_recording(&path) {
+        Ok(()) => (StatusCode::OK, "record deleted").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to delete record: {e}"),
         )
             .into_response(),
     }
@@ -993,5 +1116,64 @@ mod tests {
         assert!(ensure_listen_allowed(&public, true).is_ok());
         let error = ensure_listen_allowed(&public, false).expect_err("must refuse");
         assert!(error.contains("PG_LENS_AUTH_TOKEN"), "error names the env var");
+    }
+
+    #[tokio::test]
+    async fn records_list_returns_json() {
+        let (_tx, router) = mock_router(None);
+        let response = get_response(router, "/api/records", None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let list: Vec<pg_lens_core::recording::RecordingEntry> =
+            serde_json::from_slice(&body).expect("valid recording list");
+        assert!(list.is_empty() || !list.is_empty()); // parses correctly
+    }
+
+    #[tokio::test]
+    async fn records_download_and_delete_flow() {
+        let rec_dir = std::env::temp_dir().join("pg_lens").join("recordings");
+        std::fs::create_dir_all(&rec_dir).expect("create rec_dir");
+        let test_file = rec_dir.join("rec-test_web-20260907_120000.jsonl");
+        std::fs::write(&test_file, "{\"vitals\":{}}\n").expect("write test file");
+
+        let (_tx, router) = mock_router(Some("test_token"));
+
+        // 1. Download without token is rejected
+        let res_no_auth = get_response(router.clone(), "/api/records/download/rec-test_web-20260907_120000.jsonl", None).await;
+        assert_eq!(res_no_auth.status(), StatusCode::UNAUTHORIZED);
+
+        // 2. Download with token succeeds
+        let res_auth = get_response(router.clone(), "/api/records/download/rec-test_web-20260907_120000.jsonl", Some("test_token")).await;
+        assert_eq!(res_auth.status(), StatusCode::OK);
+        assert_eq!(res_auth.headers()[header::CONTENT_TYPE], "application/json");
+        assert!(res_auth.headers()[header::CONTENT_DISPOSITION].to_str().unwrap().contains("attachment"));
+
+        // 3. Delete in read-only mode is refused
+        let h_ro = mock_harness_with(Some("test_token"), true);
+        let res_ro = send(h_ro.router, "DELETE", "/api/records/rec-test_web-20260907_120000.jsonl", Some("test_token")).await;
+        assert_eq!(res_ro.status(), StatusCode::FORBIDDEN);
+        assert!(test_file.exists());
+
+        // 4. Delete with token succeeds
+        let res_del = send(router.clone(), "DELETE", "/api/records/rec-test_web-20260907_120000.jsonl", Some("test_token")).await;
+        assert_eq!(res_del.status(), StatusCode::OK);
+        assert!(!test_file.exists());
+
+        // 5. Download after delete returns 404
+        let res_404 = get_response(router, "/api/records/download/rec-test_web-20260907_120000.jsonl", Some("test_token")).await;
+        assert_eq!(res_404.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn records_download_rejects_path_traversal() {
+        let (_tx, router) = mock_router(None);
+        let res = get_response(router, "/api/records/download/..%2F..%2Fetc%2Fpasswd", None).await;
+        assert!(res.status() == StatusCode::NOT_FOUND || res.status() == StatusCode::BAD_REQUEST);
     }
 }

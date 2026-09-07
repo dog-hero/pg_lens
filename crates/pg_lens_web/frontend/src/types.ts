@@ -730,3 +730,20 @@ export interface DbSnapshot {
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
 }
+
+export type RecordingKind = "Recording" | "Bookmark";
+
+export interface RecordingEntry {
+  path: string;
+  filename: string;
+  target: string;
+  kind: RecordingKind;
+  size_bytes: number;
+  started_at_secs: number | null;
+  ended_at_secs: number | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_secs: number | null;
+  frame_count: number | null;
+  is_active: boolean;
+}

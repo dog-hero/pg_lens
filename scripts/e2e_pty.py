@@ -212,6 +212,8 @@ def main():
         # Enter: opens detail panel on selected row, Enter closes it.
         send("\r"); pump(0.6); snaps["pr2_progress_detail"] = screen.snapshot()
         send("\r"); pump(0.6); snaps["pr3_detail_closed"] = screen.snapshot()
+    # v0.18.0: Records Lens (incident sessions and bookmarks on disk): eighth Tab reaches it.
+    send("\t"); pump(0.9); snaps["rc1_records_lens"] = screen.snapshot()
     # v0.9: `?` opens the keyboard help overlay (static, works at any grid
     # size); Esc closes it again without disturbing the dashboard underneath.
     send("?"); pump(0.6); snaps["h1_help_open"] = screen.snapshot()
@@ -395,6 +397,9 @@ def main():
               and "Enter/Esc: close" in snaps["pr2_progress_detail"])
         check("Enter closed the progress detail panel again",
               "Enter/Esc: close" not in snaps["pr3_detail_closed"])
+    # --- v0.18.0: Records Lens ---------------------------------------------
+    check("Tab x8 reached the Records Lens",
+          "Records" in snaps["rc1_records_lens"])
     # --- v0.9: keyboard help overlay (`?`) ----------------------------------
     check("? opened the keyboard help overlay (known bindings visible)",
           "keyboard help" in snaps["h1_help_open"]

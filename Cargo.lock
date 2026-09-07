@@ -1499,8 +1499,9 @@ dependencies = [
 
 [[package]]
 name = "pg_lens_core"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
+ "flate2",
  "serde",
  "serde_json",
  "tempfile",
@@ -1512,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "pg_lens_tui"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1528,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "pg_lens_web"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "axum",
  "form_urlencoded",

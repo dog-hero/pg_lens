@@ -11,6 +11,7 @@ const KEY_TO_TAB_ID: Record<string, string> = {
   "5": "tab-indexes",
   "6": "tab-queries",
   "7": "tab-progress",
+  "8": "tab-records",
 };
 
 /** The tab button id a digit key jumps to, or null for any other key. */
@@ -25,6 +26,7 @@ const PANEL_FILTER_INPUT_ID: Record<string, string> = {
   "schema-panel": "schema-filter",
   "queries-panel": "statements-filter",
   "progress-panel": "progress-filter",
+  "records-panel": "records-filter",
 };
 
 /** The filter `<input>` id for the currently visible panel, or null if that
