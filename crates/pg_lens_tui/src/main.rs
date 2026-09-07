@@ -77,6 +77,9 @@ enum Command {
         /// Target shell.
         shell: clap_complete::Shell,
     },
+
+    /// Display license information and open-source acknowledgements.
+    Licenses,
 }
 
 /// Connection flags shared by every subcommand. Every flag is `global`, so it
@@ -900,11 +903,15 @@ fn drain_admin(app: &mut App, admin_tx: &mpsc::Sender<AdminCommand>) {
 async fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
 
-    // `completions` must work standalone (no terminal color_eyre setup, no
-    // connection-flag validation, no DB) — handled first and returns before
-    // any of that runs.
+    // `completions` and `licenses` must work standalone (no terminal color_eyre
+    // setup, no connection-flag validation, no DB) — handled first and returns
+    // before any of that runs.
     if let Some(Command::Completions { shell }) = cli.command {
         clap_complete::generate(shell, &mut Cli::command(), "pg_lens", &mut std::io::stdout());
+        return Ok(());
+    }
+    if let Some(Command::Licenses) = cli.command {
+        print_licenses();
         return Ok(());
     }
 
@@ -923,10 +930,31 @@ async fn main() -> color_eyre::Result<()> {
         None | Some(Command::Tui) => run_tui(cli.conn).await,
         #[cfg(feature = "web")]
         Some(Command::Serve(args)) => run_serve(cli.conn, args).await,
-        Some(Command::Completions { .. }) => unreachable!("handled above"),
+        Some(Command::Licenses) | Some(Command::Completions { .. }) => unreachable!("handled above"),
     }
 }
 
+fn print_licenses() {
+    println!(
+        r#"pg_lens 🔬🐘
+Licensed under the Functional Source License, Version 1.1, MIT Future License (FSL-1.1-MIT).
+Copyright 2026 Leonardo Benedet (BenedetLabs).
+
+- Fair Source: Free to use, inspect, modify, and run for all internal, educational, and non-competing purposes.
+- Commercial Protection: Prohibits offering competing commercial services substituting for pg_lens.
+- Automatic Conversion: Converts to the permissive MIT License after two years.
+
+Special Acknowledgements:
+- pg_activity (Dalibo) — Conceptual inspiration; PostgreSQL License (Permissive).
+- ratatui (ratatui.rs) — Terminal UI framework; MIT License.
+- tokio (tokio.rs) — Asynchronous runtime; MIT License.
+- uPlot (Web Lens) — Canvas charting engine; MIT License.
+
+For the complete list of 300+ open-source dependencies and their license texts,
+see THIRD_PARTY_LICENSES.md included with this release or online at:
+https://github.com/dog-hero/pg_lens/blob/main/THIRD_PARTY_LICENSES.md"#
+    );
+}
 async fn run_tui(conn_args: ConnArgs) -> color_eyre::Result<()> {
     // `config.toml` (for `remote_config`) and the `--config-url` fetch both
     // have to happen before `--list-services`/the picker so they see the

@@ -50,3 +50,4 @@ Except for the representations above, Your Contributions are provided on an "AS 
 ## 6. How to Agree
 
 By opening a Pull Request against the `pg_lens` repository or by adding a `Signed-off-by:` line to your Git commit messages (e.g. via `git commit -s`), You agree to the terms of this Agreement.
+

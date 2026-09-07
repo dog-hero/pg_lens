@@ -31,6 +31,14 @@ jobs:
         run: cargo test --workspace
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Check license compliance (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+      - name: Verify THIRD_PARTY_LICENSES.md is up to date
+        run: |
+          python3 scripts/generate_licenses.py
+          git diff --exit-code THIRD_PARTY_LICENSES.md
       - name: TUI-only build (no web feature)
         run: cargo build -p pg_lens_tui --no-default-features
 

@@ -45,7 +45,7 @@ jobs:
           pkg="pg_lens-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "$pkg"
           cp "target/${{ matrix.target }}/release/${BIN}" "$pkg/"
-          cp README.md LICENSE "$pkg/"
+          cp README.md LICENSE THIRD_PARTY_LICENSES.md "$pkg/"
           tar czf "$pkg.tar.gz" "$pkg"
           shasum -a 256 "$pkg.tar.gz" > "$pkg.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
@@ -84,7 +84,7 @@ jobs:
           pkg="pg_lens-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "$pkg"
           cp "target/${{ matrix.target }}/release/${BIN}" "$pkg/"
-          cp README.md LICENSE "$pkg/"
+          cp README.md LICENSE THIRD_PARTY_LICENSES.md "$pkg/"
           tar czf "$pkg.tar.gz" "$pkg"
           shasum -a 256 "$pkg.tar.gz" > "$pkg.tar.gz.sha256"
       - uses: actions/upload-artifact@v4

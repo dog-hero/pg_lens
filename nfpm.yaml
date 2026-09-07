@@ -38,6 +38,10 @@ contents:
     dst: /usr/share/doc/pg-lens/README.md
     file_info:
       mode: 0644
+  - src: THIRD_PARTY_LICENSES.md
+    dst: /usr/share/doc/pg-lens/THIRD_PARTY_LICENSES.md
+    file_info:
+      mode: 0644
   # Debian conventions: license text at /usr/share/doc/<pkg>/copyright and a
   # gzipped changelog (lintian: no-changelog).
   - src: LICENSE
