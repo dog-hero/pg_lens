@@ -487,6 +487,8 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.replication_slots,
     snapshot.wal,
     snapshot.conflicts ?? null,
+    snapshot.publications ?? null,
+    snapshot.subscriptions ?? null,
   );
   currentHistory = snapshot.history;
   chart.update(snapshot.history);

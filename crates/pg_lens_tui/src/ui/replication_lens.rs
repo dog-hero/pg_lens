@@ -12,20 +12,32 @@
 use pg_lens_core::ReplicationInfo;
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Flex, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Row, Table},
+    widgets::{Block, Clear, Paragraph, Row, Table},
 };
 
-use crate::app::App;
+use crate::app::{App, Tab};
 use crate::ui::{format, style};
-use crate::ui::replication::{receiver_line, sender_line, slot_severity, wal_generation_line};
+use crate::ui::replication::{
+    publication_line, receiver_line, sender_line, slot_severity, subscription_line,
+    wal_generation_line,
+};
 
-/// Fixed widths of every column except the flexible Slot one, in order:
-/// severity, Type, Active, Retained, WAL Status, Safe Size.
+/// Fixed widths of columns on wide terminals (>= 135 cols) - all 12 columns:
+/// Type, Plugin, DB, Active, Retained, Lag, WAL Status, Safe Size, xmin Age, Invalidated.
 const SEVERITY_WIDTH: u16 = 2;
-const FIXED_WIDTHS: [u16; 5] = [9, 8, 10, 11, 10];
+const FIXED_WIDTHS_WIDE: [u16; 10] = [8, 8, 8, 8, 9, 9, 10, 9, 10, 11];
+
+/// Fixed widths of columns on medium terminals (>= 100 cols, e.g. standard 120 cols) - 10 columns:
+/// Type, Plugin, DB, Active, Retained, Lag, WAL Status, Safe Size.
+const FIXED_WIDTHS_MED: [u16; 8] = [8, 8, 8, 8, 9, 9, 10, 9];
+
+/// Fixed widths of columns on narrow terminals (< 100 cols, e.g. 80 cols) - 7 columns:
+/// Type, Active, Retained, Lag, WAL Status.
+const FIXED_WIDTHS_NARROW: [u16; 5] = [8, 8, 9, 9, 10];
+
 const HIGHLIGHT_WIDTH: u16 = 2;
 const COLUMN_SPACING: u16 = 1;
 
@@ -115,19 +127,30 @@ fn conflicts_line(conflicts: &pg_lens_core::DatabaseConflicts) -> Line<'static> 
 
 pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     let lines = role_lines(app.snapshot.replication.as_ref());
-    // This view has room: no artificial cap on senders, but the role panel
-    // still yields most of the screen to the slots table below it.
     let role_height = (lines.len() as u16 + 2).min(area.height.saturating_sub(6).max(3));
-    // v0.16: WAL generation is what replicas must keep up with, so it gets
-    // its own compact section here — a single bordered line, present only
-    // once the fast tick has collected `pg_stat_wal` at least once this
-    // session (absent, not an empty box, on PG < 14 or a restricted role).
     let wal_height = u16::from(app.snapshot.wal.is_some()) * 3;
     let conflicts_height = u16::from(app.snapshot.conflicts.is_some()) * 3;
-    let [wal_area, conflicts_area, role_area, table_area, footer_area] = Layout::vertical([
+
+    // Separate panels for Publications and Subscriptions
+    let pub_count = app.snapshot.publications.as_deref().map_or(0, <[_]>::len);
+    let sub_count = app.snapshot.subscriptions.as_deref().map_or(0, <[_]>::len);
+    let pub_height = if app.snapshot.publications.is_some() {
+        if pub_count == 0 { 3 } else { (pub_count as u16 + 2).clamp(3, 5) }
+    } else {
+        0
+    };
+    let sub_height = if app.snapshot.subscriptions.is_some() {
+        if sub_count == 0 { 3 } else { (sub_count as u16 + 2).clamp(3, 5) }
+    } else {
+        0
+    };
+
+    let [wal_area, conflicts_area, role_area, pub_area, sub_area, table_area, footer_area] = Layout::vertical([
         Constraint::Length(wal_height),
         Constraint::Length(conflicts_height),
         Constraint::Length(role_height),
+        Constraint::Length(pub_height),
+        Constraint::Length(sub_height),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
@@ -147,11 +170,123 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
         frame.render_widget(panel, conflicts_area);
     }
 
-    let role_panel = Paragraph::new(lines).block(Block::bordered().title("Role"));
+    let role_panel =
+        Paragraph::new(lines).block(Block::bordered().title("Physical Replication (Role)"));
     frame.render_widget(role_panel, role_area);
+
+    if pub_height > 0 {
+        draw_publications(app, frame, pub_area);
+    }
+    if sub_height > 0 {
+        draw_subscriptions(app, frame, sub_area);
+    }
 
     draw_slots(app, frame, table_area);
     draw_footer(app, frame, footer_area);
+
+    if app.detail_open && app.active_tab == Tab::ReplicationLens {
+        draw_slot_detail(app, frame, area);
+    }
+}
+
+fn draw_publications(app: &App, frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let mut lines = Vec::new();
+    if let Some(pubs) = app.snapshot.publications.as_deref() {
+        for p in pubs {
+            lines.push(publication_line(p));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from("  no publications configured in this database").dim());
+    }
+    let panel = Paragraph::new(lines).block(Block::bordered().title("Publications (pg_publication)"));
+    frame.render_widget(panel, area);
+}
+
+fn draw_subscriptions(app: &App, frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let mut lines = Vec::new();
+    if let Some(subs) = app.snapshot.subscriptions.as_deref() {
+        for s in subs {
+            lines.push(subscription_line(s));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from("  no subscriptions configured in this database").dim());
+    }
+    let panel = Paragraph::new(lines).block(Block::bordered().title("Subscriptions (pg_subscription)"));
+    frame.render_widget(panel, area);
+}
+
+fn slot_table_row(
+    slot: &pg_lens_core::ReplicationSlotRow,
+    slot_width: usize,
+    width_tier: u8,
+) -> Row<'static> {
+    let sev = slot_severity(slot);
+    let active = if slot.active { "active" } else { "inactive" };
+    let retained = slot
+        .retained_wal_bytes
+        .map_or_else(|| "\u{2014}".to_string(), format::human_bytes);
+    let lag = slot
+        .consumer_lag_bytes
+        .map_or_else(|| "\u{2014}".to_string(), format::human_bytes);
+    let safe = slot
+        .safe_wal_size
+        .map_or_else(|| "\u{2014}".to_string(), format::human_bytes);
+
+    if width_tier == 0 {
+        let xmin = slot
+            .xmin_age
+            .or(slot.catalog_xmin_age)
+            .map_or_else(|| "\u{2014}".to_string(), format::human_count);
+        let inval = slot.invalidated.as_deref().unwrap_or("\u{2014}");
+        Row::new([
+            sev.marker().to_string(),
+            format::truncate_with_ellipsis(&slot.slot_name, slot_width),
+            slot.slot_type.clone(),
+            slot.plugin.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            slot.database.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            active.to_string(),
+            retained,
+            lag,
+            slot.wal_status.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            safe,
+            xmin,
+            inval.to_string(),
+        ])
+        .style(Style::new().fg(sev.color()))
+    } else if width_tier == 1 {
+        Row::new([
+            sev.marker().to_string(),
+            format::truncate_with_ellipsis(&slot.slot_name, slot_width),
+            slot.slot_type.clone(),
+            slot.plugin.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            slot.database.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            active.to_string(),
+            retained,
+            lag,
+            slot.wal_status.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            safe,
+        ])
+        .style(Style::new().fg(sev.color()))
+    } else {
+        Row::new([
+            sev.marker().to_string(),
+            format::truncate_with_ellipsis(&slot.slot_name, slot_width),
+            slot.slot_type.clone(),
+            active.to_string(),
+            retained,
+            lag,
+            slot.wal_status.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+        ])
+        .style(Style::new().fg(sev.color()))
+    }
 }
 
 fn draw_slots(app: &mut App, frame: &mut Frame, area: Rect) {
@@ -169,61 +304,257 @@ fn draw_slots(app: &mut App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let header = Row::new(["!", "Slot", "Type", "Active", "Retained", "WAL Status", "Safe Size"])
+    let slot_width = slot_column_width(area.width);
+
+    let (header, widths, tier): (Row<'static>, Vec<Constraint>, u8) = if area.width >= 135 {
+        let header = Row::new([
+            "!",
+            "Slot",
+            "Type",
+            "Plugin",
+            "DB",
+            "Active",
+            "Retained",
+            "Lag",
+            "WAL Status",
+            "Safe Size",
+            "xmin Age",
+            "Invalidated",
+        ])
         .style(Style::new().bold());
 
-    let slot_width = slot_column_width(area.width);
+        let widths = vec![
+            Constraint::Length(SEVERITY_WIDTH),
+            Constraint::Min(16),
+            Constraint::Length(FIXED_WIDTHS_WIDE[0]),
+            Constraint::Length(FIXED_WIDTHS_WIDE[1]),
+            Constraint::Length(FIXED_WIDTHS_WIDE[2]),
+            Constraint::Length(FIXED_WIDTHS_WIDE[3]),
+            Constraint::Length(FIXED_WIDTHS_WIDE[4]),
+            Constraint::Length(FIXED_WIDTHS_WIDE[5]),
+            Constraint::Length(FIXED_WIDTHS_WIDE[6]),
+            Constraint::Length(FIXED_WIDTHS_WIDE[7]),
+            Constraint::Length(FIXED_WIDTHS_WIDE[8]),
+            Constraint::Length(FIXED_WIDTHS_WIDE[9]),
+        ];
+        (header, widths, 0)
+    } else if area.width >= 100 {
+        let header = Row::new([
+            "!",
+            "Slot",
+            "Type",
+            "Plugin",
+            "DB",
+            "Active",
+            "Retained",
+            "Lag",
+            "WAL Status",
+            "Safe Size",
+        ])
+        .style(Style::new().bold());
+
+        let widths = vec![
+            Constraint::Length(SEVERITY_WIDTH),
+            Constraint::Min(16),
+            Constraint::Length(FIXED_WIDTHS_MED[0]),
+            Constraint::Length(FIXED_WIDTHS_MED[1]),
+            Constraint::Length(FIXED_WIDTHS_MED[2]),
+            Constraint::Length(FIXED_WIDTHS_MED[3]),
+            Constraint::Length(FIXED_WIDTHS_MED[4]),
+            Constraint::Length(FIXED_WIDTHS_MED[5]),
+            Constraint::Length(FIXED_WIDTHS_MED[6]),
+            Constraint::Length(FIXED_WIDTHS_MED[7]),
+        ];
+        (header, widths, 1)
+    } else {
+        let header = Row::new([
+            "!",
+            "Slot",
+            "Type",
+            "Active",
+            "Retained",
+            "Lag",
+            "WAL Status",
+        ])
+        .style(Style::new().bold());
+
+        let widths = vec![
+            Constraint::Length(SEVERITY_WIDTH),
+            Constraint::Min(16),
+            Constraint::Length(FIXED_WIDTHS_NARROW[0]),
+            Constraint::Length(FIXED_WIDTHS_NARROW[1]),
+            Constraint::Length(FIXED_WIDTHS_NARROW[2]),
+            Constraint::Length(FIXED_WIDTHS_NARROW[3]),
+            Constraint::Length(FIXED_WIDTHS_NARROW[4]),
+        ];
+        (header, widths, 2)
+    };
 
     let rows = app
         .replication_row_order
         .iter()
         .filter_map(|&i| slots.get(i))
-        .map(|slot| {
-            let sev = slot_severity(slot);
-            let active = if slot.active { "active" } else { "inactive" };
-            let retained = slot
-                .retained_wal_bytes
-                .map_or_else(|| "\u{2014}".to_string(), format::human_bytes);
-            let safe = slot
-                .safe_wal_size
-                .map_or_else(|| "\u{2014}".to_string(), format::human_bytes);
-            Row::new([
-                sev.marker().to_string(),
-                format::truncate_with_ellipsis(&slot.slot_name, slot_width),
-                slot.slot_type.clone(),
-                active.to_string(),
-                retained,
-                slot.wal_status.clone().unwrap_or_else(|| "\u{2014}".to_string()),
-                safe,
-            ])
-            .style(Style::new().fg(sev.color()))
-        });
-
-    let widths = [
-        Constraint::Length(SEVERITY_WIDTH),
-        Constraint::Min(8),
-        Constraint::Length(FIXED_WIDTHS[0]),
-        Constraint::Length(FIXED_WIDTHS[1]),
-        Constraint::Length(FIXED_WIDTHS[2]),
-        Constraint::Length(FIXED_WIDTHS[3]),
-        Constraint::Length(FIXED_WIDTHS[4]),
-    ];
+        .map(|slot| slot_table_row(slot, slot_width, tier));
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title("Slots"))
+        .block(Block::bordered().title("Replication Slots"))
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol("\u{25b6} ");
 
     frame.render_stateful_widget(table, area, &mut app.replication_table_state);
 }
 
+/// Floating modal dialog rendering complete diagnostics for the selected slot.
+fn draw_slot_detail(app: &App, frame: &mut Frame, area: Rect) {
+    let Some(slot) = app.selected_replication_slot() else {
+        return;
+    };
+    let width = 88.min(area.width.saturating_sub(4));
+    let height = 21.min(area.height.saturating_sub(2));
+    let [panel_area] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [panel_area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(panel_area);
+
+    frame.render_widget(Clear, panel_area);
+
+    let sev = slot_severity(slot);
+    let title = format!(" Replication Slot Details \u{2014} {} ", slot.slot_name);
+    let block = Block::bordered()
+        .title(title)
+        .border_style(Style::new().fg(sev.color()));
+    let inner = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
+    let active_str = if slot.active { "active" } else { "inactive" };
+    let status_str = slot.wal_status.as_deref().unwrap_or("\u{2014}");
+    let safe_str = slot
+        .safe_wal_size
+        .map_or_else(|| "unlimited / n/a".to_string(), format::human_bytes);
+    let retained_str = slot
+        .retained_wal_bytes
+        .map_or_else(|| "\u{2014}".to_string(), format::human_bytes);
+    let lag_str = slot
+        .consumer_lag_bytes
+        .map_or_else(|| "\u{2014}".to_string(), format::human_bytes);
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Type: ", style::label_style()),
+            Span::styled(slot.slot_type.clone(), style::value_style()),
+            Span::styled("  \u{2502}  Plugin: ", style::label_style()),
+            Span::styled(slot.plugin.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+            Span::styled("  \u{2502}  Database: ", style::label_style()),
+            Span::styled(slot.database.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+            Span::styled("  \u{2502}  Temporary: ", style::label_style()),
+            Span::styled(if slot.temporary { "yes" } else { "no" }, style::value_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("State: ", style::label_style()),
+            Span::styled(
+                active_str,
+                if slot.active {
+                    Style::new().fg(Color::Green).bold()
+                } else {
+                    Style::new().fg(Color::Yellow).bold()
+                },
+            ),
+            Span::styled("  \u{2502}  Active PID: ", style::label_style()),
+            Span::styled(
+                slot.active_pid.map_or_else(|| "\u{2014}".to_string(), |p| p.to_string()),
+                style::value_style(),
+            ),
+            Span::styled("  \u{2502}  Client App: ", style::label_style()),
+            Span::styled(slot.application_name.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+            Span::styled("  \u{2502}  Client IP: ", style::label_style()),
+            Span::styled(slot.client_addr.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+        ]),
+        Line::default(),
+        Line::from(Span::styled("\u{2500}\u{2500} WAL & Replication Lag \u{2500}\u{2500}", style::label_style())),
+        Line::from(vec![
+            Span::styled("Restart LSN: ", style::label_style()),
+            Span::styled(slot.restart_lsn.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+            Span::styled("  \u{2502}  Confirmed Flush LSN: ", style::label_style()),
+            Span::styled(slot.confirmed_flush_lsn.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("Retained WAL on Disk: ", style::label_style()),
+            Span::styled(retained_str, Style::new().fg(sev.color()).bold()),
+            Span::styled("  \u{2502}  Consumer Lag: ", style::label_style()),
+            Span::styled(lag_str, style::value_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("WAL Status: ", style::label_style()),
+            Span::styled(status_str, style::value_style()),
+            Span::styled("  \u{2502}  Safe WAL Headroom: ", style::label_style()),
+            Span::styled(safe_str, style::value_style()),
+        ]),
+        Line::default(),
+        Line::from(Span::styled("\u{2500}\u{2500} Transaction Horizons & Bloat \u{2500}\u{2500}", style::label_style())),
+        Line::from(vec![
+            Span::styled("xmin Age: ", style::label_style()),
+            Span::styled(
+                slot.xmin_age.map_or_else(|| "\u{2014}".to_string(), format::human_count),
+                if slot.xmin_age.unwrap_or(0) > 10_000_000 {
+                    Style::new().fg(Color::Yellow).bold()
+                } else {
+                    style::value_style()
+                },
+            ),
+            Span::styled(" (holds back autovacuum)", style::label_style()),
+            Span::styled("  \u{2502}  catalog_xmin Age: ", style::label_style()),
+            Span::styled(
+                slot.catalog_xmin_age.map_or_else(|| "\u{2014}".to_string(), format::human_count),
+                style::value_style(),
+            ),
+            Span::styled(" (holds back catalog vacuum)", style::label_style()),
+        ]),
+        Line::default(),
+        Line::from(Span::styled("\u{2500}\u{2500} Advanced Flags \u{2500}\u{2500}", style::label_style())),
+        Line::from(vec![
+            Span::styled("Two-Phase: ", style::label_style()),
+            Span::styled(slot.two_phase.map_or("\u{2014}", |b| if b { "yes" } else { "no" }), style::value_style()),
+            Span::styled("  \u{2502}  Standby Conflict: ", style::label_style()),
+            Span::styled(
+                slot.conflicting.map_or("\u{2014}", |b| if b { "YES (recovery conflict)" } else { "no" }),
+                if slot.conflicting.unwrap_or(false) {
+                    Style::new().fg(Color::Red).bold()
+                } else {
+                    style::value_style()
+                },
+            ),
+            Span::styled("  \u{2502}  Invalidated: ", style::label_style()),
+            Span::styled(
+                slot.invalidated.as_deref().unwrap_or("no"),
+                if slot.invalidated.is_some() {
+                    Style::new().fg(Color::Red).bold()
+                } else {
+                    style::value_style()
+                },
+            ),
+        ]),
+        Line::default(),
+        Line::from(Span::styled("Enter / Esc: close detail", style::label_style().italic())),
+    ];
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 /// How many characters the flexible Slot column can hold at this terminal
 /// width (same arithmetic as the Schema/Index Lens's flexible columns).
 fn slot_column_width(area_width: u16) -> usize {
-    let fixed: u16 = FIXED_WIDTHS.iter().sum::<u16>() + SEVERITY_WIDTH;
-    let overhead = 2 /* block borders */ + HIGHLIGHT_WIDTH + fixed + 6 * COLUMN_SPACING;
-    usize::from(area_width.saturating_sub(overhead))
+    let (fixed, cols): (u16, u16) = if area_width >= 135 {
+        (FIXED_WIDTHS_WIDE.iter().sum::<u16>() + SEVERITY_WIDTH, 11)
+    } else if area_width >= 100 {
+        (FIXED_WIDTHS_MED.iter().sum::<u16>() + SEVERITY_WIDTH, 9)
+    } else {
+        (FIXED_WIDTHS_NARROW.iter().sum::<u16>() + SEVERITY_WIDTH, 6)
+    };
+    let overhead = 2 /* block borders */ + HIGHLIGHT_WIDTH + fixed + cols * COLUMN_SPACING;
+    usize::from(area_width.saturating_sub(overhead)).max(16)
 }
 
 fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
@@ -233,7 +564,7 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         .as_deref()
         .map_or(0, <[_]>::len);
     let line = Line::from(format!(
-        " {n} slot{} \u{b7} worst severity first",
+        " {n} slot{} \u{b7} Enter: detail \u{b7} worst severity first",
         if n == 1 { "" } else { "s" }
     ))
     .dim();

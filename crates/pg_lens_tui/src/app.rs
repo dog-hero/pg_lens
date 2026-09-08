@@ -364,7 +364,14 @@ pub fn index_finding_rank(finding: &pg_lens_core::IndexFinding) -> u8 {
 /// [`resort_replication`] (row order) and `ui/replication.rs` (marker/color)
 /// — the two must never disagree about which slot is worse.
 pub fn slot_severity_rank(slot: &pg_lens_core::ReplicationSlotRow) -> u8 {
+    if slot.invalidated.is_some() {
+        return 0;
+    }
     if matches!(slot.wal_status.as_deref(), Some("unreserved") | Some("lost")) {
+        return 0;
+    }
+    let max_xmin_age = slot.xmin_age.unwrap_or(0).max(slot.catalog_xmin_age.unwrap_or(0));
+    if max_xmin_age > 50_000_000 {
         return 0;
     }
     if !slot.active {
@@ -375,6 +382,9 @@ pub fn slot_severity_rank(slot: &pg_lens_core::ReplicationSlotRow) -> u8 {
         if retained > 0 {
             return 1;
         }
+    }
+    if max_xmin_age > 10_000_000 {
+        return 1;
     }
     2
 }
@@ -1029,6 +1039,14 @@ impl App {
         self.records.get(record_idx)
     }
 
+    /// The Replication Lens slot currently under the cursor (Tab 4).
+    pub fn selected_replication_slot(&self) -> Option<&pg_lens_core::ReplicationSlotRow> {
+        let display_idx = self.replication_table_state.selected()?;
+        let slot_idx = *self.replication_row_order.get(display_idx)?;
+        let slots = self.snapshot.replication_slots.as_deref()?;
+        slots.get(slot_idx)
+    }
+
     /// Prunes old recordings and snapshot bookmarks based on retention and quota settings.
     pub fn prune_records(&mut self) {
         if self.record_max_total_bytes.is_none() && self.record_retention_days.is_none() {
@@ -1629,6 +1647,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 || (app.active_tab == Tab::BlocksLens
                     && (app.selected_block_node().is_some() || app.selected_active_lock().is_some()))
                 || (app.active_tab == Tab::ProgressLens && app.selected_progress_row().is_some())
+                || (app.active_tab == Tab::ReplicationLens && app.selected_replication_slot().is_some())
             {
                 app.detail_open = true;
                 // v0.15: fires the on-demand `\d` request (Schema Lens Tables

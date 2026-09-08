@@ -77,23 +77,44 @@ pub(crate) fn lag_text(bytes: Option<i64>, secs: Option<f64>) -> String {
 }
 
 pub(crate) fn sender_line(s: &WalSenderRow) -> Line<'static> {
-    let sev = lag_severity(s.replay_lag_bytes, s.replay_lag_secs);
-    Line::from(vec![
+    let sev = lag_severity(s.total_lag_bytes.or(s.replay_lag_bytes), s.replay_lag_secs);
+    let sync_desc = if s.sync_priority > 0 {
+        format!("{}/{} (prio {})", s.state, s.sync_state, s.sync_priority)
+    } else {
+        format!("{}/{}", s.state, s.sync_state)
+    };
+
+    let mut spans = vec![
         Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
         Span::styled(
             format!("{}/{}", s.application_name, s.client),
             style::accent_style(),
         ),
-        Span::styled(
-            format!("  {}/{}  ", s.state, s.sync_state),
-            style::label_style(),
-        ),
+        Span::styled(format!("  {sync_desc}  "), style::label_style()),
         Span::styled("lag: ", style::label_style()),
         Span::styled(
             lag_text(s.replay_lag_bytes, s.replay_lag_secs),
             Style::new().fg(sev.color()),
         ),
-    ])
+    ];
+
+    if s.sent_lag_bytes.is_some() || s.write_lag_bytes.is_some() || s.flush_lag_bytes.is_some() {
+        let sent_b = s.sent_lag_bytes.map(format::human_bytes).unwrap_or_else(|| "0 B".to_string());
+        let write_b = s.write_lag_bytes.map(format::human_bytes).unwrap_or_else(|| "0 B".to_string());
+        let flush_b = s.flush_lag_bytes.map(format::human_bytes).unwrap_or_else(|| "0 B".to_string());
+        spans.push(Span::styled(
+            format!("  [sent: {sent_b} \u{b7} write: {write_b} \u{b7} flush: {flush_b}]"),
+            style::label_style(),
+        ));
+    }
+    if let Some(total) = s.total_lag_bytes {
+        spans.push(Span::styled(
+            format!("  total: {}", format::human_bytes(total)),
+            style::value_style(),
+        ));
+    }
+
+    Line::from(spans)
 }
 
 pub(crate) fn receiver_line(r: &WalReceiverRow) -> Line<'static> {
@@ -103,7 +124,7 @@ pub(crate) fn receiver_line(r: &WalReceiverRow) -> Line<'static> {
         (Some(h), None) => h.clone(),
         _ => "upstream".to_string(),
     };
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
         Span::styled("standby", style::accent_style()),
         Span::styled(format!("  {}  ", r.status), style::label_style()),
@@ -113,7 +134,15 @@ pub(crate) fn receiver_line(r: &WalReceiverRow) -> Line<'static> {
             lag_text(r.replay_lag_bytes, r.replay_lag_secs),
             Style::new().fg(sev.color()),
         ),
-    ])
+    ];
+    if r.is_paused {
+        let state = r.pause_state.as_deref().unwrap_or("paused");
+        spans.push(Span::styled(
+            format!("  [{state}]"),
+            Style::new().fg(Color::Red).bold(),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Severity of one replication slot (F2.5) — a thin display-side wrapper
@@ -138,7 +167,7 @@ pub(crate) fn slot_line(slot: &ReplicationSlotRow) -> Line<'static> {
     };
     let active_text = if slot.active { "active" } else { "inactive" };
     let status = slot.wal_status.as_deref().unwrap_or("—");
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
         Span::styled(
             format!("slot {}/{}", slot.slot_name, slot.slot_type),
@@ -148,7 +177,137 @@ pub(crate) fn slot_line(slot: &ReplicationSlotRow) -> Line<'static> {
         Span::styled("retained: ", style::label_style()),
         Span::styled(retained, Style::new().fg(sev.color())),
         Span::styled(format!("  ({status})"), style::label_style()),
-    ])
+    ];
+    if let Some(reason) = &slot.invalidated {
+        spans.push(Span::styled(
+            format!("  [invalidated: {reason}]"),
+            Style::new().fg(Color::Red).bold(),
+        ));
+    }
+    if let Some(xmin_age) = slot.xmin_age {
+        if xmin_age > 10_000_000 {
+            spans.push(Span::styled(
+                format!("  [xmin age: {}]", format::human_count(xmin_age)),
+                Style::new().fg(if xmin_age > 50_000_000 { Color::Red } else { Color::Yellow }).bold(),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+pub(crate) fn publication_line(p: &pg_lens_core::PublicationRow) -> Line<'static> {
+    let mut ops = Vec::new();
+    if p.pubinsert { ops.push("ins"); }
+    if p.pubupdate { ops.push("upd"); }
+    if p.pubdelete { ops.push("del"); }
+    if p.pubtruncate { ops.push("trunc"); }
+    let ops_str = if ops.is_empty() { "none".to_string() } else { ops.join(",") };
+
+    let tables_str = if p.all_tables {
+        "all tables".to_string()
+    } else {
+        format!("{} table{}", p.table_count, if p.table_count == 1 { "" } else { "s" })
+    };
+
+    let mut spans = vec![
+        Span::styled("  pub ", style::label_style()),
+        Span::styled(p.pubname.clone(), style::accent_style()),
+        Span::styled(format!(" ({})", p.owner), style::label_style()),
+        Span::styled("  tables: ", style::label_style()),
+        Span::styled(tables_str, style::value_style()),
+        Span::styled("  ops: ", style::label_style()),
+        Span::styled(ops_str, style::value_style()),
+    ];
+    if p.pubviaroot {
+        spans.push(Span::styled("  (via_root)", style::label_style()));
+    }
+    if !p.published_tables.is_empty() {
+        let sample = p.published_tables.join(", ");
+        let truncated = if sample.len() > 40 {
+            format!("{}[…]", &sample[..37])
+        } else {
+            sample
+        };
+        spans.push(Span::styled(format!("  [{truncated}]"), style::label_style()));
+    }
+    Line::from(spans)
+}
+
+pub(crate) fn subscription_line(s: &pg_lens_core::SubscriptionRow) -> Line<'static> {
+    let has_errors = s.apply_error_count.unwrap_or(0) > 0 || s.sync_error_count.unwrap_or(0) > 0;
+    let sev = if has_errors {
+        Severity::Bad
+    } else if !s.enabled {
+        Severity::Warn
+    } else {
+        Severity::Ok
+    };
+
+    let status_str = if s.enabled { "enabled" } else { "disabled" };
+    let worker_str = match s.worker_pid {
+        Some(pid) => format!("worker: pid {pid}"),
+        None => "worker: idle".to_string(),
+    };
+    let lsn_str = s.received_lsn.as_deref().unwrap_or("—");
+    let pubs_str = s.publications.join(",");
+
+    let mut spans = vec![
+        Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
+        Span::styled(format!("sub {}", s.subname), style::accent_style()),
+        Span::styled(format!(" ({})", s.owner), style::label_style()),
+        Span::styled(
+            format!("  {status_str}  "),
+            if s.enabled { style::value_style() } else { Style::new().fg(Color::Yellow) },
+        ),
+    ];
+
+    if let (Some(host), Some(db)) = (&s.publisher_host, &s.publisher_dbname) {
+        spans.push(Span::styled(format!("from {host}/{db}  "), style::label_style()));
+    }
+
+    if let Some(sync_commit) = &s.sync_commit {
+        spans.push(Span::styled(format!("sync_commit: {sync_commit}  "), style::label_style()));
+    }
+
+    spans.extend([
+        Span::styled(format!("{worker_str}  "), style::label_style()),
+        Span::styled(format!("pubs: [{pubs_str}]  "), style::label_style()),
+        Span::styled(format!("recv: {lsn_str}  "), style::value_style()),
+        Span::styled(format!("tables: {}/{} ready", s.ready_tables, s.total_tables), style::value_style()),
+    ]);
+
+    if s.sync_tables > 0 {
+        spans.push(Span::styled(
+            format!(" ({} syncing)", s.sync_tables),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+
+    if !s.syncing_table_names.is_empty() {
+        spans.push(Span::styled(
+            format!("  [{}]", s.syncing_table_names.join(", ")),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+
+    if let Some(errs) = s.apply_error_count {
+        if errs > 0 {
+            spans.push(Span::styled(
+                format!("  [apply errors: {errs}]"),
+                Style::new().fg(Color::Red).bold(),
+            ));
+        }
+    }
+    if let Some(errs) = s.sync_error_count {
+        if errs > 0 {
+            spans.push(Span::styled(
+                format!("  [sync errors: {errs}]"),
+                Style::new().fg(Color::Red).bold(),
+            ));
+        }
+    }
+
+    Line::from(spans)
 }
 
 /// v0.16's WAL generation-rate severity: yellow only when `wal_buffers_full`
@@ -230,11 +389,25 @@ mod tests {
     ) -> ReplicationSlotRow {
         ReplicationSlotRow {
             slot_name: "probe_slot".to_string(),
+            plugin: None,
             slot_type: "physical".to_string(),
+            database: None,
+            temporary: false,
             active,
+            active_pid: None,
+            application_name: None,
+            client_addr: None,
+            restart_lsn: None,
+            confirmed_flush_lsn: None,
             retained_wal_bytes,
+            consumer_lag_bytes: None,
             wal_status: wal_status.map(str::to_string),
             safe_wal_size: None,
+            xmin_age: None,
+            catalog_xmin_age: None,
+            two_phase: None,
+            conflicting: None,
+            invalidated: None,
         }
     }
 
@@ -345,5 +518,84 @@ mod tests {
         let line = wal_generation_line(&wal(Some(2_000_000.0), 15, Some(3)));
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("buffers_full: 15 (+3 this tick)"), "{text}");
+    }
+
+    #[test]
+    fn receiver_line_shows_paused_badge() {
+        let rec = WalReceiverRow {
+            status: "streaming".to_string(),
+            sender_host: Some("primary.internal".to_string()),
+            sender_port: Some(5432),
+            replay_lag_bytes: Some(0),
+            replay_lag_secs: Some(0.0),
+            is_paused: true,
+            pause_state: Some("paused".to_string()),
+        };
+        let line = receiver_line(&rec);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("[paused]"), "{text}");
+    }
+
+    #[test]
+    fn publication_line_renders_ops_and_tables() {
+        let pub_row = pg_lens_core::PublicationRow {
+            pubname: "test_pub".to_string(),
+            owner: "admin".to_string(),
+            all_tables: false,
+            pubinsert: true,
+            pubupdate: true,
+            pubdelete: false,
+            pubtruncate: false,
+            pubviaroot: true,
+            table_count: 3,
+            published_tables: vec!["public.orders".to_string()],
+        };
+        let line = publication_line(&pub_row);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("pub test_pub"), "{text}");
+        assert!(text.contains("3 tables"), "{text}");
+        assert!(text.contains("ins,upd"), "{text}");
+        assert!(text.contains("(via_root)"), "{text}");
+        assert!(text.contains("[public.orders]"), "{text}");
+    }
+
+    #[test]
+    fn subscription_line_renders_sync_and_errors() {
+        let sub_row = pg_lens_core::SubscriptionRow {
+            subname: "billing_sub".to_string(),
+            owner: "app".to_string(),
+            enabled: true,
+            slot_name: Some("billing_slot".to_string()),
+            publications: vec!["billing_pub".to_string()],
+            sync_commit: Some("off".to_string()),
+            publisher_host: Some("10.0.0.1".to_string()),
+            publisher_port: Some("5432".to_string()),
+            publisher_dbname: Some("prod".to_string()),
+            streaming_mode: Some("parallel".to_string()),
+            binary_mode: Some(true),
+            two_phase: Some(false),
+            worker_pid: Some(1234),
+            received_lsn: Some("0/1A2B3C".to_string()),
+            last_msg_send_secs: Some(0.1),
+            last_msg_receipt_secs: Some(0.1),
+            latest_end_lsn: Some("0/1A2B3C".to_string()),
+            latest_end_secs: Some(0.1),
+            sync_tables: 2,
+            ready_tables: 8,
+            total_tables: 10,
+            syncing_table_names: vec!["public.users (copy)".to_string()],
+            apply_error_count: Some(5),
+            sync_error_count: Some(0),
+        };
+        let line = subscription_line(&sub_row);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("sub billing_sub"), "{text}");
+        assert!(text.contains("from 10.0.0.1/prod"), "{text}");
+        assert!(text.contains("sync_commit: off"), "{text}");
+        assert!(text.contains("worker: pid 1234"), "{text}");
+        assert!(text.contains("tables: 8/10 ready"), "{text}");
+        assert!(text.contains("(2 syncing)"), "{text}");
+        assert!(text.contains("[public.users (copy)]"), "{text}");
+        assert!(text.contains("[apply errors: 5]"), "{text}");
     }
 }

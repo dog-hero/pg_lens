@@ -43,7 +43,6 @@ const ROWS: &[Row] = &[
     Row::Bind("PgUp / PgDn", "move selection by a page"),
     Row::Bind("Enter", "open detail panel (or replay in Records Lens)"),
     Row::Section("Sub-views & overlays"),
-    Row::Bind("/", "filter (Micro/Schema/Query/Progress/Records Lens)"),
     Row::Bind("/", "filter (Micro/Schema/Index/Query/Progress/Records)"),
     Row::Bind("\\", "clear the active lens's filter"),
     Row::Bind("w", "full waits panel (Micro Lens only)"),

@@ -4,6 +4,26 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.20.0] — 2026-09-07 — "Logical & Physical Replication Deep-Dive: Dedicated Publications, Enriched Subscriptions & Slots"
+
+### Added
+- **Dedicated Publications Panel (`pg_publication`, `pg_publication_tables`)** — deep catalog visibility into logical replication publications:
+  - Core domain model `PublicationRow` and poller query with table aggregation, tracking owner, all-tables scope, and publication operations (`INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`).
+  - TUI Replication Lens dedicated panel rendering publication name, owner, all-tables scope, operation badges, and published table list with truncation indicator.
+  - Web Lens dedicated Publications section displaying publication cards with operation tags and published table lists.
+- **Enriched Subscriptions Telemetry (`pg_subscription`, `pg_stat_subscription`)** — comprehensive subscriber monitoring:
+  - Core domain model `SubscriptionRow` and version-gated query (`subscriptions_post_150000.sql` for PG 15+) surfacing sanitized connection parameters (host, port, dbname), synchronous commit mode, streaming replication mode, binary transfer mode, two-phase commit support, worker count, and active table synchronization names (`syncing_table_names`).
+  - TUI Replication Lens panel displaying subscription state, remote publication, worker counts, sync settings, and currently synchronizing tables.
+  - Web Lens Subscriptions section displaying dedicated subscription cards with health badges and advanced replication properties.
+- **Enriched Replication Slots Diagnostics & Interactive Detail Modal** — deep diagnostics for physical and logical replication slots (`pg_replication_slots`):
+  - Poller query expanded with version gate (`replication_slots_post_160000.sql` for PG 16+) capturing plugin, database, temporary slot flag, active PID, client application name, client address, restart LSN, confirmed flush LSN, consumer lag in bytes, two-phase commit, and conflicting / invalidated flags.
+  - Responsive multi-tier slot table in TUI Replication Lens (`>= 135` wide, `>= 100` medium, `< 100` narrow) ensuring slot names and core metrics remain legible on any terminal width.
+  - Interactive Replication Slot Details dialog on `Enter` in TUI Replication Lens, displaying complete connection, LSN positions, WAL retention, and configuration details for the selected slot.
+  - Web Lens replication slots table displaying plugin, database, client application, consumer lag, and failure status indicators.
+
+### Changed
+- **Replication Lens Layout & Organization** — reorganized Replication Lens in both TUI and Web into clean, uncluttered sections separating Publications, Subscriptions, WAL Senders, and Replication Slots.
+
 ## [0.19.0] — 2026-09-07 — "Observability Expansion: Sequences, SLRU, Standby Conflicts & Table Storage"
 
 ### Added

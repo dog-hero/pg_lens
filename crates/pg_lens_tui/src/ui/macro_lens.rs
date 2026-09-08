@@ -659,11 +659,25 @@ mod tests {
     fn slot(active: bool, wal_status: Option<&str>, retained_wal_bytes: Option<i64>) -> ReplicationSlotRow {
         ReplicationSlotRow {
             slot_name: "probe_slot".to_string(),
+            plugin: None,
             slot_type: "physical".to_string(),
+            database: None,
+            temporary: false,
             active,
+            active_pid: None,
+            application_name: None,
+            client_addr: None,
+            restart_lsn: None,
+            confirmed_flush_lsn: None,
             retained_wal_bytes,
+            consumer_lag_bytes: None,
             wal_status: wal_status.map(str::to_string),
             safe_wal_size: None,
+            xmin_age: None,
+            catalog_xmin_age: None,
+            two_phase: None,
+            conflicting: None,
+            invalidated: None,
         }
     }
 
@@ -684,7 +698,14 @@ mod tests {
             client: "10.0.0.1".to_string(),
             state: "streaming".to_string(),
             sync_state: "async".to_string(),
+            sync_priority: 0,
+            sent_lag_bytes: None,
+            write_lag_bytes: None,
+            flush_lag_bytes: None,
             replay_lag_bytes: Some(0),
+            total_lag_bytes: None,
+            write_lag_secs: None,
+            flush_lag_secs: None,
             replay_lag_secs: Some(0.0),
         };
         let senders: Vec<WalSenderRow> = (0..10).map(|i| sender(&format!("cdc_{i}"))).collect();

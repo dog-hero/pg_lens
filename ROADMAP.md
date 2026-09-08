@@ -311,6 +311,12 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.20.0** — "Logical & Physical Replication Deep-Dive: Dedicated Publications, Enriched Subscriptions & Slots":
+  - **Dedicated Publications Panel**: catalog discovery for logical publications (`pg_publication`, `pg_publication_tables`) with published tables list, schema scoping, and operation flags (`INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`) in TUI and Web Lens.
+  - **Enriched Subscriptions**: subscriber telemetry (`pg_subscription`, `pg_stat_subscription`, PG 15+ version gate) with sanitized connection parameters, streaming/binary modes, two-phase commit, worker count, and syncing tables.
+  - **Enriched Replication Slots**: expanded slot diagnostics (`pg_replication_slots`, PG 16+ version gate) with plugin, database, client app/address, restart/flush LSN, consumer lag, two-phase, and invalidated/conflicting flags.
+  - **Replication Slot Detail Modal**: interactive floating detail dialog on `Enter` in TUI Replication Lens displaying complete connection, LSN positions, and WAL retention metrics.
+  - **Responsive Layout**: multi-tier responsive slot columns in TUI and clean distinct sections in Web Lens.
 - **v0.19.0** — "Observability Expansion: Sequences, SLRU, Standby Conflicts & Table Storage":
   - **Sequence Exhaustion Alerts**: proactive monitoring of `pg_sequences` in core, TUI Schema Lens sub-view (`S`), and Web Lens panel with exhaustion percentage and capacity calculation.
   - **SLRU Cache Monitoring**: Simple LRU cache monitoring (`pg_stat_slru`, PG 13+) on TUI Macro Lens and Web vitals with subtransaction thrashing warning.

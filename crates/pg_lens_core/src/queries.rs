@@ -132,6 +132,10 @@ pub struct QuerySet {
     pub slru: &'static str,
     /// Standby database recovery conflicts (v0.19, `pg_stat_database_conflicts`). Runs on the fast tick.
     pub replication_conflicts: &'static str,
+    /// Logical replication publications in current database (v0.20, `pg_publication`).
+    pub publications: &'static str,
+    /// Logical replication subscriptions for current database (v0.20, `pg_subscription`).
+    pub subscriptions: &'static str,
 }
 
 /// Row cap of the table-stats query (top N tables by total size). Kept as a
@@ -206,21 +210,19 @@ const STATEMENTS_EXT_1_11: &str = include_str!("../queries/statements_ext_1_11.s
 // PG 13), so one file each serves the whole supported range.
 const DO_CANCEL_BACKEND: &str = include_str!("../queries/do_cancel_backend.sql");
 const DO_TERMINATE_BACKEND: &str = include_str!("../queries/do_terminate_backend.sql");
-// Replication (primary + standby sides). Adapted from dalibo/pg_activity;
-// version-independent 10+ (replay_lag / pg_stat_wal_receiver), so one file
-// each serves the whole supported range.
+// Replication (primary + standby sides).
 const REPLICATION: &str = include_str!("../queries/replication.sql");
 const WAL_RECEIVER: &str = include_str!("../queries/wal_receiver.sql");
+const WAL_RECEIVER_POST_140000: &str = include_str!("../queries/wal_receiver_post_140000.sql");
 // Vacuum health / XID wraparound (F2). All version-independent 13+ (plain
 // catalog + pg_stat_progress_vacuum, present since PG 9.6/13's stable
 // shape), so one file each serves the whole supported range.
 const VACUUM_CLUSTER_AGE: &str = include_str!("../queries/vacuum_cluster_age.sql");
 const VACUUM_TABLE_AGES: &str = include_str!("../queries/vacuum_table_ages.sql");
 const VACUUM_PROGRESS: &str = include_str!("../queries/vacuum_progress.sql");
-// Replication slots (F2.5). Version-independent 13+ (wal_status /
-// safe_wal_size shipped in PG 13), so one file serves the whole supported
-// range — no post_NNNNNN variant needed.
+// Replication slots (F2.5). Invalidated column added in PG 16+.
 const REPLICATION_SLOTS: &str = include_str!("../queries/replication_slots.sql");
+const REPLICATION_SLOTS_POST_160000: &str = include_str!("../queries/replication_slots_post_160000.sql");
 // Index advisor (F3). Version-independent 13+ (pg_stat_user_indexes /
 // pg_index / pg_constraint are stable across the whole supported range).
 const INDEXES: &str = include_str!("../queries/indexes.sql");
@@ -270,6 +272,10 @@ const SEQUENCES: &str = include_str!("../queries/sequences.sql");
 const SLRU_POST_130000: &str = include_str!("../queries/slru_post_130000.sql");
 // Database recovery conflicts for standby replicas (v0.19, `pg_stat_database_conflicts`).
 const REPLICATION_CONFLICTS: &str = include_str!("../queries/replication_conflicts.sql");
+// Logical replication publications & subscriptions (v0.20).
+const PUBLICATIONS: &str = include_str!("../queries/publications.sql");
+const SUBSCRIPTIONS: &str = include_str!("../queries/subscriptions.sql");
+const SUBSCRIPTIONS_POST_150000: &str = include_str!("../queries/subscriptions_post_150000.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -278,6 +284,21 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
         BGWRITER_POST_170000
     } else {
         BGWRITER_POST_130000
+    };
+    let wal_receiver = if server_version_num >= 140_000 {
+        WAL_RECEIVER_POST_140000
+    } else {
+        WAL_RECEIVER
+    };
+    let replication_slots = if server_version_num >= 160_000 {
+        REPLICATION_SLOTS_POST_160000
+    } else {
+        REPLICATION_SLOTS
+    };
+    let subscriptions = if server_version_num >= 150_000 {
+        SUBSCRIPTIONS_POST_150000
+    } else {
+        SUBSCRIPTIONS
     };
     // v0.16: pg_stat_io shipped in PG 16 — absent (not broken) below that.
     let io_stats = if server_version_num >= 160_000 {
@@ -305,11 +326,11 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             cancel_backend: DO_CANCEL_BACKEND,
             terminate_backend: DO_TERMINATE_BACKEND,
             replication: REPLICATION,
-            wal_receiver: WAL_RECEIVER,
+            wal_receiver,
             vacuum_cluster_age: VACUUM_CLUSTER_AGE,
             vacuum_table_ages: VACUUM_TABLE_AGES,
             vacuum_progress: VACUUM_PROGRESS,
-            replication_slots: REPLICATION_SLOTS,
+            replication_slots,
             indexes: INDEXES,
             db_stats_reset: DB_STATS_RESET,
             bgwriter,
@@ -328,6 +349,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             sequences: SEQUENCES,
             slru: SLRU_POST_130000,
             replication_conflicts: REPLICATION_CONFLICTS,
+            publications: PUBLICATIONS,
+            subscriptions,
         })
     } else if server_version_num >= 130_000 {
         Ok(QuerySet {
@@ -343,11 +366,11 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             cancel_backend: DO_CANCEL_BACKEND,
             terminate_backend: DO_TERMINATE_BACKEND,
             replication: REPLICATION,
-            wal_receiver: WAL_RECEIVER,
+            wal_receiver,
             vacuum_cluster_age: VACUUM_CLUSTER_AGE,
             vacuum_table_ages: VACUUM_TABLE_AGES,
             vacuum_progress: VACUUM_PROGRESS,
-            replication_slots: REPLICATION_SLOTS,
+            replication_slots,
             indexes: INDEXES,
             db_stats_reset: DB_STATS_RESET,
             bgwriter,
@@ -366,6 +389,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
             sequences: SEQUENCES,
             slru: SLRU_POST_130000,
             replication_conflicts: REPLICATION_CONFLICTS,
+            publications: PUBLICATIONS,
+            subscriptions,
         })
     } else {
         Err(format!(
@@ -739,6 +764,50 @@ mod tests {
             assert!(q.replication_conflicts.contains("current_database()"));
             assert!(q.replication_conflicts.contains("confl_lock"));
             assert!(q.replication_conflicts.contains("confl_deadlock"));
+        }
+    }
+
+    #[test]
+    fn wal_receiver_pausing_split_at_pg14() {
+        let q13 = for_version(130_011).expect("PG 13 supported");
+        assert!(q13.wal_receiver.contains("pg_is_wal_replay_paused()"));
+        assert!(!q13.wal_receiver.contains("pg_get_wal_replay_pause_state()"));
+
+        let q14 = for_version(140_000).expect("PG 14 supported");
+        assert!(q14.wal_receiver.contains("pg_is_wal_replay_paused()"));
+        assert!(q14.wal_receiver.contains("pg_get_wal_replay_pause_state()"));
+    }
+
+    #[test]
+    fn replication_slots_invalidated_split_at_pg16() {
+        let q15 = for_version(150_000).expect("PG 15 supported");
+        assert!(q15.replication_slots.contains("xmin_age"));
+        assert!(q15.replication_slots.contains("NULL::text AS invalidated"));
+
+        let q16 = for_version(160_000).expect("PG 16 supported");
+        assert!(q16.replication_slots.contains("xmin_age"));
+        assert!(q16.replication_slots.contains("invalidated::text AS invalidated"));
+    }
+
+    #[test]
+    fn subscriptions_error_stats_split_at_pg15() {
+        let q14 = for_version(140_000).expect("PG 14 supported");
+        assert!(q14.subscriptions.contains("pg_subscription"));
+        assert!(q14.subscriptions.contains("NULL::int8 AS apply_error_count"));
+
+        let q15 = for_version(150_000).expect("PG 15 supported");
+        assert!(q15.subscriptions.contains("pg_subscription"));
+        assert!(q15.subscriptions.contains("pg_stat_subscription_stats"));
+        assert!(q15.subscriptions.contains("apply_error_count"));
+    }
+
+    #[test]
+    fn publications_query_serves_pg13_and_up() {
+        for version in [130_011, 140_000, 160_003] {
+            let q = for_version(version).expect("supported");
+            assert!(q.publications.contains("pg_publication"));
+            assert!(q.publications.contains("puballtables"));
+            assert!(q.publications.contains("table_count"));
         }
     }
 }

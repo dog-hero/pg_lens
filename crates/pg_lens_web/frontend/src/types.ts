@@ -530,7 +530,14 @@ export interface WalSenderRow {
   client: string;
   state: string;
   sync_state: string;
+  sync_priority: number;
+  sent_lag_bytes: number | null;
+  write_lag_bytes: number | null;
+  flush_lag_bytes: number | null;
   replay_lag_bytes: number | null;
+  total_lag_bytes: number | null;
+  write_lag_secs: number | null;
+  flush_lag_secs: number | null;
   replay_lag_secs: number | null;
 }
 
@@ -541,6 +548,8 @@ export interface WalReceiverRow {
   sender_port: number | null;
   replay_lag_bytes: number | null;
   replay_lag_secs: number | null;
+  is_paused: boolean;
+  pause_state: string | null;
 }
 
 /**
@@ -558,19 +567,89 @@ export type ReplicationInfo =
  */
 export interface ReplicationSlotRow {
   slot_name: string;
+  /** Plugin name for logical slots (e.g. "pgoutput", "wal2json"), null for physical. */
+  plugin?: string | null;
   /** "physical" or "logical". */
   slot_type: string;
+  /** Database name for logical slots, null for physical. */
+  database?: string | null;
+  /** Whether this is a temporary replication slot. */
+  temporary?: boolean;
   active: boolean;
+  /** PID of active replication worker or consumer session. */
+  active_pid?: number | null;
+  /** Application name of active consumer from pg_stat_activity. */
+  application_name?: string | null;
+  /** Client IP address of active consumer. */
+  client_addr?: string | null;
+  /** Oldest WAL LSN still required by this slot. */
+  restart_lsn?: string | null;
+  /** LSN up to which logical consumer has confirmed flush. */
+  confirmed_flush_lsn?: string | null;
   /**
    * pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn); null during
    * recovery or when restart_lsn itself is null (unused logical slot).
    */
   retained_wal_bytes: number | null;
+  /** pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) — consumer lag in bytes. */
+  consumer_lag_bytes?: number | null;
   /** "reserved" | "extended" | "unreserved" | "lost" (PG 13+). */
   wal_status: string | null;
   /** Headroom before max_slot_wal_keep_size is at risk; null when
    * unlimited/not applicable. */
   safe_wal_size: number | null;
+  /** Age of xmin holding back VACUUM (bloat indicator). */
+  xmin_age: number | null;
+  /** Age of catalog_xmin. */
+  catalog_xmin_age: number | null;
+  /** Whether two-phase commit is enabled (PG 14+). */
+  two_phase?: boolean | null;
+  /** Whether this slot conflicts with recovery on a standby (PG 16+). */
+  conflicting?: boolean | null;
+  /** PG 16+ invalidation reason (wal_removed, max_slot_wal_keep_size). */
+  invalidated: string | null;
+}
+
+/** Logical replication publication row (pg_publication). */
+export interface PublicationRow {
+  pubname: string;
+  owner: string;
+  all_tables: boolean;
+  pubinsert: boolean;
+  pubupdate: boolean;
+  pubdelete: boolean;
+  pubtruncate: boolean;
+  pubviaroot: boolean;
+  table_count: number;
+  published_tables?: string[];
+}
+
+/** Logical replication subscription row (pg_subscription). */
+export interface SubscriptionRow {
+  subname: string;
+  owner: string;
+  enabled: boolean;
+  slot_name: string | null;
+  publications: string[];
+  sync_commit?: string | null;
+  publisher_host?: string | null;
+  publisher_port?: string | null;
+  publisher_dbname?: string | null;
+  streaming_mode?: string | null;
+  binary_mode?: boolean | null;
+  two_phase?: boolean | null;
+  worker_pid: number | null;
+  received_lsn: string | null;
+  last_msg_send_secs: number | null;
+  last_msg_receipt_secs: number | null;
+  latest_end_lsn: string | null;
+  latest_end_secs: number | null;
+  sync_tables: number;
+  ready_tables: number;
+  total_tables: number;
+  syncing_table_names?: string[];
+  apply_error_count: number | null;
+  sync_error_count: number | null;
 }
 
 /**
@@ -768,6 +847,10 @@ export interface DbSnapshot {
   slru?: SlruStats | null;
   /** Standby database recovery conflicts (v0.19, `pg_stat_database_conflicts`). */
   conflicts?: DatabaseConflicts | null;
+  /** Logical replication publications in current database (v0.20, `pg_publication`). */
+  publications?: PublicationRow[] | null;
+  /** Logical replication subscriptions for current database (v0.20, `pg_subscription`). */
+  subscriptions?: SubscriptionRow[] | null;
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
 }

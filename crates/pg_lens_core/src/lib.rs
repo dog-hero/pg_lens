@@ -38,11 +38,12 @@ pub use models::{
     ActiveLockRow, ActivityRow, AdminActionResult, AdminCommand, AdminKind, AdminOutcome, BloatRow,
     CheckpointerStats, DatabaseConflicts, DatabaseRow, DbSnapshot, DdlProgressRow, IdleSessionRow,
     IndexFinding, IndexRow, IoStatRow, LockCapacity, LockRow, PollerStatus, PreparedXactRow,
-    ProgressUnifiedRow, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot, SchemaStatus,
-    SequenceRow, SequenceSeverity, ServerVitals, SlruRow, SlruStats, StatementRow,
-    StatementsSnapshot, StatementsStatus, TableDetail, TableDetailColumn, TableDetailConstraint,
-    TableDetailIndex, TableDetailRequest, TableStatRow, VacuumClusterAge, VacuumProgressRow,
-    VacuumTableRow, WalReceiverRow, WalSenderRow, WalStats, calculate_sequence_exhaustion,
+    ProgressUnifiedRow, PublicationRow, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot,
+    SchemaStatus, SequenceRow, SequenceSeverity, ServerVitals, SlruRow, SlruStats, StatementRow,
+    StatementsSnapshot, StatementsStatus, SubscriptionRow, TableDetail, TableDetailColumn,
+    TableDetailConstraint, TableDetailIndex, TableDetailRequest, TableStatRow, VacuumClusterAge,
+    VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow, WalStats,
+    calculate_sequence_exhaustion,
 };
 pub use idle_sessions::{
     OldestIdleSession, Severity as IdleSessionSeverity, oldest_idle_session,

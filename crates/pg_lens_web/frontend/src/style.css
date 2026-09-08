@@ -975,13 +975,44 @@ html[data-theme="light"] .sql-num {
 
 /* ── replication panel ──────────────────────────────────────────────── */
 
+#replication .repl-section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+#replication .repl-section:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+#replication .repl-section h3 {
+  margin: 0 0 8px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+}
+
 #replication .repl-row {
   display: flex;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   align-items: baseline;
   padding: 5px 8px;
   border-radius: 6px;
   font-size: 0.85rem;
+}
+
+#replication .repl-detail {
+  width: 100%;
+  font-size: 0.8rem;
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  padding-left: 2px;
+  margin-top: 2px;
 }
 
 #replication .repl-name {

@@ -14,5 +14,7 @@ SELECT
       pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())::int8
           AS replay_lag_bytes,
       EXTRACT(epoch FROM (now() - pg_last_xact_replay_timestamp()))::float8
-          AS replay_lag_secs
+          AS replay_lag_secs,
+      pg_is_wal_replay_paused() AS is_paused,
+      CASE WHEN pg_is_wal_replay_paused() THEN 'paused' ELSE 'not paused' END AS pause_state
  FROM pg_stat_wal_receiver;

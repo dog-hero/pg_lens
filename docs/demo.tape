@@ -61,9 +61,13 @@ Sleep 2.5s
 Type "p"
 Sleep 600ms
 
-# 4. Replication Lens: senders + all replication slots
+# 4. Replication Lens: publications, subscriptions, WAL senders & replication slots
 Tab
 Sleep 2.5s
+Enter
+Sleep 2s
+Escape
+Sleep 600ms
 
 # 5. Schema Lens: tables, vacuum health sub-view (v), and refresh (B)
 Tab

@@ -9,9 +9,9 @@ use tokio_postgres::{Client, Config, NoTls, Row, Transaction};
 
 use crate::models::{
     ActiveLockRow, ActivityRow, BloatRow, DatabaseRow, DdlProgressRow, IdleSessionRow, LockRow,
-    PreparedXactRow, ReplicationSlotRow, SequenceRow, StatementRow, TableDetailColumn,
-    TableDetailConstraint, TableDetailIndex, TableStatRow, VacuumClusterAge, VacuumProgressRow,
-    VacuumTableRow, WalReceiverRow, WalSenderRow, calculate_sequence_exhaustion,
+    PreparedXactRow, PublicationRow, ReplicationSlotRow, SequenceRow, StatementRow, SubscriptionRow,
+    TableDetailColumn, TableDetailConstraint, TableDetailIndex, TableStatRow, VacuumClusterAge,
+    VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow, calculate_sequence_exhaustion,
 };
 
 /// Connects to PostgreSQL and — mandatory per docs.rs/tokio-postgres — moves
@@ -214,16 +214,21 @@ pub fn bgwriter_from_row(row: &Row) -> Result<BgwriterRow, tokio_postgres::Error
 }
 
 /// Maps one row of `queries/replication.sql` onto [`WalSenderRow`] (the
-/// primary side: one connected streaming replica). Lag columns are nullable —
-/// `replay_lag` is NULL while a replica is idle, and the byte diff is NULL on
-/// a cascading standby (guarded by the CASE in the SQL).
+/// primary side: one connected streaming replica).
 pub fn wal_sender_from_row(row: &Row) -> Result<WalSenderRow, tokio_postgres::Error> {
     Ok(WalSenderRow {
         application_name: row.try_get("application_name")?,
         client: row.try_get("client")?,
         state: row.try_get("state")?,
         sync_state: row.try_get("sync_state")?,
+        sync_priority: row.try_get("sync_priority")?,
+        sent_lag_bytes: row.try_get("sent_lag_bytes")?,
+        write_lag_bytes: row.try_get("write_lag_bytes")?,
+        flush_lag_bytes: row.try_get("flush_lag_bytes")?,
         replay_lag_bytes: row.try_get("replay_lag_bytes")?,
+        total_lag_bytes: row.try_get("total_lag_bytes")?,
+        write_lag_secs: row.try_get("write_lag_secs")?,
+        flush_lag_secs: row.try_get("flush_lag_secs")?,
         replay_lag_secs: row.try_get("replay_lag_secs")?,
     })
 }
@@ -237,22 +242,91 @@ pub fn wal_receiver_from_row(row: &Row) -> Result<WalReceiverRow, tokio_postgres
         sender_port: row.try_get("sender_port")?,
         replay_lag_bytes: row.try_get("replay_lag_bytes")?,
         replay_lag_secs: row.try_get("replay_lag_secs")?,
+        is_paused: row.try_get("is_paused")?,
+        pause_state: row.try_get("pause_state")?,
     })
 }
 
 /// Maps one row of `queries/replication_slots.sql` onto
-/// [`ReplicationSlotRow`]. `retained_wal_bytes` is nullable per the SQL's
-/// recovery/NULL-restart_lsn guard; `wal_status`/`safe_wal_size` are the
-/// PG 13+ columns and are never expected NULL on a supported server, but
-/// stay `Option` defensively (a slot mid-drop could plausibly race).
+/// [`ReplicationSlotRow`].
 pub fn replication_slot_from_row(row: &Row) -> Result<ReplicationSlotRow, tokio_postgres::Error> {
     Ok(ReplicationSlotRow {
         slot_name: row.try_get("slot_name")?,
+        plugin: row.try_get("plugin").ok().flatten(),
         slot_type: row.try_get("slot_type")?,
+        database: row.try_get("database").ok().flatten(),
+        temporary: row.try_get("temporary").unwrap_or(false),
         active: row.try_get("active")?,
+        active_pid: row.try_get("active_pid").ok().flatten(),
+        application_name: row.try_get("application_name").ok().flatten(),
+        client_addr: row.try_get("client_addr").ok().flatten(),
+        restart_lsn: row.try_get("restart_lsn").ok().flatten(),
+        confirmed_flush_lsn: row.try_get("confirmed_flush_lsn").ok().flatten(),
         retained_wal_bytes: row.try_get("retained_wal_bytes")?,
+        consumer_lag_bytes: row.try_get("consumer_lag_bytes").ok().flatten(),
         wal_status: row.try_get("wal_status")?,
         safe_wal_size: row.try_get("safe_wal_size")?,
+        xmin_age: row.try_get("xmin_age")?,
+        catalog_xmin_age: row.try_get("catalog_xmin_age")?,
+        two_phase: row.try_get("two_phase").ok().flatten(),
+        conflicting: row.try_get("conflicting").ok().flatten(),
+        invalidated: row.try_get("invalidated")?,
+    })
+}
+
+/// Maps one row of `queries/publications.sql` onto [`PublicationRow`] (v0.20).
+pub fn publication_from_row(row: &Row) -> Result<PublicationRow, tokio_postgres::Error> {
+    let published_tables_raw: Option<String> = row.try_get("published_tables").ok().flatten();
+    let published_tables = match published_tables_raw {
+        Some(s) if !s.is_empty() => s.split(", ").map(|p| p.to_string()).collect(),
+        _ => Vec::new(),
+    };
+    Ok(PublicationRow {
+        pubname: row.try_get("pubname")?,
+        owner: row.try_get("owner")?,
+        all_tables: row.try_get("puballtables")?,
+        pubinsert: row.try_get("pubinsert")?,
+        pubupdate: row.try_get("pubupdate")?,
+        pubdelete: row.try_get("pubdelete")?,
+        pubtruncate: row.try_get("pubtruncate")?,
+        pubviaroot: row.try_get("pubviaroot")?,
+        table_count: row.try_get("table_count")?,
+        published_tables,
+    })
+}
+
+/// Maps one row of `queries/subscriptions.sql` onto [`SubscriptionRow`] (v0.20).
+pub fn subscription_from_row(row: &Row) -> Result<SubscriptionRow, tokio_postgres::Error> {
+    let syncing_raw: Option<String> = row.try_get("syncing_table_names").ok().flatten();
+    let syncing_table_names = match syncing_raw {
+        Some(s) if !s.is_empty() => s.split(", ").map(|p| p.to_string()).collect(),
+        _ => Vec::new(),
+    };
+    Ok(SubscriptionRow {
+        subname: row.try_get("subname")?,
+        owner: row.try_get("owner")?,
+        enabled: row.try_get("subenabled")?,
+        slot_name: row.try_get("subslotname")?,
+        publications: row.try_get("subpublications")?,
+        sync_commit: row.try_get("sync_commit").ok().flatten(),
+        publisher_host: row.try_get("publisher_host").ok().flatten(),
+        publisher_port: row.try_get("publisher_port").ok().flatten(),
+        publisher_dbname: row.try_get("publisher_dbname").ok().flatten(),
+        streaming_mode: row.try_get("streaming_mode").ok().flatten(),
+        binary_mode: row.try_get("binary_mode").ok().flatten(),
+        two_phase: row.try_get("two_phase").ok().flatten(),
+        worker_pid: row.try_get("pid")?,
+        received_lsn: row.try_get("received_lsn")?,
+        last_msg_send_secs: row.try_get("last_msg_send_secs")?,
+        last_msg_receipt_secs: row.try_get("last_msg_receipt_secs")?,
+        latest_end_lsn: row.try_get("latest_end_lsn")?,
+        latest_end_secs: row.try_get("latest_end_secs")?,
+        sync_tables: row.try_get("sync_tables")?,
+        ready_tables: row.try_get("ready_tables")?,
+        total_tables: row.try_get("total_tables")?,
+        syncing_table_names,
+        apply_error_count: row.try_get("apply_error_count")?,
+        sync_error_count: row.try_get("sync_error_count")?,
     })
 }
 

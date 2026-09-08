@@ -17,9 +17,24 @@ SELECT
       coalesce(client_addr::text, 'local') AS client,
       state,
       sync_state,
+      sync_priority::int4 AS sync_priority,
+      CASE WHEN pg_is_in_recovery() THEN NULL
+           ELSE pg_wal_lsn_diff(pg_current_wal_lsn(), sent_lsn)::int8
+      END AS sent_lag_bytes,
+      CASE WHEN pg_is_in_recovery() THEN NULL
+           ELSE pg_wal_lsn_diff(sent_lsn, write_lsn)::int8
+      END AS write_lag_bytes,
+      CASE WHEN pg_is_in_recovery() THEN NULL
+           ELSE pg_wal_lsn_diff(write_lsn, flush_lsn)::int8
+      END AS flush_lag_bytes,
+      CASE WHEN pg_is_in_recovery() THEN NULL
+           ELSE pg_wal_lsn_diff(flush_lsn, replay_lsn)::int8
+      END AS replay_lag_bytes,
       CASE WHEN pg_is_in_recovery() THEN NULL
            ELSE pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::int8
-      END AS replay_lag_bytes,
+      END AS total_lag_bytes,
+      EXTRACT(epoch FROM write_lag)::float8 AS write_lag_secs,
+      EXTRACT(epoch FROM flush_lag)::float8 AS flush_lag_secs,
       EXTRACT(epoch FROM replay_lag)::float8 AS replay_lag_secs
  FROM pg_stat_replication
-ORDER BY replay_lag_bytes DESC NULLS LAST;
+ORDER BY total_lag_bytes DESC NULLS LAST;

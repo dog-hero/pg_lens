@@ -127,9 +127,14 @@ Web Lens dashboard running on recorded data (no database required).
 - **Replication** — the Macro Lens shows a compact **Replication** summary
   (capped, with a "Tab → Replication for all" hint once it clips) alongside
   a dedicated **Replication Lens** tab with the full, never-clipped picture:
-  every WAL sender/receiver (`pg_stat_replication` state, sync mode, replay
-  lag in both bytes and time) and every replication slot as a scrollable
-  table (active/inactive, retained WAL, `wal_status`, safe WAL size). Lag
+  dedicated **Publications** panel (`pg_publication`, `pg_publication_tables`)
+  listing published tables and operations; enriched **Subscriptions**
+  (`pg_subscription`, `pg_stat_subscription`, PG 15+) showing streaming/binary
+  modes, two-phase commits, worker counts, and active table synchronization;
+  every WAL sender/receiver (`pg_stat_replication` state, sync mode, replay lag
+  in both bytes and time); and every replication slot as a scrollable, responsive
+  table with client app/address, plugin, restart/flush LSN, consumer lag in bytes,
+  and an interactive **Replication Slot Details** inspector on `Enter`. Lag
   and slot severity are tiered yellow/red with a textual `!`/`!!` marker; a
   replica 0 bytes behind is always "caught up" even if a primary has been
   idle for minutes (the time-based measure is unreliable there). The lag
@@ -668,7 +673,7 @@ they ever drift, trust the overlay.
 | `g` / `Home` | Jump selection to the first row (in replay mode: jump to first frame) |
 | `G` / `End` | Jump selection to the last row (in replay mode: jump to last frame) |
 | `PgUp` / `PgDn` | Move selection by a page |
-| `Enter` | Open/close detail panel — Schema Lens: table structure; Blocks Lens: lock details; Progress Lens: operation metrics; Records Lens: launch interactive replay for selected recording; `j`/`k` scroll inside open detail |
+| `Enter` | Open/close detail panel — Schema Lens: table structure; Blocks Lens: lock details; Replication Lens: replication slot details; Progress Lens: operation metrics; Records Lens: launch interactive replay for selected recording; `j`/`k` scroll inside open detail |
 | `/` | Filter current table — Micro Lens, Schema Lens, Query Lens, Progress Lens, or Records Lens (file name); `Enter` applies, `Esc` reverts |
 | `\` | Clear the active lens's committed filter |
 | `w` | Full waits panel (Micro Lens only) |

@@ -2088,9 +2088,30 @@ pub struct WalSenderRow {
     pub state: String,
     /// `async`, `sync`, `quorum`, `potential`.
     pub sync_state: String,
-    /// WAL bytes the replica's replay is behind the primary's current LSN.
-    /// `None` on a cascading standby (LSN diff is guarded during recovery).
+    /// Priority in synchronous replication (`0` = async / not in synchronous_standby_names).
+    #[serde(default)]
+    pub sync_priority: i32,
+    /// Network / WAL sender transmission lag: `pg_current_wal_lsn() - sent_lsn`.
+    #[serde(default)]
+    pub sent_lag_bytes: Option<i64>,
+    /// Standby OS write lag: `sent_lsn - write_lsn`.
+    #[serde(default)]
+    pub write_lag_bytes: Option<i64>,
+    /// Standby disk flush/fsync lag: `write_lsn - flush_lsn`.
+    #[serde(default)]
+    pub flush_lag_bytes: Option<i64>,
+    /// Standby redo replay lag: `flush_lsn - replay_lsn`.
+    #[serde(default)]
     pub replay_lag_bytes: Option<i64>,
+    /// Total WAL lag from primary head to replica replay: `pg_current_wal_lsn() - replay_lsn`.
+    #[serde(default)]
+    pub total_lag_bytes: Option<i64>,
+    /// `write_lag` interval in seconds.
+    #[serde(default)]
+    pub write_lag_secs: Option<f64>,
+    /// `flush_lag` interval in seconds.
+    #[serde(default)]
+    pub flush_lag_secs: Option<f64>,
     /// `replay_lag` interval in seconds; `None` while the replica is idle.
     pub replay_lag_secs: Option<f64>,
 }
@@ -2108,6 +2129,13 @@ pub struct WalReceiverRow {
     /// Seconds since the last replayed transaction's commit timestamp;
     /// `None` when nothing has been replayed yet.
     pub replay_lag_secs: Option<f64>,
+    /// Whether redo replay is currently paused (`pg_is_wal_replay_paused()`).
+    #[serde(default)]
+    pub is_paused: bool,
+    /// Detailed replay pause state (`pg_get_wal_replay_pause_state()` on PG 14+):
+    /// `'not paused'`, `'pause requested'`, or `'paused'`.
+    #[serde(default)]
+    pub pause_state: Option<String>,
 }
 
 /// One row of `pg_replication_slots` (F2.5, `queries/replication_slots.sql`).
@@ -2122,14 +2150,38 @@ pub struct WalReceiverRow {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReplicationSlotRow {
     pub slot_name: String,
+    /// Plugin name for logical slots (e.g. "pgoutput", "wal2json"), None for physical.
+    #[serde(default)]
+    pub plugin: Option<String>,
     /// `"physical"` or `"logical"`.
     pub slot_type: String,
+    /// Database name for logical slots, None for physical.
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Whether this is a temporary replication slot.
+    #[serde(default)]
+    pub temporary: bool,
     pub active: bool,
-    /// `pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)` — `None` during
-    /// recovery (the CASE guard in the SQL short-circuits before the
-    /// recovery-only-erroring `pg_current_wal_lsn()` runs) or when
-    /// `restart_lsn` itself is NULL (a logical slot never yet used).
+    /// PID of active replication worker or consumer session.
+    #[serde(default)]
+    pub active_pid: Option<i32>,
+    /// Application name of active consumer from pg_stat_activity.
+    #[serde(default)]
+    pub application_name: Option<String>,
+    /// Client IP address of active consumer.
+    #[serde(default)]
+    pub client_addr: Option<String>,
+    /// Oldest WAL LSN still required by this slot.
+    #[serde(default)]
+    pub restart_lsn: Option<String>,
+    /// LSN up to which logical consumer has confirmed flush.
+    #[serde(default)]
+    pub confirmed_flush_lsn: Option<String>,
+    /// `pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)` — WAL retained on disk.
     pub retained_wal_bytes: Option<i64>,
+    /// `pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)` — consumer lag in bytes.
+    #[serde(default)]
+    pub consumer_lag_bytes: Option<i64>,
     /// `reserved` / `extended` / `unreserved` / `lost` (PG 13+).
     pub wal_status: Option<String>,
     /// Bytes of `max_slot_wal_keep_size` headroom still available before
@@ -2137,6 +2189,86 @@ pub struct ReplicationSlotRow {
     /// `max_slot_wal_keep_size` is unlimited (the default) or not
     /// applicable to this slot.
     pub safe_wal_size: Option<i64>,
+    /// Age in transactions of `xmin` (`age(xmin)`). If high, this slot
+    /// is actively holding back VACUUM on the primary, causing cluster-wide bloat!
+    #[serde(default)]
+    pub xmin_age: Option<i64>,
+    /// Age in transactions of `catalog_xmin` (`age(catalog_xmin)`).
+    #[serde(default)]
+    pub catalog_xmin_age: Option<i64>,
+    /// Whether two-phase commit is enabled (PG 14+).
+    #[serde(default)]
+    pub two_phase: Option<bool>,
+    /// Whether this slot conflicts with recovery on a standby (PG 16+).
+    #[serde(default)]
+    pub conflicting: Option<bool>,
+    /// PG 16+ slot invalidation reason (`wal_removed` or `max_slot_wal_keep_size`).
+    #[serde(default)]
+    pub invalidated: Option<String>,
+}
+
+/// One row of `pg_publication` (v0.20, `queries/publications.sql`):
+/// logical replication publications in the current database.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicationRow {
+    pub pubname: String,
+    pub owner: String,
+    pub all_tables: bool,
+    pub pubinsert: bool,
+    pub pubupdate: bool,
+    pub pubdelete: bool,
+    pub pubtruncate: bool,
+    pub pubviaroot: bool,
+    pub table_count: i64,
+    /// Sample or list of published tables (`schema.table`).
+    #[serde(default)]
+    pub published_tables: Vec<String>,
+}
+
+/// One row of `pg_subscription` (v0.20, `queries/subscriptions.sql`):
+/// logical replication subscriptions for the current database.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SubscriptionRow {
+    pub subname: String,
+    pub owner: String,
+    pub enabled: bool,
+    pub slot_name: Option<String>,
+    pub publications: Vec<String>,
+    /// Synchronous commit mode (`off`, `local`, `on`, `remote_write`, `remote_apply`).
+    #[serde(default)]
+    pub sync_commit: Option<String>,
+    /// Host of the publisher (extracted from subconninfo).
+    #[serde(default)]
+    pub publisher_host: Option<String>,
+    /// Port of the publisher (extracted from subconninfo).
+    #[serde(default)]
+    pub publisher_port: Option<String>,
+    /// Database name of the publisher (extracted from subconninfo).
+    #[serde(default)]
+    pub publisher_dbname: Option<String>,
+    /// Streaming mode (`off`, `on`, `parallel`, PG 15+).
+    #[serde(default)]
+    pub streaming_mode: Option<String>,
+    /// Binary format transfer mode (PG 14+).
+    #[serde(default)]
+    pub binary_mode: Option<bool>,
+    /// Two-phase commit enabled (PG 15+).
+    #[serde(default)]
+    pub two_phase: Option<bool>,
+    pub worker_pid: Option<i32>,
+    pub received_lsn: Option<String>,
+    pub last_msg_send_secs: Option<f64>,
+    pub last_msg_receipt_secs: Option<f64>,
+    pub latest_end_lsn: Option<String>,
+    pub latest_end_secs: Option<f64>,
+    pub sync_tables: i64,
+    pub ready_tables: i64,
+    pub total_tables: i64,
+    /// Names of tables currently syncing (`i`, `d`, `s` state).
+    #[serde(default)]
+    pub syncing_table_names: Vec<String>,
+    pub apply_error_count: Option<i64>,
+    pub sync_error_count: Option<i64>,
 }
 
 /// Replication role and topology, refreshed every fast tick (the queries are
@@ -2276,6 +2408,12 @@ pub struct DbSnapshot {
     /// Standby database recovery conflicts (v0.19, `pg_stat_database_conflicts`).
     #[serde(default)]
     pub conflicts: Option<DatabaseConflicts>,
+    /// Logical replication publications in current database (v0.20, `pg_publication`).
+    #[serde(default)]
+    pub publications: Option<Vec<PublicationRow>>,
+    /// Logical replication subscriptions in current database (v0.20, `pg_subscription`).
+    #[serde(default)]
+    pub subscriptions: Option<Vec<SubscriptionRow>>,
     pub status: PollerStatus,
 }
 
@@ -2626,8 +2764,15 @@ impl DbSnapshot {
                         application_name: "replica-1".to_string(),
                         client: "10.0.8.21".to_string(),
                         state: "streaming".to_string(),
-                        sync_state: "async".to_string(),
+                        sync_state: "sync".to_string(),
+                        sync_priority: 1,
+                        sent_lag_bytes: Some(0),
+                        write_lag_bytes: Some(65_536),
+                        flush_lag_bytes: Some(65_536),
                         replay_lag_bytes: Some(196_608 + jitter(seq, 8, 131_072) as i64),
+                        total_lag_bytes: Some(327_680 + jitter(seq, 8, 131_072) as i64),
+                        write_lag_secs: Some(0.01),
+                        flush_lag_secs: Some(0.02),
                         replay_lag_secs: Some(0.12 + jitter(seq, 9, 400) as f64 / 1_000.0),
                     },
                     WalSenderRow {
@@ -2635,7 +2780,14 @@ impl DbSnapshot {
                         client: "10.9.2.4".to_string(),
                         state: "streaming".to_string(),
                         sync_state: "async".to_string(),
+                        sync_priority: 0,
+                        sent_lag_bytes: Some(1_048_576),
+                        write_lag_bytes: Some(8 * 1024 * 1024),
+                        flush_lag_bytes: Some(12 * 1024 * 1024),
                         replay_lag_bytes: Some(48 * 1024 * 1024 + (seq as i64) * 131_072),
+                        total_lag_bytes: Some(69 * 1024 * 1024 + (seq as i64) * 131_072),
+                        write_lag_secs: Some(2.1),
+                        flush_lag_secs: Some(3.4),
                         replay_lag_secs: Some(14.5 + age),
                     },
                 ],
@@ -2648,19 +2800,47 @@ impl DbSnapshot {
             replication_slots: Some(vec![
                 ReplicationSlotRow {
                     slot_name: "replica_1_slot".to_string(),
+                    plugin: None,
                     slot_type: "physical".to_string(),
+                    database: None,
+                    temporary: false,
                     active: true,
+                    active_pid: Some(4120),
+                    application_name: Some("replica-1".to_string()),
+                    client_addr: Some("10.0.8.21".to_string()),
+                    restart_lsn: Some("0/1A00000".to_string()),
+                    confirmed_flush_lsn: None,
                     retained_wal_bytes: Some(4 * 1024 * 1024 + jitter(seq, 11, 512 * 1024) as i64),
+                    consumer_lag_bytes: None,
                     wal_status: Some("reserved".to_string()),
                     safe_wal_size: None,
+                    xmin_age: Some(120),
+                    catalog_xmin_age: None,
+                    two_phase: Some(false),
+                    conflicting: Some(false),
+                    invalidated: None,
                 },
                 ReplicationSlotRow {
                     slot_name: "analytics_cdc".to_string(),
+                    plugin: Some("pgoutput".to_string()),
                     slot_type: "logical".to_string(),
+                    database: Some("shop".to_string()),
+                    temporary: false,
                     active: false,
+                    active_pid: None,
+                    application_name: None,
+                    client_addr: None,
+                    restart_lsn: Some("0/1800000".to_string()),
+                    confirmed_flush_lsn: Some("0/1950000".to_string()),
                     retained_wal_bytes: Some(2_600_000_000 + (seq as i64) * 1_048_576),
+                    consumer_lag_bytes: Some(340_000_000),
                     wal_status: Some("extended".to_string()),
                     safe_wal_size: Some(1_400_000_000),
+                    xmin_age: Some(450_000),
+                    catalog_xmin_age: Some(2_100_000),
+                    two_phase: Some(false),
+                    conflicting: Some(false),
+                    invalidated: None,
                 },
             ]),
             // F2: one in-flight autovacuum, progressing between snapshots so
@@ -2932,6 +3112,93 @@ impl DbSnapshot {
                 snapshot_conflicts_per_sec: Some(0.0),
                 deadlock_conflicts_per_sec: Some(0.0),
             }),
+            publications: Some(vec![
+                PublicationRow {
+                    pubname: "core_pub".to_string(),
+                    owner: "postgres".to_string(),
+                    all_tables: true,
+                    pubinsert: true,
+                    pubupdate: true,
+                    pubdelete: true,
+                    pubtruncate: false,
+                    pubviaroot: false,
+                    table_count: 42,
+                    published_tables: vec![
+                        "public.order_items".to_string(),
+                        "public.orders".to_string(),
+                        "public.users".to_string(),
+                    ],
+                },
+                PublicationRow {
+                    pubname: "analytics_events".to_string(),
+                    owner: "analytics_app".to_string(),
+                    all_tables: false,
+                    pubinsert: true,
+                    pubupdate: false,
+                    pubdelete: false,
+                    pubtruncate: false,
+                    pubviaroot: true,
+                    table_count: 5,
+                    published_tables: vec![
+                        "audit.events".to_string(),
+                        "public.event_log".to_string(),
+                    ],
+                },
+            ]),
+            subscriptions: Some(vec![
+                SubscriptionRow {
+                    subname: "dw_billing_sub".to_string(),
+                    owner: "dw_loader".to_string(),
+                    enabled: true,
+                    slot_name: Some("dw_billing_slot".to_string()),
+                    publications: vec!["billing_pub".to_string()],
+                    sync_commit: Some("off".to_string()),
+                    publisher_host: Some("pg-primary.prod".to_string()),
+                    publisher_port: Some("5432".to_string()),
+                    publisher_dbname: Some("billing".to_string()),
+                    streaming_mode: Some("parallel".to_string()),
+                    binary_mode: Some(true),
+                    two_phase: Some(false),
+                    worker_pid: Some(5124),
+                    received_lsn: Some("0/1A3B040".to_string()),
+                    last_msg_send_secs: Some(0.4),
+                    last_msg_receipt_secs: Some(0.2),
+                    latest_end_lsn: Some("0/1A3B040".to_string()),
+                    latest_end_secs: Some(0.2),
+                    sync_tables: 0,
+                    ready_tables: 12,
+                    total_tables: 12,
+                    syncing_table_names: Vec::new(),
+                    apply_error_count: Some(0),
+                    sync_error_count: Some(0),
+                },
+                SubscriptionRow {
+                    subname: "crm_sync".to_string(),
+                    owner: "crm_user".to_string(),
+                    enabled: false,
+                    slot_name: Some("crm_sync_slot".to_string()),
+                    publications: vec!["crm_pub".to_string()],
+                    sync_commit: Some("local".to_string()),
+                    publisher_host: Some("10.0.12.5".to_string()),
+                    publisher_port: Some("5432".to_string()),
+                    publisher_dbname: Some("crm".to_string()),
+                    streaming_mode: Some("off".to_string()),
+                    binary_mode: Some(false),
+                    two_phase: Some(false),
+                    worker_pid: None,
+                    received_lsn: Some("0/1900000".to_string()),
+                    last_msg_send_secs: Some(1840.0),
+                    last_msg_receipt_secs: Some(1838.0),
+                    latest_end_lsn: Some("0/1900000".to_string()),
+                    latest_end_secs: Some(1838.0),
+                    sync_tables: 1,
+                    ready_tables: 4,
+                    total_tables: 5,
+                    syncing_table_names: vec!["public.leads (copy)".to_string()],
+                    apply_error_count: Some(3),
+                    sync_error_count: Some(1),
+                },
+            ]),
             status: PollerStatus::Ok,
         }
     }
@@ -2980,6 +3247,8 @@ impl DbSnapshot {
             ddl_progress: None,
             slru: None,
             conflicts: None,
+            publications: None,
+            subscriptions: None,
             status: PollerStatus::Connecting,
         }
     }
@@ -3509,6 +3778,51 @@ mod tests {
         assert_eq!(bloated_table.toast_bytes, 40_000_000);
         assert_eq!(bloated_table.heap_bytes, 147_695_104);
         assert_eq!(bloated_table.table_bytes, 187_695_104);
+    }
+
+    #[test]
+    fn v0_20_replication_models_serialize_in_mock_snapshot() {
+        let snap = DbSnapshot::mock();
+        let json = serde_json::to_value(&snap).expect("snapshot must serialize");
+
+        // Publications
+        assert!(json["publications"].is_array());
+        let pubs = &json["publications"];
+        assert_eq!(pubs[0]["pubname"], "core_pub");
+        assert_eq!(pubs[0]["all_tables"], true);
+        assert_eq!(pubs[0]["table_count"], 42);
+        assert_eq!(pubs[0]["published_tables"][0], "public.order_items");
+
+        // Subscriptions
+        assert!(json["subscriptions"].is_array());
+        let subs = &json["subscriptions"];
+        assert_eq!(subs[0]["subname"], "dw_billing_sub");
+        assert_eq!(subs[0]["enabled"], true);
+        assert_eq!(subs[0]["ready_tables"], 12);
+        assert_eq!(subs[0]["apply_error_count"], 0);
+        assert_eq!(subs[0]["publisher_host"], "pg-primary.prod");
+        assert_eq!(subs[0]["sync_commit"], "off");
+        assert_eq!(subs[1]["syncing_table_names"][0], "public.leads (copy)");
+
+        // Extended replication fields
+        if let Some(ReplicationInfo::Primary { senders }) = &snap.replication {
+            assert_eq!(senders[0].sync_state, "sync");
+            assert_eq!(senders[0].sync_priority, 1);
+            assert_eq!(senders[0].write_lag_bytes, Some(65_536));
+            assert!(senders[0].total_lag_bytes.is_some());
+        } else {
+            panic!("expected primary replication info");
+        }
+
+        let slots = snap.replication_slots.expect("slots present");
+        assert_eq!(slots[0].active_pid, Some(4120));
+        assert_eq!(slots[0].application_name.as_deref(), Some("replica-1"));
+        assert_eq!(slots[0].xmin_age, Some(120));
+        assert_eq!(slots[1].plugin.as_deref(), Some("pgoutput"));
+        assert_eq!(slots[1].database.as_deref(), Some("shop"));
+        assert_eq!(slots[1].consumer_lag_bytes, Some(340_000_000));
+        assert_eq!(slots[1].xmin_age, Some(450_000));
+        assert_eq!(slots[1].catalog_xmin_age, Some(2_100_000));
     }
 }
 

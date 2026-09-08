@@ -771,11 +771,29 @@ mod tests {
         let mut app = App::new();
         app.active_tab = Tab::ReplicationLens;
         let screen = render(&mut app);
-        assert!(screen.contains("Role"), "{screen}");
-        assert!(screen.contains("Slots"), "{screen}");
+        assert!(screen.contains("Physical Replication"), "{screen}");
+        assert!(screen.contains("Publications"), "{screen}");
+        assert!(screen.contains("Subscriptions"), "{screen}");
+        assert!(screen.contains("core_pub"), "{screen}");
+        assert!(screen.contains("dw_billing_sub"), "{screen}");
+        assert!(screen.contains("Replication Slots"), "{screen}");
         assert!(screen.contains("replica_1_slot"), "{screen}");
         assert!(screen.contains("analytics_cdc"), "{screen}");
         assert!(screen.contains('!'), "warn marker must be visible: {screen}");
+    }
+
+    #[test]
+    fn replication_lens_detail_modal_opens_and_closes() {
+        let mut app = App::new();
+        app.active_tab = Tab::ReplicationLens;
+        assert!(!app.detail_open);
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        assert!(app.detail_open);
+        let screen = render(&mut app);
+        assert!(screen.contains("Replication Slot Details"), "{screen}");
+        assert!(screen.contains("WAL & Replication Lag"), "{screen}");
+        press(&mut app, crossterm::event::KeyCode::Esc);
+        assert!(!app.detail_open);
     }
 
     /// v0.16: the Replication Lens's dedicated WAL Generation section, fed

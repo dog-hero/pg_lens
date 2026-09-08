@@ -33,10 +33,10 @@ use crate::index_advisor::{self, IndexCatalogRow};
 use crate::models::{
     ActiveLockRow, AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats,
     DatabaseConflicts, DatabaseRow, DbSnapshot, DdlProgressRow, IdleSessionRow, IndexRow, IoStatRow,
-    LockCapacity, PollerStatus, PreparedXactRow, ReplicationInfo, ReplicationSlotRow,
-    SchemaSnapshot, SchemaStatus, SequenceRow, ServerVitals, SlruRow, SlruStats, StatementRow,
-    StatementsSnapshot, StatementsStatus, TableDetail, TableDetailRequest, VacuumClusterAge,
-    VacuumProgressRow, VacuumTableRow, WalStats,
+    LockCapacity, PollerStatus, PreparedXactRow, PublicationRow, ReplicationInfo,
+    ReplicationSlotRow, SchemaSnapshot, SchemaStatus, SequenceRow, ServerVitals, SlruRow, SlruStats,
+    StatementRow, StatementsSnapshot, StatementsStatus, SubscriptionRow, TableDetail,
+    TableDetailRequest, VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalStats,
 };
 use crate::schema_growth::{GROWTH_LOOKBACK_MS, SchemaGrowthTracker};
 use crate::services::{self, PasswordSource};
@@ -1534,7 +1534,7 @@ async fn poll_once(
     // degrades to "no replication panel" — it must NEVER take the whole poll
     // (and the dashboard) down. Only the query for the server's actual role
     // runs.
-    let (replication, replication_slots) =
+    let (replication, replication_slots, publications, subscriptions) =
         collect_replication(client, q, info.is_in_recovery).await;
 
     // Vacuum progress (F2) is likewise best-effort on the fast tick: absent
@@ -1720,6 +1720,8 @@ async fn poll_once(
             last_admin_action: None,
             replication,
             replication_slots,
+            publications,
+            subscriptions,
             vacuum_progress,
             checkpointer: Some(checkpointer_stats),
             databases,
@@ -2094,9 +2096,14 @@ async fn collect_replication(
     client: &mut Client,
     q: &queries::QuerySet,
     is_in_recovery: bool,
-) -> (Option<ReplicationInfo>, Option<Vec<ReplicationSlotRow>>) {
+) -> (
+    Option<ReplicationInfo>,
+    Option<Vec<ReplicationSlotRow>>,
+    Option<Vec<PublicationRow>>,
+    Option<Vec<SubscriptionRow>>,
+) {
     let Ok(tx) = begin_read(client).await else {
-        return (None, None);
+        return (None, None, None, None);
     };
 
     let info = if is_in_recovery {
@@ -2138,11 +2145,47 @@ async fn collect_replication(
         Err(_) => None,
     };
 
+    let publications = match tx.query(q.publications, &[]).await {
+        Ok(rows) => {
+            let mut out = Vec::with_capacity(rows.len());
+            let mut all_parsed = true;
+            for row in &rows {
+                match db::publication_from_row(row) {
+                    Ok(p) => out.push(p),
+                    Err(_) => {
+                        all_parsed = false;
+                        break;
+                    }
+                }
+            }
+            if all_parsed { Some(out) } else { None }
+        }
+        Err(_) => None,
+    };
+
+    let subscriptions = match tx.query(q.subscriptions, &[]).await {
+        Ok(rows) => {
+            let mut out = Vec::with_capacity(rows.len());
+            let mut all_parsed = true;
+            for row in &rows {
+                match db::subscription_from_row(row) {
+                    Ok(s) => out.push(s),
+                    Err(_) => {
+                        all_parsed = false;
+                        break;
+                    }
+                }
+            }
+            if all_parsed { Some(out) } else { None }
+        }
+        Err(_) => None,
+    };
+
     // Best-effort: a failed commit just means no panels this tick.
     if tx.commit().await.is_err() {
-        return (None, None);
+        return (None, None, None, None);
     }
-    (info, slots)
+    (info, slots, publications, subscriptions)
 }
 
 /// Best-effort in-flight vacuum progress (F2, `pg_stat_progress_vacuum`),
