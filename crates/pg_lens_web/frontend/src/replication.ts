@@ -1,6 +1,6 @@
-// Macro dashboard: replication panel (primary senders / standby receiver).
-// Mirrors the TUI's Macro Lens panel — same lag severity thresholds and the
-// same "hide when a primary has no replicas" rule.
+// Replication Lens: physical senders, standby receiver, replication slots,
+// publications, and subscriptions.
+// Mirrors the TUI's ReplicationLens layout with full inspection capabilities.
 
 import type {
   DatabaseConflicts,
@@ -56,7 +56,7 @@ export function slotSeverity(slot: ReplicationSlotRow): Severity {
   return "";
 }
 
-export function slotRow(slot: ReplicationSlotRow): HTMLDivElement {
+export function slotRow(slot: ReplicationSlotRow, onInspect?: (s: ReplicationSlotRow) => void): HTMLDivElement {
   const sev = slotSeverity(slot);
   const retained =
     slot.retained_wal_bytes !== null ? humanBytes(slot.retained_wal_bytes) : "—";
@@ -114,6 +114,11 @@ export function slotRow(slot: ReplicationSlotRow): HTMLDivElement {
 
   const r = row(cells);
   if (sev) r.classList.add(`lag-${sev}`);
+  if (onInspect) {
+    r.style.cursor = "pointer";
+    r.title = "Click to inspect slot details";
+    r.addEventListener("click", () => onInspect(slot));
+  }
   return r;
 }
 
@@ -199,7 +204,7 @@ function walRow(wal: WalStats): HTMLDivElement {
   return div;
 }
 
-/** v0.19: One-line summary of standby recovery conflicts (pg_stat_database_conflicts). */
+/** Standby recovery conflicts summary. */
 export function conflictsText(c: DatabaseConflicts): string {
   const rateText =
     c.conflicts_per_sec !== null && c.conflicts_per_sec > 0
@@ -224,8 +229,9 @@ function conflictsRow(c: DatabaseConflicts): HTMLDivElement {
 
 function section(title: string, elements: HTMLElement[]): HTMLDivElement {
   const div = document.createElement("div");
-  div.className = "repl-section";
+  div.className = "repl-card";
   const h3 = document.createElement("h3");
+  h3.className = "repl-card-title";
   h3.textContent = title;
   div.appendChild(h3);
   for (const el of elements) {
@@ -263,87 +269,78 @@ export function publicationRow(p: PublicationRow): HTMLDivElement {
 }
 
 export function subscriptionRow(s: SubscriptionRow): HTMLDivElement {
-  const hasErrors = (s.apply_error_count ?? 0) > 0 || (s.sync_error_count ?? 0) > 0;
-  const sev: Severity = hasErrors ? "bad" : !s.enabled ? "warn" : "";
-  const statusStr = s.enabled ? "enabled" : "disabled";
-  const workerStr = s.worker_pid !== null ? `worker: pid ${s.worker_pid}` : "worker: idle";
-  const lsnStr = s.received_lsn ?? "—";
-  const pubsStr = s.publications.join(",");
-
+  const connStr =
+    s.publisher_host && s.publisher_dbname
+      ? `${s.publisher_host}${s.publisher_port ? `:${s.publisher_port}` : ""}/${s.publisher_dbname}`
+      : null;
+  const statusStr = s.enabled ? "[enabled]" : "[disabled]";
   const cells: { text: string; cls?: string }[] = [
     { text: `sub ${s.subname}`, cls: "repl-name" },
-    { text: `(${s.owner})`, cls: "repl-state" },
-    { text: statusStr, cls: `repl-state ${sev}`.trim() },
-    { text: workerStr, cls: "repl-state" },
-    { text: `pubs: [${pubsStr}]`, cls: "repl-state" },
-    { text: `recv: ${lsnStr}`, cls: "repl-state" },
-    { text: `tables: ${s.ready_tables}/${s.total_tables} ready`, cls: "repl-state" },
+    { text: `${statusStr} (${s.owner})`, cls: s.enabled ? "repl-state" : "repl-lag warn" },
   ];
-  if (s.sync_tables > 0) {
-    cells.push({ text: `(${s.sync_tables} syncing)`, cls: "repl-lag warn" });
+  if (connStr) {
+    cells.push({ text: `conn: ${connStr}`, cls: "repl-state" });
   }
-  if (s.apply_error_count && s.apply_error_count > 0) {
-    cells.push({ text: `apply errors: ${s.apply_error_count}`, cls: "repl-lag bad" });
+  if (s.slot_name) {
+    cells.push({ text: `slot: ${s.slot_name}`, cls: "repl-state" });
   }
-  if (s.sync_error_count && s.sync_error_count > 0) {
-    cells.push({ text: `sync errors: ${s.sync_error_count}`, cls: "repl-lag bad" });
+  if (s.publications && s.publications.length > 0) {
+    cells.push({ text: `pubs: [${s.publications.join(", ")}]`, cls: "repl-state" });
+  }
+  if (s.worker_pid) {
+    cells.push({ text: `worker: pid ${s.worker_pid}`, cls: "repl-state" });
+  }
+  if (s.streaming_mode) {
+    cells.push({ text: `streaming: ${s.streaming_mode}`, cls: "repl-state" });
+  }
+  if (s.binary_mode !== null && s.binary_mode !== undefined) {
+    cells.push({ text: `binary: ${s.binary_mode ? "on" : "off"}`, cls: "repl-state" });
+  }
+  if (s.two_phase !== null && s.two_phase !== undefined) {
+    cells.push({ text: `2PC: ${s.two_phase ? "on" : "off"}`, cls: "repl-state" });
+  }
+  if (s.sync_commit) {
+    cells.push({ text: `sync_commit: ${s.sync_commit}`, cls: "repl-state" });
   }
 
   const details: string[] = [];
-  if (s.publisher_host || s.publisher_dbname) {
-    const host = s.publisher_host ?? "—";
-    const port = s.publisher_port ? `:${s.publisher_port}` : "";
-    const db = s.publisher_dbname ? `/${s.publisher_dbname}` : "";
-    details.push(`conn: ${host}${port}${db}`);
-  }
-  if (s.slot_name) {
-    details.push(`slot: ${s.slot_name}`);
-  }
-  if (s.sync_commit) {
-    details.push(`sync_commit: ${s.sync_commit}`);
-  }
-  if (s.streaming_mode) {
-    details.push(`streaming: ${s.streaming_mode}`);
-  }
-  if (s.binary_mode !== undefined && s.binary_mode !== null) {
-    details.push(`binary: ${s.binary_mode ? "on" : "off"}`);
-  }
-  if (s.two_phase !== undefined && s.two_phase !== null) {
-    details.push(`2PC: ${s.two_phase ? "on" : "off"}`);
-  }
+  if (s.received_lsn) details.push(`received LSN: ${s.received_lsn}`);
+  if (s.latest_end_lsn) details.push(`latest LSN: ${s.latest_end_lsn}`);
   if (s.last_msg_receipt_secs !== null && s.last_msg_receipt_secs !== undefined) {
-    details.push(`last msg: ${humanDuration(s.last_msg_receipt_secs)} ago`);
+    details.push(`last receipt: ${humanDuration(s.last_msg_receipt_secs)} ago`);
+  }
+  if (s.total_tables > 0) {
+    details.push(`tables: ${s.ready_tables}/${s.total_tables} ready (${s.sync_tables} syncing)`);
   }
   if (s.syncing_table_names && s.syncing_table_names.length > 0) {
     details.push(`syncing tables: [${s.syncing_table_names.join(", ")}]`);
   }
-
-  if (details.length > 0) {
-    cells.push({ text: details.join(" · "), cls: "repl-detail" });
+  const errors = (s.apply_error_count ?? 0) + (s.sync_error_count ?? 0);
+  if (errors > 0) {
+    details.push(`errors: ${errors} (apply: ${s.apply_error_count}, sync: ${s.sync_error_count})`);
   }
 
-  const r = row(cells);
-  if (sev) r.classList.add(`lag-${sev}`);
-  return r;
+  if (details.length > 0) {
+    cells.push({
+      text: details.join(" · "),
+      cls: errors > 0 ? "repl-detail repl-lag bad" : "repl-detail",
+    });
+  }
+  return row(cells);
 }
 
-/** Worst-severity-first, then retained bytes descending — the web twin of
- * the TUI's `resort_replication` (see `crates/pg_lens_tui/src/app.rs`). */
 function sortedSlots(slots: ReplicationSlotRow[]): ReplicationSlotRow[] {
-  const rank = (s: ReplicationSlotRow): number => {
-    const sev = slotSeverity(s);
-    return sev === "bad" ? 0 : sev === "warn" ? 1 : 2;
-  };
   return [...slots].sort((a, b) => {
-    const r = rank(a) - rank(b);
-    if (r !== 0) return r;
-    return (b.retained_wal_bytes ?? 0) - (a.retained_wal_bytes ?? 0);
+    const sevA = slotSeverity(a) === "bad" ? 2 : slotSeverity(a) === "warn" ? 1 : 0;
+    const sevB = slotSeverity(b) === "bad" ? 2 : slotSeverity(b) === "warn" ? 1 : 0;
+    if (sevA !== sevB) return sevB - sevA;
+    const retA = a.retained_wal_bytes ?? 0;
+    const retB = b.retained_wal_bytes ?? 0;
+    if (retA !== retB) return retB - retA;
+    return a.slot_name.localeCompare(b.slot_name);
   });
 }
 
-/**
- * Renders the Replication Lens into `body`.
- */
 export function renderReplication(
   body: HTMLElement,
   placeholder: HTMLElement,
@@ -353,6 +350,8 @@ export function renderReplication(
   conflicts: DatabaseConflicts | null = null,
   publications: PublicationRow[] | null = null,
   subscriptions: SubscriptionRow[] | null = null,
+  filter = "",
+  onInspectSlot?: (slot: ReplicationSlotRow) => void,
 ): void {
   if (
     repl === null &&
@@ -367,6 +366,7 @@ export function renderReplication(
   }
   placeholder.hidden = true;
 
+  const q = filter.trim().toLowerCase();
   const sections: HTMLElement[] = [];
 
   // 1. Physical Replication (Role) & WAL
@@ -381,7 +381,11 @@ export function renderReplication(
     if (repl.Primary.senders.length === 0) {
       roleRows.push(calmRow("primary · no replicas connected"));
     } else {
-      for (const s of repl.Primary.senders) roleRows.push(senderRow(s));
+      for (const s of repl.Primary.senders) {
+        if (!q || s.application_name.toLowerCase().includes(q) || s.client.toLowerCase().includes(q)) {
+          roleRows.push(senderRow(s));
+        }
+      }
     }
   } else if (repl && "Standby" in repl) {
     if (repl.Standby.receiver) {
@@ -394,22 +398,31 @@ export function renderReplication(
   }
   sections.push(section("Physical Replication (Role)", roleRows));
 
-  // 2. Publications (pg_publication) - dedicated section
+  // 2. Publications (pg_publication)
   if (publications && publications.length > 0) {
-    const pubRows = publications.map((p) => publicationRow(p));
+    const pubRows = publications
+      .filter((p) => !q || p.pubname.toLowerCase().includes(q) || p.owner.toLowerCase().includes(q))
+      .map((p) => publicationRow(p));
     sections.push(section("Publications (pg_publication)", pubRows));
   }
 
-  // 3. Subscriptions (pg_subscription) - dedicated section
+  // 3. Subscriptions (pg_subscription)
   if (subscriptions && subscriptions.length > 0) {
-    const subRows = subscriptions.map((s) => subscriptionRow(s));
+    const subRows = subscriptions
+      .filter((s) => !q || s.subname.toLowerCase().includes(q) || s.owner.toLowerCase().includes(q))
+      .map((s) => subscriptionRow(s));
     sections.push(section("Subscriptions (pg_subscription)", subRows));
   }
 
   // 4. Replication Slots
   const slotRows: HTMLElement[] = [];
   if (slots && slots.length > 0) {
-    for (const s of sortedSlots(slots)) slotRows.push(slotRow(s));
+    const filteredSlots = sortedSlots(slots).filter(
+      (s) => !q || s.slot_name.toLowerCase().includes(q) || (s.plugin?.toLowerCase().includes(q) ?? false),
+    );
+    for (const s of filteredSlots) {
+      slotRows.push(slotRow(s, onInspectSlot));
+    }
   } else {
     slotRows.push(calmRow("no replication slots"));
   }

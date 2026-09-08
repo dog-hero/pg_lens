@@ -123,6 +123,7 @@ export class StatementsLens {
   /** Invoked after a copy-button click resolves — lets the caller show a
    * toast (see `table.ts`'s identical `onCopy` field). */
   private readonly onCopy: ((ok: boolean, chars: number) => void) | null;
+  private readonly onInspect: ((stmt: StatementRow) => void) | null;
 
   // Plain assignment, not TS constructor-parameter-property shorthand — see
   // `schema.ts`'s identical constructor doc comment for why.
@@ -134,12 +135,14 @@ export class StatementsLens {
     unavailable: HTMLElement,
     filterInput?: HTMLInputElement | null,
     onCopy?: (ok: boolean, chars: number) => void,
+    onInspect?: (stmt: StatementRow) => void,
   ) {
     this.staleness = staleness;
     this.warning = warning;
     this.placeholder = placeholder;
     this.unavailable = unavailable;
     this.onCopy = onCopy ?? null;
+    this.onInspect = onInspect ?? null;
     this.thead = table.tHead ?? table.createTHead();
     this.tbody = table.tBodies[0] ?? table.createTBody();
     this.renderHead();
@@ -335,6 +338,7 @@ export class StatementsLens {
     tr.append(tempTd);
     tr.title = "click for the full query + detail";
     tr.addEventListener("click", () => {
+      this.onInspect?.(row);
       if (this.expanded.has(rowKey)) this.expanded.delete(rowKey);
       else this.expanded.add(rowKey);
       this.renderBody();

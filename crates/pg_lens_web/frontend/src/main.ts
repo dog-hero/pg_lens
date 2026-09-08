@@ -1,8 +1,8 @@
-// pg_lens web frontend entrypoint: wires the SSE stream to the vitals
-// cards, the uPlot history chart, and the sortable activity table.
+// pg_lens web frontend entrypoint: wires the SSE stream to the 9 lenses,
+// compact health ribbon, inspector drawer, and command palette.
 
 import "./style.css";
-import type { AdminActionResult, ActivityRow, DbSnapshot, PollerStatus } from "./types";
+import type { AdminActionResult, ActivityRow, DatabaseRow, DbSnapshot, PollerStatus } from "./types.ts";
 import {
   fetchConfig,
   requestAdmin,
@@ -10,33 +10,22 @@ import {
   requestSchemaRefresh,
   requestTableDetail,
   type AdminKind,
-} from "./actions";
-import { populateDbSwitcher } from "./db_switcher";
-import { renderVitals } from "./vitals";
-import { HistoryChart } from "./chart";
-import {
-  cacheHitReadoutSeverity,
-  formatPinAge,
-  formatReadoutTime,
-  lockPressureReadoutSeverity,
-  readoutAtIndex,
-  resolvePinnedIndex,
-  type ReadoutPoint,
-} from "./scrubber";
-import type { SnapshotHistory } from "./types";
-import { ActivityTable } from "./table";
-import { SchemaLens } from "./schema";
-import { IndexAdvisor } from "./index-advisor";
-import { SequencesPanel } from "./sequences";
-import { VacuumPanel } from "./vacuum-panel";
-import { StatementsLens } from "./statements";
-import { initBlocksLens } from "./blocks-lens";
-import { initProgressLens } from "./progress-lens";
-import { initRecordsLens } from "./records-lens";
-import { renderReplication } from "./replication";
-import { renderWaits, renderWaitsList } from "./waits";
-import { renderOldestXact } from "./xact_age";
-import { renderIdleSessions } from "./idle_sessions";
+} from "./actions.ts";
+import { populateDbSwitcher } from "./db_switcher.ts";
+import { MacroLens } from "./macro.ts";
+import { ActivityTable, type StateFilter } from "./table.ts";
+import { SchemaLens } from "./schema.ts";
+import { IndexAdvisor } from "./index-advisor.ts";
+import { SequencesPanel } from "./sequences.ts";
+import { VacuumPanel } from "./vacuum-panel.ts";
+import { StatementsLens } from "./statements.ts";
+import { initBlocksLens } from "./blocks-lens.ts";
+import { initProgressLens } from "./progress-lens.ts";
+import { initRecordsLens } from "./records-lens.ts";
+import { renderReplication } from "./replication.ts";
+import { renderWaits, renderWaitsList } from "./waits.ts";
+import { renderOldestXact } from "./xact_age.ts";
+import { renderIdleSessions } from "./idle_sessions.ts";
 import {
   clearToken,
   openStream,
@@ -44,17 +33,21 @@ import {
   storeToken,
   storedToken,
   type StreamHandle,
-} from "./stream";
-import { loadStoredTheme, nextTheme, resolveInitialTheme, saveTheme, type Theme } from "./theme";
+} from "./stream.ts";
+import { loadStoredTheme, nextTheme, resolveInitialTheme, saveTheme, type Theme } from "./theme.ts";
 import {
   filterInputIdForPanel,
   isEditableTag,
   isExportKey,
+  isHelpKey,
+  isPaletteKey,
   isRecordKey,
   isSchemaRefreshKey,
   tabIdForKey,
-} from "./keyboard";
-import { humanCount } from "./format";
+} from "./keyboard.ts";
+import { InspectorDrawer } from "./drawer.ts";
+import { CommandPalette, type PaletteAction } from "./command_palette.ts";
+import { humanBytes, humanDuration } from "./format.ts";
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -84,43 +77,57 @@ const exportBtn = el<HTMLButtonElement>("export-btn");
 const schemaRefreshBtn = el<HTMLButtonElement>("schema-refresh-btn");
 const themeToggleBtn = el<HTMLButtonElement>("theme-toggle");
 const themeToggleIcon = themeToggleBtn.querySelector("use");
+const paletteToggleBtn = el<HTMLButtonElement>("palette-toggle");
+const brandLink = el<HTMLDivElement>("brand-link");
 
-// The token in use for the live connection (null = open server). Admin
-// controls only appear when it is set.
+// Health ribbon (visible on Lenses 2 to 9)
+const healthRibbon = el<HTMLDivElement>("health-ribbon");
+const ribbonDb = el<HTMLElement>("ribbon-db");
+const ribbonPg = el<HTMLElement>("ribbon-pg");
+const ribbonConns = el<HTMLElement>("ribbon-conns");
+const ribbonActive = el<HTMLElement>("ribbon-active");
+const ribbonWaiting = el<HTMLElement>("ribbon-waiting");
+const ribbonTps = el<HTMLElement>("ribbon-tps");
+const ribbonCache = el<HTMLElement>("ribbon-cache");
+const ribbonXactWrap = el<HTMLElement>("ribbon-xact-wrap");
+const ribbonXact = el<HTMLElement>("ribbon-xact");
+
 let activeToken: string | null = null;
-// Read-only mode (`GET /api/config`, refreshed per connection): defense in
-// depth ONLY — hides/disables the buttons, but the server's `/api/admin/*`
-// handler is the real, unconditional gate (see pg_lens_web::admin).
 let readOnly = false;
+let toastTimer: number | undefined;
 
-const scrubReadout = el<HTMLDivElement>("scrub-readout");
-const scrubReadoutTime = el<HTMLSpanElement>("scrub-readout-time");
-const scrubReadoutPinnedHint = el<HTMLSpanElement>("scrub-readout-pinned-hint");
-const scrubReadoutTps = el<HTMLElement>("scrub-readout-tps");
-const scrubReadoutSessions = el<HTMLElement>("scrub-readout-sessions");
-const scrubReadoutConns = el<HTMLElement>("scrub-readout-conns");
-const scrubReadoutCache = el<HTMLElement>("scrub-readout-cache");
-const scrubReadoutLock = el<HTMLElement>("scrub-readout-lock");
-const scrubReadoutXidWrap = el<HTMLSpanElement>("scrub-readout-xid-wrap");
-const scrubReadoutXid = el<HTMLElement>("scrub-readout-xid");
-const scrubUnpinBtn = el<HTMLButtonElement>("scrub-unpin");
+function showToast(message: string, isError = false): void {
+  toast.textContent = message;
+  toast.dataset["kind"] = isError ? "error" : "ok";
+  toast.hidden = false;
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toast.hidden = true;
+  }, 5000);
+}
 
-const chart = new HistoryChart(el<HTMLDivElement>("chart"), {
-  onHover: (idx) => {
-    if (pinnedEpochMs !== null) return; // pinned readout holds until unpinned
-    const r = readoutAtIndex(currentHistory, idx);
-    if (r === null) hideReadout();
-    else renderReadout(r, false);
+function onCopyResult(ok: boolean, chars: number): void {
+  if (ok) {
+    showToast(`Copied ${chars} chars to clipboard`);
+  } else {
+    showToast("Copy failed — select text manually", true);
+  }
+}
+
+// ── Components initialization ─────────────────────────────────────────────
+const drawer = new InspectorDrawer(
+  "inspector-drawer",
+  "drawer-backdrop",
+  () => activeToken !== null && !readOnly,
+  {
+    onAdmin: (kind, row) => void onAdmin(kind, row),
+    onCopy: (ok, chars) => onCopyResult(ok, chars),
   },
-  onClick: (idx) => {
-    if (pinnedEpochMs !== null) {
-      unpinScrub();
-      return;
-    }
-    const r = readoutAtIndex(currentHistory, idx);
-    if (r !== null) pinScrub(r);
-  },
-});
+);
+
+const palette = new CommandPalette("palette-backdrop", "palette-input", "palette-list");
+const macroLens = new MacroLens(el<HTMLElement>("macro-panel"));
+
 const table = new ActivityTable(
   el<HTMLTableElement>("activity"),
   document.getElementById("activity-filter") as HTMLInputElement | null,
@@ -128,85 +135,10 @@ const table = new ActivityTable(
   {
     adminEnabled: () => activeToken !== null && !readOnly,
     onAdmin: (kind, row) => void onAdmin(kind, row),
-    onCopy: (ok, chars) => onCopyResult(ok, chars),
+    onInspect: (row, locks) => drawer.openSession(row, locks),
   },
 );
-const vitalsContainer = el<HTMLElement>("vitals");
 
-// ── history time-scrubber (v0.14) ─────────────────────────────────────────
-// `currentHistory` is whatever the chart is currently plotting (kept in
-// sync with every snapshot so the chart's hover/click callbacks — fired
-// from uPlot's own event loop, not ours — can resolve a data index into a
-// moment). `pinnedEpochMs` identifies the pinned moment by TIMESTAMP, not
-// index: the ring buffer shifts under incoming SSE snapshots, so only the
-// timestamp survives across updates (see scrubber.ts's resolvePinnedIndex).
-let currentHistory: SnapshotHistory = { cap: 0, points: [] };
-let pinnedEpochMs: number | null = null;
-
-function pctText(pct: number | null): string {
-  return pct === null ? "—" : `${pct.toFixed(1)}%`;
-}
-
-function renderReadout(r: ReadoutPoint, pinned: boolean): void {
-  scrubReadoutTime.textContent = formatReadoutTime(r.epochMs);
-  scrubReadoutTps.textContent = humanCount(r.tps);
-  scrubReadoutSessions.textContent = humanCount(r.activeSessions);
-  scrubReadoutConns.textContent = humanCount(r.connectionsTotal);
-  scrubReadoutCache.textContent = pctText(r.cacheHitPct);
-  scrubReadoutCache.className = cacheHitReadoutSeverity(r.cacheHitPct);
-  scrubReadoutLock.textContent = pctText(r.lockPressurePct);
-  scrubReadoutLock.className = lockPressureReadoutSeverity(r.lockPressurePct);
-  if (r.oldestXidAge === null) {
-    scrubReadoutXidWrap.hidden = true;
-  } else {
-    scrubReadoutXidWrap.hidden = false;
-    scrubReadoutXid.textContent = humanCount(r.oldestXidAge);
-  }
-  scrubReadoutPinnedHint.hidden = !pinned;
-  if (pinned) {
-    scrubReadoutPinnedHint.textContent = `(pinned ${formatPinAge(r.epochMs, Date.now())})`;
-  }
-  scrubUnpinBtn.hidden = !pinned;
-  scrubReadout.hidden = false;
-  scrubReadout.classList.toggle("pinned", pinned);
-}
-
-function hideReadout(): void {
-  scrubReadout.hidden = true;
-}
-
-function pinScrub(r: ReadoutPoint): void {
-  pinnedEpochMs = r.epochMs;
-  chart.setPinMarker(r.epochMs / 1000);
-  vitalsContainer.classList.add("scrub-pinned");
-  renderReadout(r, true);
-}
-
-function unpinScrub(): void {
-  pinnedEpochMs = null;
-  chart.setPinMarker(null);
-  vitalsContainer.classList.remove("scrub-pinned");
-  hideReadout();
-}
-
-scrubUnpinBtn.addEventListener("click", unpinScrub);
-
-/** Called once per rendered snapshot: while pinned, re-resolves the pinned
- * timestamp against the freshly-streamed history — gracefully unpinning
- * ("moment aged out") once it scrolls out of the 1h ring, and otherwise just
- * refreshing the "(pinned Xm ago)" hint (the readout's own values are frozen
- * — a pinned `HistoryPoint` never changes once pushed). */
-function refreshPinnedScrub(): void {
-  if (pinnedEpochMs === null) return;
-  const idx = resolvePinnedIndex(currentHistory, pinnedEpochMs);
-  if (idx === null) {
-    showToast("Pinned moment aged out of the history window", true);
-    unpinScrub();
-    return;
-  }
-  const r = readoutAtIndex(currentHistory, idx);
-  if (r !== null) renderReadout(r, true);
-}
 const waitsStrip = el<HTMLDivElement>("waits-strip");
 const waitsDetail = el<HTMLDetailsElement>("waits-detail");
 const waitsDetailSummary = el<HTMLElement>("waits-detail-summary");
@@ -220,6 +152,8 @@ const xactHeadlineMeta = el<HTMLSpanElement>("xact-headline-meta");
 const xactHeadlineState = el<HTMLSpanElement>("xact-headline-state");
 const replicationBody = el<HTMLElement>("replication");
 const replicationPlaceholder = el<HTMLParagraphElement>("replication-placeholder");
+const replicationFilter = document.getElementById("replication-filter") as HTMLInputElement | null;
+
 const schemaLens = new SchemaLens(
   el<HTMLTableElement>("schema"),
   el<HTMLParagraphElement>("schema-staleness"),
@@ -227,9 +161,6 @@ const schemaLens = new SchemaLens(
   el<HTMLParagraphElement>("schema-placeholder"),
   document.getElementById("schema-filter") as HTMLInputElement | null,
   (oid, schema, name) => {
-    // v0.15: fire-and-forget — the response rides the normal snapshot/SSE
-    // stream as `DbSnapshot.table_detail`, picked up by the next
-    // `schemaLens.update()` call (see below).
     void requestTableDetail(activeToken, oid, schema, name);
   },
   document.getElementById("schema-partitions-toggle") as HTMLInputElement | null,
@@ -237,7 +168,11 @@ const schemaLens = new SchemaLens(
     selectTab("tab-indexes");
     indexAdvisor.setFilter(tableName);
   },
+  (tableStat, schemaSnapshot, detail) => {
+    drawer.openTable(tableStat, schemaSnapshot, detail);
+  },
 );
+
 const indexAdvisor = new IndexAdvisor(
   el<HTMLTableElement>("indexes"),
   el<HTMLParagraphElement>("indexes-staleness"),
@@ -245,17 +180,20 @@ const indexAdvisor = new IndexAdvisor(
   el<HTMLParagraphElement>("indexes-placeholder"),
   document.getElementById("indexes-filter") as HTMLInputElement | null,
 );
+
 const sequencesPanel = new SequencesPanel(
   el<HTMLTableElement>("sequences"),
   el<HTMLParagraphElement>("sequences-placeholder"),
   document.getElementById("sequences-staleness"),
 );
+
 const vacuumPanel = new VacuumPanel(
   el<HTMLParagraphElement>("vacuum-cluster"),
   el<HTMLUListElement>("vacuum-tables"),
   el<HTMLParagraphElement>("vacuum-progress"),
   el<HTMLUListElement>("prepared-xacts"),
 );
+
 const statementsLens = new StatementsLens(
   el<HTMLTableElement>("statements"),
   el<HTMLParagraphElement>("statements-staleness"),
@@ -264,6 +202,7 @@ const statementsLens = new StatementsLens(
   el<HTMLDivElement>("statements-unavailable"),
   document.getElementById("statements-filter") as HTMLInputElement | null,
   (ok, chars) => onCopyResult(ok, chars),
+  (stmt) => drawer.openStatement(stmt),
 );
 
 const blocksLens = initBlocksLens(el<HTMLElement>("blocks-panel"));
@@ -274,10 +213,9 @@ const recordsLens = initRecordsLens(
   () => readOnly,
 );
 
-// Tab switcher (U1: top-level tabs, mirroring the TUI's lenses —
-// Macro/Micro stay merged into "Activity" here, vitals cards + chart stay
-// visible on all of them; only the bottom panel swaps).
+// ── Tab Navigation (9 Lenses) ─────────────────────────────────────────────
 const tabs: Array<[HTMLButtonElement, HTMLElement]> = [
+  [el<HTMLButtonElement>("tab-macro"), el<HTMLElement>("macro-panel")],
   [el<HTMLButtonElement>("tab-activity"), el<HTMLElement>("activity-panel")],
   [el<HTMLButtonElement>("tab-blocks"), el<HTMLElement>("blocks-panel")],
   [el<HTMLButtonElement>("tab-replication"), el<HTMLElement>("replication-panel")],
@@ -287,21 +225,22 @@ const tabs: Array<[HTMLButtonElement, HTMLElement]> = [
   [el<HTMLButtonElement>("tab-progress"), el<HTMLElement>("progress-panel")],
   [el<HTMLButtonElement>("tab-records"), el<HTMLElement>("records-panel")],
 ];
-/** Switches to the tab whose button has `id === tabId` (no-op if unknown —
- * used by both the click handlers below and the `1`-`5` keyboard shortcuts). */
+
 function selectTab(tabId: string): void {
   for (const [button, panel] of tabs) {
     const selected = button.id === tabId;
     button.setAttribute("aria-selected", String(selected));
     panel.hidden = !selected;
   }
+
+  // Health ribbon is visible on Lenses 2 to 9, hidden on Overview (Lens 1)
+  healthRibbon.hidden = tabId === "tab-macro";
+
   if (tabId === "tab-records") {
     void recordsLens.load();
   }
 }
 
-/** The panel element of whichever tab is currently selected (drives the
- * `/` filter-focus shortcut — each panel has at most one filter input). */
 function activePanelId(): string | null {
   return tabs.find(([button]) => button.getAttribute("aria-selected") === "true")?.[1].id ?? null;
 }
@@ -310,21 +249,113 @@ for (const [button] of tabs) {
   button.addEventListener("click", () => selectTab(button.id));
 }
 
-// ── keyboard navigation (v0.13 ROADMAP "Web keyboard navigation") ────────
-// `1`-`5` jump tabs, `/` focuses the active panel's filter input, `Esc`
-// blurs whatever's focused. Suppressed while a text-consuming element
-// already has focus (Esc is the one exception — it must still blur).
+healthRibbon.addEventListener("click", () => selectTab("tab-macro"));
+brandLink.addEventListener("click", () => selectTab("tab-macro"));
+paletteToggleBtn.addEventListener("click", () => palette.open());
+
+// Activity state chips
+const activityChips = el<HTMLDivElement>("activity-chips");
+activityChips.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".chip");
+  if (!btn) return;
+  const state = btn.dataset["state"] as StateFilter;
+  if (!state) return;
+  for (const c of activityChips.querySelectorAll(".chip")) {
+    c.classList.remove("active");
+  }
+  btn.classList.add("active");
+  table.setStateFilter(state);
+});
+
+// Replication filter input
+replicationFilter?.addEventListener("input", () => {
+  if (latestSnapshot) {
+    renderReplication(
+      replicationBody,
+      replicationPlaceholder,
+      latestSnapshot.replication,
+      latestSnapshot.replication_slots,
+      latestSnapshot.wal,
+      latestSnapshot.conflicts ?? null,
+      latestSnapshot.publications ?? null,
+      latestSnapshot.subscriptions ?? null,
+      replicationFilter.value,
+      (slot) => drawer.openSlot(slot),
+    );
+  }
+});
+
+// ── Command Palette Actions Setup ─────────────────────────────────────────
+function updatePaletteActions(databases: DatabaseRow[] | null): void {
+  const actions: PaletteAction[] = [
+    // Lenses
+    { id: "nav-macro", group: "Lenses", label: "Overview", shortcut: "1", iconId: "icon-macro", run: () => selectTab("tab-macro") },
+    { id: "nav-activity", group: "Lenses", label: "Live Activity", shortcut: "2", iconId: "icon-activity", run: () => selectTab("tab-activity") },
+    { id: "nav-blocks", group: "Lenses", label: "Blocks & Locks", shortcut: "3", iconId: "icon-blocks", run: () => selectTab("tab-blocks") },
+    { id: "nav-replication", group: "Lenses", label: "Replication Lens", shortcut: "4", iconId: "icon-replication", run: () => selectTab("tab-replication") },
+    { id: "nav-schema", group: "Lenses", label: "Schema & Bloat", shortcut: "5", iconId: "icon-schema", run: () => selectTab("tab-schema") },
+    { id: "nav-indexes", group: "Lenses", label: "Indexes & Advisor", shortcut: "6", iconId: "icon-indexes", run: () => selectTab("tab-indexes") },
+    { id: "nav-queries", group: "Lenses", label: "Queries (pg_stat_statements)", shortcut: "7", iconId: "icon-queries", run: () => selectTab("tab-queries") },
+    { id: "nav-progress", group: "Lenses", label: "Progress (DDL / Maintenance)", shortcut: "8", iconId: "icon-progress", run: () => selectTab("tab-progress") },
+    { id: "nav-records", group: "Lenses", label: "Records & Incident Replay", shortcut: "9", iconId: "icon-records", run: () => selectTab("tab-records") },
+  ];
+
+  // Databases
+  if (databases && databases.length > 0) {
+    for (const d of databases) {
+      actions.push({
+        id: `db-${d.name}`,
+        group: "Databases",
+        label: `Switch database: ${d.name}`,
+        detail: d.size_bytes ? humanBytes(d.size_bytes) : undefined,
+        iconId: "icon-database",
+        run: () => void onDbSwitch(d.name),
+      });
+    }
+  }
+
+  // Quick Actions
+  actions.push(
+    { id: "act-pause", group: "Actions", label: paused ? "Resume live stream" : "Pause live stream", shortcut: "Space", iconId: paused ? "icon-play" : "icon-pause", run: () => pauseBtn.click() },
+    { id: "act-record", group: "Actions", label: isRecording ? "Stop incident recording" : "Start incident recording", shortcut: "Shift+R", iconId: "icon-dot", run: () => recordBtn.click() },
+    { id: "act-export", group: "Actions", label: "Export snapshot bookmark (JSON)", shortcut: "E", iconId: "icon-export", run: () => exportSnapshot() },
+    { id: "act-refresh", group: "Actions", label: "Recollect schema & bloat", shortcut: "B", iconId: "icon-refresh", run: () => schemaRefreshBtn.click() },
+    { id: "act-theme", group: "Actions", label: "Toggle Dark / Light theme", iconId: "icon-sun", run: () => themeToggleBtn.click() },
+  );
+
+  palette.setActions(actions);
+}
+
+// ── Keyboard Navigation ───────────────────────────────────────────────────
 window.addEventListener("keydown", (event) => {
   const active = document.activeElement;
   const editing = active instanceof HTMLElement && isEditableTag(active.tagName);
+
+  if (isPaletteKey(event)) {
+    event.preventDefault();
+    if (palette.isOpen()) palette.close();
+    else palette.open();
+    return;
+  }
+
   if (event.key === "Escape") {
-    // v0.14: Esc also unpins a scrubbed moment — checked before the blur so
-    // both happen on one keypress regardless of what else has focus.
-    if (pinnedEpochMs !== null) unpinScrub();
+    if (palette.isOpen()) {
+      palette.close();
+      return;
+    }
+    if (drawer.isOpen()) {
+      drawer.close();
+      return;
+    }
+    if (macroLens.isPinned()) {
+      macroLens.unpinScrub();
+      return;
+    }
     if (active instanceof HTMLElement) active.blur();
     return;
   }
-  if (editing) return;
+
+  if (editing || palette.isOpen()) return;
 
   if (isRecordKey(event)) {
     event.preventDefault();
@@ -341,29 +372,67 @@ window.addEventListener("keydown", (event) => {
     schemaRefreshBtn.click();
     return;
   }
-
-  if (event.metaKey || event.ctrlKey || event.altKey) return;
-  // v0.14: while a moment is pinned, Left/Right steps it one history sample
-  // at a time — a lightweight way to walk through an incident tick by tick.
-  if (pinnedEpochMs !== null && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
-    const idx = resolvePinnedIndex(currentHistory, pinnedEpochMs);
-    if (idx !== null) {
-      const nextIdx =
-        event.key === "ArrowLeft" ? Math.max(0, idx - 1) : Math.min(currentHistory.points.length - 1, idx + 1);
-      const r = readoutAtIndex(currentHistory, nextIdx);
-      if (r !== null) {
-        event.preventDefault();
-        pinScrub(r);
-      }
-    }
+  if (isHelpKey(event)) {
+    event.preventDefault();
+    palette.open();
     return;
   }
+
+  // Row navigation (j / k or ArrowDown / ArrowUp) on Activity table
+  const currentPanel = activePanelId();
+  if (currentPanel === "activity-panel" && !drawer.isOpen()) {
+    if (event.key === "j" || event.key === "ArrowDown") {
+      event.preventDefault();
+      table.selectNext();
+      return;
+    }
+    if (event.key === "k" || event.key === "ArrowUp") {
+      event.preventDefault();
+      table.selectPrev();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      table.inspectSelected();
+      return;
+    }
+    if (event.key === "y") {
+      const sel = table.getSelectedRow();
+      if (sel) {
+        event.preventDefault();
+        void navigator.clipboard.writeText(sel.query).then(
+          () => showToast(`Copied query of PID ${sel.pid}`),
+          () => showToast("Failed to copy query", true),
+        );
+        return;
+      }
+    }
+    if (event.key === "c" && activeToken !== null && !readOnly) {
+      const sel = table.getSelectedRow();
+      if (sel) {
+        event.preventDefault();
+        void onAdmin("cancel", sel);
+        return;
+      }
+    }
+  }
+
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+  // Pin stepping on Macro chart
+  if (macroLens.isPinned() && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    event.preventDefault();
+    macroLens.stepPin(event.key === "ArrowLeft" ? -1 : 1);
+    return;
+  }
+
   const tabId = tabIdForKey(event.key);
   if (tabId !== null) {
     event.preventDefault();
     selectTab(tabId);
     return;
   }
+
   if (event.key === "/") {
     const panelId = activePanelId();
     const inputId = panelId === null ? null : filterInputIdForPanel(panelId);
@@ -396,37 +465,9 @@ function renderStatus(status: PollerStatus): void {
   }
 }
 
-// UI-side freeze (the web twin of the TUI's Space): while paused, incoming
-// snapshots are parked (last-wins) and applied on resume — the poller keeps
-// running, this is purely a display freeze.
 let paused = false;
 let pending: DbSnapshot | null = null;
-// Dedupe key for admin-action feedback (the poller re-stamps its latest
-// result on every snapshot).
 let lastAdminSeen = 0;
-
-let toastTimer: number | undefined;
-function showToast(message: string, isError = false): void {
-  toast.textContent = message;
-  toast.dataset["kind"] = isError ? "error" : "ok";
-  toast.hidden = false;
-  window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => {
-    toast.hidden = true;
-  }, 5000);
-}
-
-/** v0.16 (Part C): shared copy-button result handler for every lens's
- * expanded detail (Micro/Query/Schema) — honest wording either way (never
- * an unconditional "copied!"; see `clipboard.ts`'s doc comment). */
-function onCopyResult(ok: boolean, chars: number): void {
-  if (ok) {
-    showToast(`Copied ${chars} chars to clipboard`);
-  } else {
-    showToast("Copy failed — select the text manually", true);
-  }
-}
-
 let latestSnapshot: DbSnapshot | null = null;
 let isRecording = false;
 let recordedFrames: DbSnapshot[] = [];
@@ -467,10 +508,57 @@ function onSnapshot(snapshot: DbSnapshot): void {
   renderSnapshot(snapshot);
 }
 
+function updateHealthRibbon(snapshot: DbSnapshot): void {
+  const v = snapshot.vitals;
+  ribbonDb.textContent = v.database;
+  ribbonPg.textContent = String(v.server_version);
+  ribbonConns.textContent = `${v.connections_total}/${v.max_connections}`;
+  const activeCount = snapshot.activity.filter((a) => a.state === "active").length;
+  const waitingCount = snapshot.activity.filter((a) => a.wait_event !== null).length;
+  ribbonActive.textContent = String(activeCount);
+  ribbonWaiting.textContent = String(waitingCount);
+  const lastPoint = snapshot.history?.points.at(-1);
+  ribbonTps.textContent = lastPoint ? lastPoint.tps.toFixed(1) : "—";
+  ribbonCache.textContent = `${(v.cache_hit_ratio * 100).toFixed(1)}%`;
+
+  const oldestXact = snapshot.activity
+    .filter((a) => a.xact_age_secs !== null)
+    .sort((a, b) => (b.xact_age_secs ?? 0) - (a.xact_age_secs ?? 0))[0];
+
+  if (oldestXact && oldestXact.xact_age_secs && oldestXact.xact_age_secs > 5) {
+    ribbonXactWrap.hidden = false;
+    ribbonXact.textContent = humanDuration(oldestXact.xact_age_secs);
+    ribbonXact.className = oldestXact.xact_age_secs > 30 ? "bad" : "warn";
+  } else {
+    ribbonXactWrap.hidden = true;
+  }
+}
+
+function updateActivityChipCounts(snapshot: DbSnapshot): void {
+  const all = snapshot.activity.length;
+  const active = snapshot.activity.filter((a) => a.state === "active").length;
+  const waiting = snapshot.activity.filter((a) => a.wait_event !== null).length;
+  const idleTxn = snapshot.activity.filter((a) => a.state.includes("idle in transaction")).length;
+  const blocked = snapshot.activity.filter((a) => snapshot.locks.some((l) => l.pid === a.pid)).length;
+
+  const countAll = document.getElementById("chip-count-all");
+  const countActive = document.getElementById("chip-count-active");
+  const countWaiting = document.getElementById("chip-count-waiting");
+  const countIdleTxn = document.getElementById("chip-count-idle-txn");
+  const countBlocked = document.getElementById("chip-count-blocked");
+
+  if (countAll) countAll.textContent = String(all);
+  if (countActive) countActive.textContent = String(active);
+  if (countWaiting) countWaiting.textContent = String(waiting);
+  if (countIdleTxn) countIdleTxn.textContent = String(idleTxn);
+  if (countBlocked) countBlocked.textContent = String(blocked);
+}
+
 function renderSnapshot(snapshot: DbSnapshot): void {
   renderStatus(snapshot.status);
-  renderVitals(
-    vitalsContainer,
+
+  // 1. Macro Lens update
+  macroLens.update(
     snapshot.vitals,
     snapshot.schema?.vacuum_cluster_age ?? null,
     snapshot.checkpointer,
@@ -480,6 +568,12 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.wal,
     snapshot.slru ?? null,
   );
+
+  // 2. Health ribbon & topbar
+  updateHealthRibbon(snapshot);
+  updateActivityChipCounts(snapshot);
+
+  // 3. Replication
   renderReplication(
     replicationBody,
     replicationPlaceholder,
@@ -489,24 +583,20 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.conflicts ?? null,
     snapshot.publications ?? null,
     snapshot.subscriptions ?? null,
+    replicationFilter?.value ?? "",
+    (slot) => drawer.openSlot(slot),
   );
-  currentHistory = snapshot.history;
-  chart.update(snapshot.history);
-  refreshPinnedScrub();
-  // Top waits: aggregated over the FULL activity set (never the filtered
-  // subset — it answers "what is the server stuck on"), mirroring the
-  // TUI's strip above the activity table.
+
+  // 4. Waits & Oldest Xact
   renderWaits(waitsStrip, snapshot.activity);
-  // U3: the complete ranked list, collapsed under the activity table (the
-  // strip above only ever shows the top few).
   renderWaitsList(waitsDetail, waitsDetailSummary, waitsList, snapshot.activity);
-  // v0.11: idle connection / connection-age census, collapsed under the
-  // activity table like the waits list — the pool-exhaustion suspects.
   renderIdleSessions(idleDetail, idleDetailSummary, idleList, snapshot.idle_sessions);
-  // v0.9: oldest open transaction, hidden on calm snapshots — the same
-  // "quiet unless something's wrong" contract as the waits strip.
   renderOldestXact(xactHeadline, xactHeadlineAge, xactHeadlineMeta, xactHeadlineState, snapshot.activity);
+
+  // 5. Activity Table
   table.update(snapshot.activity, snapshot.locks, snapshot.ddl_progress);
+
+  // 6. Other lenses
   schemaLens.update(snapshot.schema, snapshot.vitals.database, snapshot.table_detail);
   sequencesPanel.update(snapshot.schema?.sequences);
   indexAdvisor.update(snapshot.schema, snapshot.vitals.database);
@@ -514,21 +604,19 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   statementsLens.update(snapshot.statements, snapshot.vitals.database);
   blocksLens.update(snapshot.blocking_tree, snapshot.active_locks);
   progressLens.update(snapshot.ddl_progress, snapshot.vacuum_progress);
+
   announceAdmin(snapshot.last_admin_action);
+
   const v = snapshot.vitals;
   serverInfo.textContent = `PG ${v.server_version} · ${v.connections_total}/${v.max_connections} conns`;
-  // v0.13: current database, prominent regardless of whether the switcher
-  // itself has anything to offer (fixes the documented drift — it used to
-  // be buried in `serverInfo`'s trailing text).
   currentDb.textContent = v.database;
+
   if (!switching) {
     populateDbSwitcher(dbSwitcher, snapshot.databases, v.database);
   }
+  updatePaletteActions(snapshot.databases);
 }
 
-// v0.13: true while a switch request is in flight — the dropdown is left
-// alone until the next snapshot confirms the new database (no optimistic
-// update; see `onDbSwitch`).
 let switching = false;
 
 dbSwitcher.addEventListener("change", () => void onDbSwitch(dbSwitcher.value));
@@ -547,7 +635,6 @@ async function onDbSwitch(database: string): Promise<void> {
   }
 }
 
-/** Surface an admin action's outcome once (deduped by at_epoch_ms). */
 function announceAdmin(result: AdminActionResult | null): void {
   if (result === null || result.at_epoch_ms === lastAdminSeen) return;
   lastAdminSeen = result.at_epoch_ms;
@@ -578,10 +665,6 @@ pauseBtn.addEventListener("click", () => {
   }
 });
 
-// ── light/dark theme toggle (v0.13 redesign) ──────────────────────────────
-// Default dark (matches every prior screenshot/demo and the TUI's own
-// always-dark terminal); the explicit choice persists in localStorage and
-// wins on every later visit. See theme.ts for the pure decision logic.
 let currentTheme: Theme = resolveInitialTheme(loadStoredTheme(window.localStorage));
 
 function applyTheme(theme: Theme): void {
@@ -683,10 +766,6 @@ recordBtn.addEventListener("click", toggleRecording);
 exportBtn.addEventListener("click", exportSnapshot);
 
 async function onAdmin(kind: AdminKind, row: ActivityRow): Promise<void> {
-  // Defense in depth only: the table already hides the Actions column while
-  // `readOnly` is true (see `adminEnabled` above), so this only fires if
-  // that check was somehow bypassed — the server's own refusal below is
-  // what actually matters either way.
   if (readOnly) {
     showToast("Server is running in read-only mode: admin actions are disabled", true);
     return;
@@ -712,17 +791,9 @@ function connect(token: string | null): void {
   stream?.close();
   activeToken = token;
   setConnState("connecting");
-  // Best-effort: a failed fetch defaults to `readOnly = false` (fail open on
-  // the UI side only — `/api/admin/*` still refuses server-side whenever the
-  // server was actually started read-only, regardless of what this reports).
   void fetchConfig(token).then((cfg) => {
     readOnly = cfg.readOnly;
     readOnlyBadge.hidden = !readOnly;
-    // The Actions column depends on `adminEnabled()`, which now reads
-    // `readOnly` too — re-render just the head in case this resolved after
-    // the first snapshot already drew it (the common, fast case never
-    // notices: `fetchConfig` and the stream's first frame race, but nothing
-    // depends on which wins).
     table.refreshHead();
   });
   stream = openStream(token, {
@@ -757,8 +828,6 @@ tokenForm.addEventListener("submit", (event) => {
   });
 });
 
-// Boot: probe first so a token-protected server shows the prompt right away
-// instead of an opaque failing EventSource.
 void probeAuth(storedToken()).then((verdict) => {
   if (verdict === "unauthorized") {
     clearToken();

@@ -5,10 +5,20 @@
 // unit-testable and callers (main.ts, and index.html's hand-written buttons)
 // share one source of truth for the id strings instead of duplicating them.
 
-/** The seven nav sections, same order as the sidenav / keyboard shortcuts. */
-export type NavSection = "activity" | "blocks" | "replication" | "schema" | "indexes" | "queries" | "progress";
+/** The nine nav sections, matching the TUI's 9 lenses. */
+export type NavSection =
+  | "macro"
+  | "activity"
+  | "blocks"
+  | "replication"
+  | "schema"
+  | "indexes"
+  | "queries"
+  | "progress"
+  | "records";
 
 const NAV_ICON_IDS: Record<NavSection, string> = {
+  macro: "icon-macro",
   activity: "icon-activity",
   blocks: "icon-blocks",
   replication: "icon-replication",
@@ -16,6 +26,7 @@ const NAV_ICON_IDS: Record<NavSection, string> = {
   indexes: "icon-indexes",
   queries: "icon-queries",
   progress: "icon-progress",
+  records: "icon-records",
 };
 
 /** `<symbol>` id for a nav section's icon (index.html's sprite defines it). */

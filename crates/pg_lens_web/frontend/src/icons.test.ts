@@ -1,10 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { navIconId, severityIconId } from "./icons.ts";
+import { navIconId, severityIconId, type NavSection } from "./icons.ts";
 
 test("navIconId maps every nav section to a distinct symbol id", () => {
-  const sections = ["activity", "blocks", "replication", "schema", "indexes", "queries", "progress"] as const;
+  const sections: NavSection[] = [
+    "macro",
+    "activity",
+    "blocks",
+    "replication",
+    "schema",
+    "indexes",
+    "queries",
+    "progress",
+    "records",
+  ];
   const ids = sections.map(navIconId);
   assert.equal(new Set(ids).size, ids.length, "ids must be distinct");
   for (const id of ids) {

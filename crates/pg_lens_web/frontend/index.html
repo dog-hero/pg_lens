@@ -7,13 +7,17 @@
     <title>pg_lens</title>
   </head>
   <body>
-    <!-- Icon sprite (v0.13): every glyph used anywhere in the app is defined
-         once here as a <symbol> and referenced via <use href="#icon-...">
-         (ids mirrored in src/icons.ts). No icon font, no icon library. -->
+    <!-- Icon sprite: every glyph used anywhere in the app is defined once here -->
     <svg id="icon-sprite" aria-hidden="true" style="position: absolute; width: 0; height: 0; overflow: hidden">
       <symbol id="icon-lens" viewBox="0 0 24 24">
         <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2" />
         <line x1="16.2" y1="16.2" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
+      <symbol id="icon-macro" viewBox="0 0 24 24">
+        <rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2" fill="none" />
+        <rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2" fill="none" />
+        <rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2" fill="none" />
+        <rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2" fill="none" />
       </symbol>
       <symbol id="icon-activity" viewBox="0 0 24 24">
         <polyline
@@ -131,11 +135,15 @@
         <circle cx="16" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2" />
         <line x1="8" y1="12" x2="16" y2="12" stroke="currentColor" stroke-width="2" />
       </symbol>
+      <symbol id="icon-search" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2" />
+        <line x1="16.2" y1="16.2" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
     </svg>
 
     <div id="app">
       <header id="topbar">
-        <div class="topbar-brand">
+        <div class="topbar-brand" id="brand-link" title="Jump to Overview (1)">
           <svg class="icon brand-mark" aria-hidden="true"><use href="#icon-lens"></use></svg>
           <span class="brand">pg_lens</span>
         </div>
@@ -150,6 +158,18 @@
           ></select>
           <span id="db-switch-status" class="db-switch-status" hidden></span>
         </div>
+
+        <button
+          id="palette-toggle"
+          class="palette-btn"
+          type="button"
+          title="Command Palette (Cmd+K / Ctrl+K)"
+        >
+          <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+          <span>Find…</span>
+          <span class="palette-kbd"><kbd>⌘</kbd><kbd>K</kbd></span>
+        </button>
+
         <div class="topbar-spacer"></div>
         <div class="topbar-status">
           <span id="server-info" class="server-info"></span>
@@ -195,18 +215,38 @@
           <span id="conn-state" class="conn-state" data-state="connecting">connecting…</span>
         </div>
       </header>
+
       <div id="status-banner" hidden></div>
+
+      <!-- Compact health ribbon: shown on Lenses 2 to 9, clicking jumps to Overview (1) -->
+      <div id="health-ribbon" hidden title="Click to view full cluster Overview (1)">
+        <span class="ribbon-item">DB: <strong id="ribbon-db">—</strong></span>
+        <span class="ribbon-item">PG: <strong id="ribbon-pg">—</strong></span>
+        <span class="ribbon-item">Conns: <strong id="ribbon-conns">—</strong></span>
+        <span class="ribbon-item">Active: <strong id="ribbon-active">—</strong></span>
+        <span class="ribbon-item">Waiting: <strong id="ribbon-waiting">—</strong></span>
+        <span class="ribbon-item">TPS: <strong id="ribbon-tps">—</strong></span>
+        <span class="ribbon-item">Cache: <strong id="ribbon-cache">—</strong></span>
+        <span id="ribbon-xact-wrap" class="ribbon-item" hidden>Oldest Xact: <strong id="ribbon-xact">—</strong></span>
+        <span class="ribbon-hint">Overview ➔</span>
+      </div>
+
       <div id="shell">
         <nav id="sidenav" role="tablist" aria-label="Sections">
-          <button id="tab-activity" class="nav-btn" role="tab" aria-selected="true" aria-controls="activity-panel">
+          <button id="tab-macro" class="nav-btn" role="tab" aria-selected="true" aria-controls="macro-panel">
+            <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-macro"></use></svg>
+            <span class="nav-label">Overview</span>
+            <span class="nav-key">1</span>
+          </button>
+          <button id="tab-activity" class="nav-btn" role="tab" aria-selected="false" aria-controls="activity-panel">
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-activity"></use></svg>
             <span class="nav-label">Activity</span>
-            <span class="nav-key">1</span>
+            <span class="nav-key">2</span>
           </button>
           <button id="tab-blocks" class="nav-btn" role="tab" aria-selected="false" aria-controls="blocks-panel">
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-blocks"></use></svg>
             <span class="nav-label">Blocks &amp; Locks</span>
-            <span class="nav-key">2</span>
+            <span class="nav-key">3</span>
           </button>
           <button
             id="tab-replication"
@@ -216,33 +256,33 @@
             aria-controls="replication-panel"
           >
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-replication"></use></svg>
-            <span class="nav-label">Replication Lens</span>
-            <span class="nav-key">3</span>
+            <span class="nav-label">Replication</span>
+            <span class="nav-key">4</span>
           </button>
           <button id="tab-schema" class="nav-btn" role="tab" aria-selected="false" aria-controls="schema-panel">
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-schema"></use></svg>
             <span class="nav-label">Schema</span>
-            <span class="nav-key">4</span>
+            <span class="nav-key">5</span>
           </button>
           <button id="tab-indexes" class="nav-btn" role="tab" aria-selected="false" aria-controls="indexes-panel">
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-indexes"></use></svg>
             <span class="nav-label">Indexes</span>
-            <span class="nav-key">5</span>
+            <span class="nav-key">6</span>
           </button>
           <button id="tab-queries" class="nav-btn" role="tab" aria-selected="false" aria-controls="queries-panel">
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-queries"></use></svg>
             <span class="nav-label">Queries</span>
-            <span class="nav-key">6</span>
+            <span class="nav-key">7</span>
           </button>
           <button id="tab-progress" class="nav-btn" role="tab" aria-selected="false" aria-controls="progress-panel">
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-progress"></use></svg>
             <span class="nav-label">Progress</span>
-            <span class="nav-key">7</span>
+            <span class="nav-key">8</span>
           </button>
           <button id="tab-records" class="nav-btn" role="tab" aria-selected="false" aria-controls="records-panel">
             <svg class="icon nav-icon" aria-hidden="true"><use href="#icon-records"></use></svg>
             <span class="nav-label">Records</span>
-            <span class="nav-key">8</span>
+            <span class="nav-key">9</span>
           </button>
           <div class="sidenav-footer">
             <p class="legend">
@@ -250,43 +290,61 @@
               <span class="legend-item"><svg class="icon legend-dot warn" aria-hidden="true"><use href="#icon-dot"></use></svg>warn</span>
               <span class="legend-item"><svg class="icon legend-dot bad" aria-hidden="true"><use href="#icon-dot"></use></svg>bad</span>
             </p>
-            <p class="kbd-hint" title="1-8 jump sections, / focuses the filter, R records incident, E exports bookmark, B refreshes schema, Esc clears focus">
+            <p class="kbd-hint" title="1-9 jump sections, / filters, Cmd+K palette, j/k row nav, Enter details, Esc closes">
               <svg class="icon" aria-hidden="true"><use href="#icon-keyboard"></use></svg>
-              <span><kbd>1</kbd>-<kbd>8</kbd> nav · <kbd>/</kbd> filter · <kbd>R</kbd> rec · <kbd>E</kbd> export · <kbd>B</kbd> schema</span>
+              <span><kbd>1</kbd>-<kbd>9</kbd> nav · <kbd>/</kbd> filter · <kbd>⌘K</kbd> cmd · <kbd>j</kbd>/<kbd>k</kbd> nav · <kbd>↵</kbd> info</span>
             </p>
           </div>
         </nav>
+
         <main>
-          <section id="vitals" class="cards"></section>
-          <section class="panel">
-            <h2>TPS &amp; active sessions</h2>
-            <div id="chart"></div>
-            <!-- v0.14 History time-scrubber: hover shows a live readout of
-                 that moment, click pins it (survives streaming updates,
-                 unpinned by clicking again, the ✕, or Esc) — see
-                 src/scrubber.ts for the pure resolution/formatting logic. -->
-            <div id="scrub-readout" class="scrub-readout" hidden>
-              <span id="scrub-readout-time" class="scrub-readout-time"></span>
-              <span id="scrub-readout-pinned-hint" class="scrub-readout-pinned-hint" hidden></span>
-              <span class="scrub-readout-item">TPS <strong id="scrub-readout-tps"></strong></span>
-              <span class="scrub-readout-item">Sessions <strong id="scrub-readout-sessions"></strong></span>
-              <span class="scrub-readout-item">Conns <strong id="scrub-readout-conns"></strong></span>
-              <span class="scrub-readout-item">Cache hit <strong id="scrub-readout-cache"></strong></span>
-              <span class="scrub-readout-item">Lock pressure <strong id="scrub-readout-lock"></strong></span>
-              <span id="scrub-readout-xid-wrap" class="scrub-readout-item" hidden>XID age <strong id="scrub-readout-xid"></strong></span>
-              <button id="scrub-unpin" class="scrub-unpin" type="button" hidden aria-label="Unpin the scrubbed moment (Esc)" title="Unpin (Esc)">✕</button>
+          <!-- 1. MACRO OVERVIEW LENS -->
+          <section id="macro-panel" class="panel" role="tabpanel">
+            <div class="panel-header-row">
+              <h2>Cluster Overview <span class="panel-note">vitals, saturation &amp; history series</span></h2>
+            </div>
+            <section id="vitals" class="cards"></section>
+            <div class="chart-panel">
+              <div class="panel-header-row">
+                <h3 style="margin: 0; font-size: 0.95rem;">TPS &amp; Active Sessions (Live Ring Buffer)</h3>
+              </div>
+              <div id="chart"></div>
+              <div id="scrub-readout" class="scrub-readout" hidden>
+                <span id="scrub-readout-time" class="scrub-readout-time"></span>
+                <span id="scrub-readout-pinned-hint" class="scrub-readout-pinned-hint" hidden></span>
+                <span class="scrub-readout-item">TPS <strong id="scrub-readout-tps"></strong></span>
+                <span class="scrub-readout-item">Sessions <strong id="scrub-readout-sessions"></strong></span>
+                <span class="scrub-readout-item">Conns <strong id="scrub-readout-conns"></strong></span>
+                <span class="scrub-readout-item">Cache hit <strong id="scrub-readout-cache"></strong></span>
+                <span class="scrub-readout-item">Lock pressure <strong id="scrub-readout-lock"></strong></span>
+                <span id="scrub-readout-xid-wrap" class="scrub-readout-item" hidden>XID age <strong id="scrub-readout-xid"></strong></span>
+                <button id="scrub-unpin" class="scrub-unpin" type="button" hidden aria-label="Unpin the scrubbed moment (Esc)" title="Unpin (Esc)">✕</button>
+              </div>
             </div>
           </section>
-          <section id="activity-panel" class="panel" role="tabpanel">
-            <h2>Activity <span id="activity-count" class="panel-note"></span></h2>
-            <input
-              id="activity-filter"
-              class="filter-input"
-              type="search"
-              placeholder="Filter by pid, db, user, app, state, wait or query… (/)"
-              autocomplete="off"
-              spellcheck="false"
-            />
+
+          <!-- 2. MICRO ACTIVITY LENS -->
+          <section id="activity-panel" class="panel" role="tabpanel" hidden>
+            <div class="panel-header-row">
+              <h2>Live Activity <span id="activity-count" class="panel-note"></span></h2>
+            </div>
+            <div class="toolbar">
+              <input
+                id="activity-filter"
+                class="filter-input"
+                type="search"
+                placeholder="Filter sessions by PID, db, user, app, state, wait or query… (/)"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <div id="activity-chips" class="filter-chips">
+                <button class="chip active" data-state="all" type="button">All <span class="chip-count" id="chip-count-all"></span></button>
+                <button class="chip" data-state="active" type="button">Active <span class="chip-count" id="chip-count-active"></span></button>
+                <button class="chip" data-state="waiting" type="button">Waiting <span class="chip-count" id="chip-count-waiting"></span></button>
+                <button class="chip" data-state="idle_txn" type="button">Idle in Txn <span class="chip-count" id="chip-count-idle-txn"></span></button>
+                <button class="chip" data-state="blocked" type="button">Blocked <span class="chip-count" id="chip-count-blocked"></span></button>
+              </div>
+            </div>
             <div id="waits-strip" class="waits-strip" hidden></div>
             <div id="xact-headline" class="xact-headline" hidden>
               <span id="xact-headline-age" class="xact-headline-age"></span>
@@ -300,7 +358,7 @@
               </table>
             </div>
             <details id="waits-detail" class="waits-detail" hidden>
-              <summary id="waits-detail-summary">All waits</summary>
+              <summary id="waits-detail-summary">All wait events</summary>
               <ul id="waits-list" class="waits-list"></ul>
             </details>
             <details id="idle-detail" class="waits-detail" hidden>
@@ -308,8 +366,10 @@
               <ul id="idle-list" class="vacuum-tables"></ul>
             </details>
           </section>
+
+          <!-- 3. BLOCKS & LOCKS LENS -->
           <section id="blocks-panel" class="panel" role="tabpanel" hidden>
-            <h2>Blocks &amp; Locks <span class="panel-note">wait-for tree &amp; active locks</span></h2>
+            <h2>Blocks &amp; Locks <span class="panel-note">wait-for dependency tree &amp; active locks</span></h2>
             <div class="blocks-section">
               <h3>Blocking Tree</h3>
               <div id="blocks-tree-container" class="blocks-tree-wrap"></div>
@@ -335,24 +395,40 @@
               </div>
             </div>
           </section>
+
+          <!-- 4. REPLICATION LENS -->
           <section id="replication-panel" class="panel" role="tabpanel" hidden>
-            <h2>Replication Lens</h2>
-            <p id="replication-placeholder" class="placeholder">collecting…</p>
-            <div id="replication"></div>
+            <div class="panel-header-row">
+              <h2>Replication Lens <span class="panel-note">physical senders, standby receiver, slots, publications &amp; subscriptions</span></h2>
+            </div>
+            <input
+              id="replication-filter"
+              class="filter-input"
+              type="search"
+              placeholder="Filter slots, publications, and subscriptions… (/)"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <p id="replication-placeholder" class="placeholder">collecting replication topology…</p>
+            <div id="replication" class="repl-container"></div>
           </section>
+
+          <!-- 5. SCHEMA LENS -->
           <section id="schema-panel" class="panel" role="tabpanel" hidden>
-            <h2>
-              Schema <span class="panel-note">estimated bloat</span>
+            <div class="panel-header-row">
+              <h2>
+                Schema <span class="panel-note">table statistics &amp; estimated bloat</span>
+              </h2>
               <button
                 id="schema-refresh-btn"
                 class="ghost-btn"
                 type="button"
-                title="Recollect table stats + estimated bloat now"
+                title="Recollect table stats + estimated bloat now (B)"
               >
                 <svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>
-                <span>Refresh</span>
+                <span>Refresh (B)</span>
               </button>
-            </h2>
+            </div>
             <div class="schema-toolbar">
               <input
                 id="schema-filter"
@@ -369,7 +445,7 @@
             </div>
             <p id="schema-staleness" class="staleness"></p>
             <p id="schema-warning" class="inline-warning" hidden></p>
-            <p id="schema-placeholder" class="placeholder">collecting…</p>
+            <p id="schema-placeholder" class="placeholder">collecting schema statistics…</p>
             <div class="table-wrap">
               <table id="schema">
                 <thead></thead>
@@ -387,7 +463,7 @@
             <div id="sequences-section" class="vacuum-section">
               <h3>Sequences <span class="panel-note">exhaustion risk (pg_sequences)</span></h3>
               <p id="sequences-staleness" class="staleness"></p>
-              <p id="sequences-placeholder" class="placeholder">collecting…</p>
+              <p id="sequences-placeholder" class="placeholder">collecting sequence metrics…</p>
               <div class="table-wrap">
                 <table id="sequences">
                   <thead></thead>
@@ -396,8 +472,10 @@
               </div>
             </div>
           </section>
+
+          <!-- 6. INDEXES LENS -->
           <section id="indexes-panel" class="panel" role="tabpanel" hidden>
-            <h2>Indexes <span class="panel-note">unused / duplicate / prefix-redundant</span></h2>
+            <h2>Indexes <span class="panel-note">unused, duplicate, and prefix-redundant indexes</span></h2>
             <input
               id="indexes-filter"
               class="filter-input"
@@ -408,7 +486,7 @@
             />
             <p id="indexes-staleness" class="staleness"></p>
             <p id="indexes-warning" class="inline-warning" hidden></p>
-            <p id="indexes-placeholder" class="placeholder">collecting…</p>
+            <p id="indexes-placeholder" class="placeholder">collecting index metadata…</p>
             <div class="table-wrap">
               <table id="indexes">
                 <thead></thead>
@@ -416,19 +494,21 @@
               </table>
             </div>
           </section>
+
+          <!-- 7. QUERIES LENS -->
           <section id="queries-panel" class="panel" role="tabpanel" hidden>
-            <h2>Queries <span class="panel-note">pg_stat_statements</span></h2>
+            <h2>Queries <span class="panel-note">pg_stat_statements normalized query performance</span></h2>
             <input
               id="statements-filter"
               class="filter-input"
               type="search"
-              placeholder="Filter by query text… (/)"
+              placeholder="Filter by query text or query ID… (/)"
               autocomplete="off"
               spellcheck="false"
             />
             <p id="statements-staleness" class="staleness"></p>
             <p id="statements-warning" class="inline-warning" hidden></p>
-            <p id="statements-placeholder" class="placeholder">collecting…</p>
+            <p id="statements-placeholder" class="placeholder">collecting statement statistics…</p>
             <div id="statements-unavailable" class="unavailable" hidden></div>
             <div class="table-wrap">
               <table id="statements">
@@ -437,8 +517,10 @@
               </table>
             </div>
           </section>
+
+          <!-- 8. PROGRESS LENS -->
           <section id="progress-panel" class="panel" role="tabpanel" hidden>
-            <h2>Progress <span class="panel-note">in-flight maintenance &amp; DDL</span></h2>
+            <h2>Progress <span class="panel-note">in-flight maintenance &amp; DDL operations</span></h2>
             <input
               id="progress-filter"
               class="filter-input"
@@ -465,10 +547,12 @@
               </table>
             </div>
           </section>
+
+          <!-- 9. RECORDS LENS -->
           <section id="records-panel" class="panel" role="tabpanel" hidden>
             <div class="panel-header-row">
-              <h2>Records <span class="panel-note">incident recordings &amp; bookmarks</span></h2>
-              <button id="records-refresh-btn" class="btn btn-sm" title="Refresh file list">Refresh</button>
+              <h2>Records <span class="panel-note">incident recordings &amp; snapshot bookmarks</span></h2>
+              <button id="records-refresh-btn" class="ghost-btn" title="Refresh file list">Refresh</button>
             </div>
             <input
               id="records-filter"
@@ -500,6 +584,51 @@
           </section>
         </main>
       </div>
+
+      <!-- Slide-over Inspector Drawer -->
+      <div id="drawer-backdrop"></div>
+      <aside id="inspector-drawer">
+        <div class="drawer-header">
+          <div class="drawer-title-group">
+            <h2 class="drawer-title">Details</h2>
+            <span class="drawer-badge badge"></span>
+          </div>
+          <button class="drawer-close" type="button" aria-label="Close details (Esc)" title="Close (Esc)">
+            ✕ <span>Esc</span>
+          </button>
+        </div>
+        <nav class="drawer-tabs"></nav>
+        <div class="drawer-content"></div>
+        <div class="drawer-actions"></div>
+      </aside>
+
+      <!-- Command Palette (Cmd+K) -->
+      <div id="palette-backdrop">
+        <div id="command-palette">
+          <div class="palette-search-wrap">
+            <svg class="icon palette-search-icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+            <input
+              id="palette-input"
+              class="palette-input"
+              type="text"
+              placeholder="Jump to a lens, switch database, or trigger action…"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+          <div id="palette-list" class="palette-list"></div>
+          <div class="palette-footer">
+            <div class="palette-hints">
+              <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+              <span><kbd>↵</kbd> select</span>
+              <span><kbd>Esc</kbd> close</span>
+            </div>
+            <span>pg_lens web</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Token Authentication Overlay -->
       <div id="token-overlay" hidden>
         <form id="token-form">
           <h2>Authentication required</h2>

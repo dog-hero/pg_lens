@@ -216,6 +216,7 @@ export class SchemaLens {
   private readonly placeholder: HTMLElement;
   private readonly onDetailRequest: ((oid: number, schema: string, name: string) => void) | null;
   private readonly onJumpToIndexes: ((tableName: string) => void) | null;
+  private readonly onInspectTable: ((table: TableStatRow, schema: SchemaSnapshot, detail?: TableDetail | null) => void) | null;
 
   // Plain assignment, not TS constructor-parameter-property shorthand: the
   // shorthand form is `SyntaxError`-incompatible with Node's built-in
@@ -231,12 +232,14 @@ export class SchemaLens {
     onDetailRequest?: (oid: number, schema: string, name: string) => void,
     partitionsToggle?: HTMLInputElement | null,
     onJumpToIndexes?: (tableName: string) => void,
+    onInspectTable?: (table: TableStatRow, schema: SchemaSnapshot, detail?: TableDetail | null) => void,
   ) {
     this.staleness = staleness;
     this.warning = warning;
     this.placeholder = placeholder;
     this.onDetailRequest = onDetailRequest ?? null;
     this.onJumpToIndexes = onJumpToIndexes ?? null;
+    this.onInspectTable = onInspectTable ?? null;
     this.thead = table.tHead ?? table.createTHead();
     this.tbody = table.tBodies[0] ?? table.createTBody();
     this.renderHead();
@@ -466,6 +469,7 @@ export class SchemaLens {
     }
     tr.title = "click for structure + index bloat detail";
     tr.addEventListener("click", () => {
+      this.onInspectTable?.(table, schema, this.tableDetail);
       if (this.expanded.has(rowKey)) {
         this.expanded.delete(rowKey);
       } else {

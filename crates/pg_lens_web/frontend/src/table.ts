@@ -1,37 +1,14 @@
-// Micro Lens: activity table with client-side sort and B/W status markers.
-//
-// Mirrors the TUI's micro_lens.rs conventions: status column `S` shows `B`
-// when the pid appears in DbSnapshot::locks (blocked — red tint, wins) and
-// `W` when wait_event is non-null (waiting — yellow tint).
-//
-// v0.16: the WHOLE row is colored, pg_activity-style (Part A) — see
-// `activityRowClass` for the exact precedence (blocked wins, then a
-// running-query duration override, then plain waiting, then the session
-// state's own base color), mirroring `ui/micro_lens.rs::row_severity_style`
-// exactly. The query cell itself is now plain text in the table row — SQL
-// keyword highlighting moved into the expanded detail row only (Part B),
-// which also carries a copy-to-clipboard button (Part C).
+// Micro Lens: activity table with client-side sort, state filters, and keyboard navigation.
+// Integrates with InspectorDrawer for smooth side-by-side inspection.
 
-import type { ActivityRow, DdlProgressRow, LockRow } from "./types";
+import type { ActivityRow, LockRow } from "./types";
 import { humanDuration } from "./format.ts";
-import { renderSqlInto } from "./sql.ts";
 import { xactAgeSeverity } from "./xact_age.ts";
-import { blockingChain, renderBlockingChain } from "./blocking.ts";
-import { renderCopyButton } from "./clipboard.ts";
-import type { AdminKind } from "./actions";
+import type { AdminKind } from "./actions.ts";
 
-/** Above this running-query duration the Duration column's color indicates
- * severity — bad (red) past this, warn (yellow) past `ROW_DURATION_WARN_SECS`
- * — mirroring the TUI's `ROW_DURATION_BAD_SECS`/`ROW_DURATION_WARN_SECS`
- * exactly. Only ever applies to `state === "active"` sessions: an idle (or
- * idle-in-transaction) session stays dim/idle color. */
 export const ROW_DURATION_BAD_SECS = 30;
 export const ROW_DURATION_WARN_SECS = 10;
 
-/** pg_activity-style per-column state color class —
- * mirrors the TUI's `state_color` mapping exactly. Unknown/rare states
- * (`fastpath function call`, `disabled`, or any future addition)
- * map to `""` (neutral default). */
 export function stateColorClass(state: string): string {
   switch (state) {
     case "active":
@@ -47,9 +24,6 @@ export function stateColorClass(state: string): string {
   }
 }
 
-/** Severity class applied strictly to the Duration column:
- * active sessions turn bad (>30s), warn (>10s), or ok (<=10s).
- * Idle sessions remain calm/dim. */
 export function durationSeverityClass(
   state: string,
   durationSecs: number,
@@ -62,8 +36,6 @@ export function durationSeverityClass(
   return "duration-idle";
 }
 
-/** Color class for wait events: Lock events are highlighted as red/bold,
- * other wait events are yellow, and empty is dim. */
 export function waitEventClass(waitEvent: string | null): string {
   if (!waitEvent) return "wait-none";
   if (waitEvent.startsWith("Lock:")) return "wait-lock";
@@ -100,8 +72,6 @@ const COLUMNS: Column[] = [
   { key: "query", label: "Query", numeric: false },
 ];
 
-/** Case-insensitive substring match over the fields a DBA filters by —
- * mirrors the TUI's `row_matches` (pid as text, everything else a contains). */
 function rowMatches(row: ActivityRow, needle: string): boolean {
   return (
     String(row.pid).includes(needle) ||
@@ -115,29 +85,24 @@ function rowMatches(row: ActivityRow, needle: string): boolean {
   );
 }
 
+export type StateFilter = "all" | "active" | "waiting" | "idle_txn" | "blocked";
+
 export class ActivityTable {
   private sortKey: SortKey = "duration_secs";
   private sortAsc = false;
   private rows: ActivityRow[] = [];
   private blocked = new Set<number>();
   private locks: LockRow[] = [];
-  private ddlProgress: DdlProgressRow[] = [];
-  /** pid of the row whose expanded detail (full highlighted query + copy
-   * button, plus the wait-for chain when blocked) is open, if any — v0.9's
-   * blocked-only chain toggle generalized (v0.16) to every row, mirroring
-   * the TUI's `Enter`-to-open detail panel. */
-  private expandedPid: number | null = null;
+  private selectedPid: number | null = null;
   private filter = "";
+  private stateFilter: StateFilter = "all";
+
   private readonly thead: HTMLTableSectionElement;
   private readonly tbody: HTMLTableSectionElement;
   private readonly count: HTMLElement | null;
-  /** True when admin actions are available (a token is active). */
   private readonly adminEnabled: () => boolean;
-  /** Invoked when a row's Cancel/Kill button is pressed. */
   private readonly onAdmin: ((kind: AdminKind, row: ActivityRow) => void) | null;
-  /** Invoked after a copy-button click resolves — lets the caller show a
-   * toast (see `main.ts`'s `showToast`). */
-  private readonly onCopy: ((ok: boolean, chars: number) => void) | null;
+  private readonly onInspect: ((row: ActivityRow, locks: LockRow[]) => void) | null;
 
   constructor(
     table: HTMLTableElement,
@@ -146,7 +111,7 @@ export class ActivityTable {
     opts?: {
       adminEnabled?: () => boolean;
       onAdmin?: (kind: AdminKind, row: ActivityRow) => void;
-      onCopy?: (ok: boolean, chars: number) => void;
+      onInspect?: (row: ActivityRow, locks: LockRow[]) => void;
     },
   ) {
     this.thead = table.tHead ?? table.createTHead();
@@ -154,7 +119,8 @@ export class ActivityTable {
     this.count = count ?? null;
     this.adminEnabled = opts?.adminEnabled ?? (() => false);
     this.onAdmin = opts?.onAdmin ?? null;
-    this.onCopy = opts?.onCopy ?? null;
+    this.onInspect = opts?.onInspect ?? null;
+
     if (filterInput) {
       filterInput.addEventListener("input", () => {
         this.filter = filterInput.value.trim().toLowerCase();
@@ -164,30 +130,89 @@ export class ActivityTable {
     this.renderHead();
   }
 
-  update(activity: ActivityRow[], locks: LockRow[], ddlProgress?: DdlProgressRow[] | null): void {
+  setStateFilter(filter: StateFilter): void {
+    this.stateFilter = filter;
+    this.renderBody();
+  }
+
+  getStateFilter(): StateFilter {
+    return this.stateFilter;
+  }
+
+  update(activity: ActivityRow[], locks: LockRow[], _ddlProgress?: unknown): void {
     this.rows = activity;
     this.locks = locks;
     this.blocked = new Set(locks.map((lock) => lock.pid));
-    this.ddlProgress = ddlProgress ?? [];
-    // A pid can stop being on screen between polls (query finished, session
-    // gone) — drop a stale expansion rather than pointing at nothing.
-    if (this.expandedPid !== null && !this.rows.some((r) => r.pid === this.expandedPid)) {
-      this.expandedPid = null;
+
+    if (this.selectedPid !== null && !this.rows.some((r) => r.pid === this.selectedPid)) {
+      this.selectedPid = null;
     }
-    // Re-render the head too: the Actions column appears once a token makes
-    // admin available (it may become enabled after the first render).
+
     this.renderHead();
     this.renderBody();
+  }
+
+  getSelectedRow(): ActivityRow | null {
+    if (this.selectedPid === null) return null;
+    return this.rows.find((r) => r.pid === this.selectedPid) ?? null;
+  }
+
+  selectNext(): void {
+    const visible = this.sorted();
+    const first = visible[0];
+    if (!first) return;
+    if (this.selectedPid === null) {
+      this.selectedPid = first.pid;
+    } else {
+      const idx = visible.findIndex((r) => r.pid === this.selectedPid);
+      if (idx === -1 || idx === visible.length - 1) {
+        this.selectedPid = first.pid;
+      } else {
+        const next = visible[idx + 1];
+        if (next) this.selectedPid = next.pid;
+      }
+    }
+    this.renderBody();
+    this.scrollSelectedIntoView();
+  }
+
+  selectPrev(): void {
+    const visible = this.sorted();
+    const last = visible[visible.length - 1];
+    if (!last) return;
+    if (this.selectedPid === null) {
+      this.selectedPid = last.pid;
+    } else {
+      const idx = visible.findIndex((r) => r.pid === this.selectedPid);
+      if (idx <= 0) {
+        this.selectedPid = last.pid;
+      } else {
+        const prev = visible[idx - 1];
+        if (prev) this.selectedPid = prev.pid;
+      }
+    }
+    this.renderBody();
+    this.scrollSelectedIntoView();
+  }
+
+  inspectSelected(): void {
+    const sel = this.getSelectedRow();
+    if (sel && this.onInspect) {
+      this.onInspect(sel, this.locks);
+    }
+  }
+
+  private scrollSelectedIntoView(): void {
+    const tr = this.tbody.querySelector(`tr[data-pid="${this.selectedPid}"]`);
+    if (tr instanceof HTMLElement) {
+      tr.scrollIntoView({ block: "nearest" });
+    }
   }
 
   private showActions(): boolean {
     return this.onAdmin !== null && this.adminEnabled();
   }
 
-  /** Re-renders just the header — for when `adminEnabled()`'s answer can
-   * change independently of a data update (e.g. `/api/config`'s read-only
-   * flag resolving after the first snapshot already drew the Actions
-   * column). Row data is untouched. */
   refreshHead(): void {
     this.renderHead();
   }
@@ -197,7 +222,6 @@ export class ActivityTable {
       this.sortAsc = !this.sortAsc;
     } else {
       this.sortKey = key;
-      // Numbers usually want "biggest first" on first click; text A→Z.
       this.sortAsc = !(key === "duration_secs" || key === "pid");
     }
     this.renderHead();
@@ -232,15 +256,33 @@ export class ActivityTable {
   private sorted(): ActivityRow[] {
     const key = this.sortKey;
     const dir = this.sortAsc ? 1 : -1;
-    const visible = this.filter
-      ? this.rows.filter((r) => rowMatches(r, this.filter))
-      : this.rows;
-    if (this.count) {
-      this.count.textContent = this.filter
-        ? `${visible.length}/${this.rows.length}`
-        : `${this.rows.length}`;
+
+    let filtered = this.rows;
+
+    // Apply text search
+    if (this.filter) {
+      filtered = filtered.filter((r) => rowMatches(r, this.filter));
     }
-    return [...visible].sort((a, b) => {
+
+    // Apply state filter chip
+    if (this.stateFilter === "active") {
+      filtered = filtered.filter((r) => r.state === "active");
+    } else if (this.stateFilter === "waiting") {
+      filtered = filtered.filter((r) => r.wait_event !== null);
+    } else if (this.stateFilter === "idle_txn") {
+      filtered = filtered.filter((r) => r.state.includes("idle in transaction"));
+    } else if (this.stateFilter === "blocked") {
+      filtered = filtered.filter((r) => this.blocked.has(r.pid));
+    }
+
+    if (this.count) {
+      this.count.textContent =
+        this.filter || this.stateFilter !== "all"
+          ? `${filtered.length}/${this.rows.length}`
+          : `${this.rows.length}`;
+    }
+
+    return [...filtered].sort((a, b) => {
       const va = a[key] ?? "";
       const vb = b[key] ?? "";
       if (typeof va === "number" && typeof vb === "number") {
@@ -253,26 +295,28 @@ export class ActivityTable {
   private renderBody(): void {
     const rows = this.sorted();
     if (rows.length === 0) {
-      // Empty state: distinguish "nothing matches your filter" from "the
-      // server is genuinely idle" so the reader knows which lever to pull.
       const tr = document.createElement("tr");
       tr.classList.add("empty-row");
       const td = document.createElement("td");
       td.colSpan = COLUMNS.length + (this.showActions() ? 1 : 0);
       td.textContent =
-        this.rows.length > 0 && this.filter
-          ? `No sessions match “${this.filter}”`
+        this.rows.length > 0
+          ? `No sessions match current filter`
           : "No active sessions";
       tr.append(td);
       this.tbody.replaceChildren(tr);
       return;
     }
-    const colCount = COLUMNS.length + (this.showActions() ? 1 : 0);
+
     const trs: HTMLTableRowElement[] = [];
     for (const row of rows) {
       const isBlocked = this.blocked.has(row.pid);
       const isWaiting = row.wait_event !== null;
+      const isSelected = this.selectedPid === row.pid;
+
       const tr = document.createElement("tr");
+      tr.dataset.pid = String(row.pid);
+      if (isSelected) tr.classList.add("is-selected");
 
       // Status column
       const statusTd = document.createElement("td");
@@ -335,16 +379,14 @@ export class ActivityTable {
       waitTd.textContent = row.wait_event ?? "—";
       tr.append(waitTd);
 
-      // Duration column: time-based coloring applied strictly to this column
+      // Duration column
       const durationTd = document.createElement("td");
       durationTd.classList.add("col-duration", "num");
       durationTd.classList.add(durationSeverityClass(row.state, row.duration_secs));
       durationTd.textContent = humanDuration(row.duration_secs);
       tr.append(durationTd);
 
-      // Xact column: age of the open transaction ("—" when none), tinted
-      // by the same severity the oldest-xact headline uses —
-      // idle-in-transaction reads worse than an equally-old active query.
+      // Xact column
       const xactTd = document.createElement("td");
       xactTd.classList.add("col-xact", "num");
       if (row.xact_age_secs !== null) {
@@ -358,115 +400,66 @@ export class ActivityTable {
       }
       tr.append(xactTd);
 
-      // Query cell: neutral plain text — SQL keyword highlighting
-      // is kept in the expanded detail row below.
+      // Query cell
       const query = document.createElement("td");
       query.classList.add("col-query", "query");
       query.title = row.query;
       query.textContent = row.query;
       tr.append(query);
+
       if (this.showActions()) {
         tr.append(this.actionsCell(row));
       }
-      // v0.16: every row is clickable — toggles an expanded detail row
-      // (full highlighted query + copy button, plus the wait-for chain when
-      // blocked) right below, mirroring the TUI's `Enter` detail panel.
-      // Generalized (v0.9 used to gate this on `isBlocked` only).
-      tr.classList.add("row-toggle");
+
+      // Clicking row selects it and opens InspectorDrawer
       tr.addEventListener("click", (e) => {
-        // Don't hijack clicks on the Cancel/Kill/Copy buttons.
         if (e.target instanceof HTMLButtonElement) return;
-        this.expandedPid = this.expandedPid === row.pid ? null : row.pid;
-        this.renderBody();
+        this.selectedPid = row.pid;
+        this.renderSelectionClass();
+        this.onInspect?.(row, this.locks);
       });
+
       trs.push(tr);
-      if (this.expandedPid === row.pid) {
-        trs.push(this.detailRow(row, isBlocked, colCount));
-      }
     }
     this.tbody.replaceChildren(...trs);
   }
 
-  /** Expanded detail row (v0.16): the full, SQL-highlighted query (Part B —
-   * this is the ONLY place in the Micro Lens that still highlights), a copy
-   * button (Part C), and — when the row is blocked — the wait-for chain
-   * that used to be the whole of this sub-row pre-v0.16. */
-  private detailRow(row: ActivityRow, isBlocked: boolean, colCount: number): HTMLTableRowElement {
-    const tr = document.createElement("tr");
-    tr.classList.add("activity-detail");
-    const td = document.createElement("td");
-    td.colSpan = colCount;
-
-    const metaWrap = document.createElement("div");
-    metaWrap.classList.add("activity-detail-meta");
-
-    const secSpan = document.createElement("span");
-    secSpan.classList.add("meta-item", "meta-security");
-    if (row.ssl) {
-      const ver = row.ssl_version ?? "TLS";
-      const cipher = row.ssl_cipher ? ` (${row.ssl_cipher})` : "";
-      secSpan.textContent = `Security: 🔒 ${ver}${cipher} (encrypted)`;
-      secSpan.classList.add("sec-ssl");
-    } else if (row.client === "local") {
-      secSpan.textContent = "Security: unix-socket (local)";
-      secSpan.classList.add("sec-local");
-    } else {
-      secSpan.textContent = "Security: ⚠️ plain (unencrypted)";
-      secSpan.classList.add("sec-plain");
-    }
-    metaWrap.append(secSpan);
-
-    const ddl = this.ddlProgress.find((d) => d.pid === row.pid);
-    if (ddl) {
-      const ddlSpan = document.createElement("span");
-      ddlSpan.classList.add("meta-item", "meta-ddl");
-      const pct = ddl.progress_pct !== null ? `${ddl.progress_pct.toFixed(1)}%` : "in progress";
-      const detailSuffix = ddl.detail ? ` [${ddl.detail}]` : "";
-      ddlSpan.textContent = `⚙️ DDL: ${ddl.command} on ${ddl.relation} — ${ddl.phase} (${ddl.current_step}/${ddl.total_step}) | ${pct}${detailSuffix}`;
-      metaWrap.append(ddlSpan);
-    }
-    td.append(metaWrap);
-
-    const pre = document.createElement("pre");
-    renderSqlInto(pre, row.query);
-    td.append(pre);
-    if (this.onCopy !== null) {
-      td.append(
-        renderCopyButton(
-          () => row.query,
-          (ok, chars) => this.onCopy?.(ok, chars),
-        ),
-      );
-    }
-    if (isBlocked) {
-      const chain = blockingChain(row.pid, this.locks);
-      if (chain !== null) {
-        const chainWrap = document.createElement("div");
-        chainWrap.classList.add("blocking-chain-row");
-        chainWrap.append(renderBlockingChain(chain));
-        td.append(chainWrap);
+  private renderSelectionClass(): void {
+    for (const tr of this.tbody.querySelectorAll("tr")) {
+      const pid = tr.dataset.pid;
+      if (pid && Number(pid) === this.selectedPid) {
+        tr.classList.add("is-selected");
+      } else {
+        tr.classList.remove("is-selected");
       }
     }
-    tr.append(td);
-    return tr;
   }
 
-  /** Cancel / Kill buttons for one row (only rendered when admin is on). */
   private actionsCell(row: ActivityRow): HTMLTableCellElement {
     const td = document.createElement("td");
-    td.classList.add("actions");
-    const button = (kind: AdminKind, label: string, cls: string): HTMLButtonElement => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.textContent = label;
-      b.classList.add("action-btn", cls);
-      b.addEventListener("click", () => this.onAdmin?.(kind, row));
-      return b;
-    };
-    td.append(
-      button("cancel", "Cancel", "cancel"),
-      button("terminate", "Kill", "kill"),
-    );
+    td.classList.add("col-actions");
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "cell-btn btn-cancel";
+    cancel.textContent = "Cancel";
+    cancel.title = `Cancel the running query for pid ${row.pid}`;
+    cancel.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.onAdmin?.("cancel", row);
+    });
+
+    const terminate = document.createElement("button");
+    terminate.type = "button";
+    terminate.className = "cell-btn btn-kill";
+    terminate.textContent = "Kill";
+    terminate.title = `Terminate the backend connection for pid ${row.pid}`;
+    terminate.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.onAdmin?.("terminate", row);
+    });
+
+    td.append(cancel, " ", terminate);
     return td;
   }
 }
