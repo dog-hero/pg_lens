@@ -22,6 +22,8 @@ End-to-end verification (the TUI can't be tested by piping stdin — these alloc
 ```sh
 python3 scripts/e2e_pty.py          # mock-mode e2e; PG_LENS_E2E_COLS/ROWS env override terminal size
 python3 scripts/e2e_pty_live.py     # against a live DB; supports --expect-micro-growing, --expect-blocked-marker
+bash scripts/generate_demo.sh       # rebuilds release binary, records docs/demo.gif via VHS & rebuilds site
+python3 scripts/verify_release.py   # mandatory pre-release gate (checks versions, demo gif freshness, site & licenses)
 ```
 
 Live-DB testing convention: `docker run -d --name pglens_pg16 -e POSTGRES_PASSWORD=pg -p 54316:5432 postgres:16` (ports 54313/54314 for PG 13/14), wait with `pg_isready`, generate load with `pgbench` inside the container, and `docker rm -f` the containers when done. If `docker pull` hangs on `docker-credential-desktop`, retry with a clean anonymous `DOCKER_CONFIG` dir.

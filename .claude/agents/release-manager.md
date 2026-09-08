@@ -31,16 +31,18 @@ authorizes the release and names the version.
      - the **Keybindings** table (audit every key the TUI binds: tabs, `d`/`w`/`v`/`B`/`R`/`E`/`/`/`s`/`?`, admin `c`/`K`,
        pause, quit — grep `event.rs`/`app.rs` for `KeyCode::` if unsure);
      - the feature/lens list, CLI flags / env vars if any were added;
+     - the demo image link (line ~20): MUST update the cache buster query parameter to `?v=X.Y.Z` (`https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=X.Y.Z`);
      - license badge and notice.
    - **`docs/demo.gif` (VHS Demo Recording)**:
-     - If the TUI UI, lenses, tabs, or keybindings changed, update `docs/demo.tape`
-       and regenerate the demo gif:
-       `cargo build --release -p pg_lens_tui && vhs docs/demo.tape`
+     - Regenerate the demo gif via the automated script:
+       `bash scripts/generate_demo.sh`
+       *(Note: VHS requires Chromium and terminal rendering permissions; run unsandboxed or with bypass sandbox if inside an agent sandbox).*
        Commit the updated `docs/demo.gif` and `docs/demo.tape`.
     - **`site/` (GitHub Pages Landing & Docs)**:
       - Reconcile `site/index.html` with what shipped:
-        - Update the lens count (e.g. "Eight lenses over one connection", `1`–`8`);
+        - Update the lens count (e.g. "Nine lenses over one connection", `1`–`9`);
         - Verify version pill in hero matches the new release version (`vX.Y.Z — Changelog →`);
+        - Verify demo gif tag has cache buster `assets/demo.gif?v=X.Y.Z`;
         - Verify header navigation (`<header class="site-top">`) and footer navigation link to `docs/changelog.html`;
         - Verify CLI commands in "Run it" match all active CLI tools (`pg_lens --dsn`, `--mock`, `replay`, `licenses`, `serve`);
         - Verify all new shortcuts and incident features are in the incident checklist (`Shift+R`, `E`, `y` OSC 52, `!`, `🔒` SSL, `d` db picker);
@@ -70,11 +72,14 @@ authorizes the release and names the version.
    cargo test --workspace
    cargo-deny check licenses
    python3 scripts/e2e_pty.py
+   python3 scripts/verify_release.py
    ```
    If the frontend changed since the last release:
    `cd crates/pg_lens_web/frontend && npm ci && npm run build && node --test`
    (package-lock.json must have been generated with the npm that CI's Node 24
    ships — a stale lock has cost two failed release runs before).
+
+   **STOP on any failure from `python3 scripts/verify_release.py`. Never commit or push a release with failing verification.**
 
 5. **Ship**
    - Commit: `chore: bump to X.Y.Z (<short summary>)` with the standard

@@ -48,7 +48,13 @@ python3 scripts/e2e_pty.py
 
 # 5. Frontend tests & typecheck (when web code is touched)
 cd crates/pg_lens_web/frontend && npm ci && npm test && npm run build
+
+# 6. Release & visual asset integrity gate (MANDATORY before every release commit/tag)
+python3 scripts/verify_release.py
 ```
+
+> [!IMPORTANT]
+> **Zero Tolerance for Stale Release Assets**: No release commit or tag may ever be created without `python3 scripts/verify_release.py` passing with exit code 0. This gate guarantees that `docs/demo.gif` is fresh and valid, cache-busting query parameters in `README.md` and `site/index.html` match the release version, internal crate pins are aligned, and documentation is in sync.
 
 ---
 
@@ -65,13 +71,18 @@ cd crates/pg_lens_web/frontend && npm ci && npm test && npm run build
 
 ## 5. Visual Assets & Documentation Policy
 
-* **Demo GIF:** The README and project landing page rely on `docs/demo.gif`. Whenever TUI layout, tabs, or major keybindings change, regenerate it via:
+* **Automated Demo GIF Generation:** The README and project landing page rely on `docs/demo.gif`. Whenever TUI layout, tabs, or major keybindings change, regenerate it via:
   ```sh
-  cargo build --release -p pg_lens_tui
-  vhs docs/demo.tape
+  bash scripts/generate_demo.sh
   ```
-* **Landing Page (`site/`):** The site at `site/index.html` must always reflect the current number of lenses (e.g. 8 lenses), accurate keybindings, active CLI subcommands (`replay`, `licenses`, `serve`), direct Changelog links in header and footer nav, hero version pill, and active license (`FSL-1.1-MIT`). Test building with:
+  *(Note for autonomous agents: VHS requires Chromium and terminal rendering access. When executing in a sandboxed environment, ensure sandbox bypass is enabled).*
+* **CDN Cache-Busting Rule:** GitHub's Camo proxy caches `raw.githubusercontent.com` assets indefinitely. Whenever `docs/demo.gif` is regenerated for a release, both `README.md` (`demo.gif?v=X.Y.Z`) and `site/index.html` (`assets/demo.gif?v=X.Y.Z`) MUST be updated with the new version tag.
+* **Landing Page (`site/`):** The site at `site/index.html` must always reflect the current number of lenses (e.g. 9 lenses), accurate keybindings, active CLI subcommands (`replay`, `licenses`, `serve`), direct Changelog links in header and footer nav, hero version pill (`vX.Y.Z — Changelog →`), and active license (`FSL-1.1-MIT`). Test building with:
   ```sh
   node site/build.mjs
+  ```
+* **Release Verification Gate:** Always run before committing a release:
+  ```sh
+  python3 scripts/verify_release.py
   ```
 
