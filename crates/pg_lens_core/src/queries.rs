@@ -220,9 +220,10 @@ const WAL_RECEIVER_POST_140000: &str = include_str!("../queries/wal_receiver_pos
 const VACUUM_CLUSTER_AGE: &str = include_str!("../queries/vacuum_cluster_age.sql");
 const VACUUM_TABLE_AGES: &str = include_str!("../queries/vacuum_table_ages.sql");
 const VACUUM_PROGRESS: &str = include_str!("../queries/vacuum_progress.sql");
-// Replication slots (F2.5). Invalidated column added in PG 16+.
+// Replication slots (F2.5). Invalidated column added in PG 17+.
 const REPLICATION_SLOTS: &str = include_str!("../queries/replication_slots.sql");
-const REPLICATION_SLOTS_POST_160000: &str = include_str!("../queries/replication_slots_post_160000.sql");
+const REPLICATION_SLOTS_POST_170000: &str =
+    include_str!("../queries/replication_slots_post_170000.sql");
 // Index advisor (F3). Version-independent 13+ (pg_stat_user_indexes /
 // pg_index / pg_constraint are stable across the whole supported range).
 const INDEXES: &str = include_str!("../queries/indexes.sql");
@@ -290,8 +291,8 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
     } else {
         WAL_RECEIVER
     };
-    let replication_slots = if server_version_num >= 160_000 {
-        REPLICATION_SLOTS_POST_160000
+    let replication_slots = if server_version_num >= 170_000 {
+        REPLICATION_SLOTS_POST_170000
     } else {
         REPLICATION_SLOTS
     };
@@ -779,14 +780,16 @@ mod tests {
     }
 
     #[test]
-    fn replication_slots_invalidated_split_at_pg16() {
-        let q15 = for_version(150_000).expect("PG 15 supported");
-        assert!(q15.replication_slots.contains("xmin_age"));
-        assert!(q15.replication_slots.contains("NULL::text AS invalidated"));
-
+    fn replication_slots_invalidated_split_at_pg17() {
         let q16 = for_version(160_000).expect("PG 16 supported");
         assert!(q16.replication_slots.contains("xmin_age"));
-        assert!(q16.replication_slots.contains("invalidated::text AS invalidated"));
+        assert!(q16.replication_slots.contains("NULL::text AS invalidated"));
+
+        let q17 = for_version(170_000).expect("PG 17 supported");
+        assert!(q17.replication_slots.contains("xmin_age"));
+        assert!(q17
+            .replication_slots
+            .contains("invalidated::text AS invalidated"));
     }
 
     #[test]

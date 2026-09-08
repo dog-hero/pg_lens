@@ -73,6 +73,8 @@ python3 scripts/verify_release.py
 
 * **Automated Demo GIF Generation:** The README and project landing page rely on `docs/demo.gif`. Whenever TUI layout, tabs, or major keybindings change, regenerate it via:
   ```sh
+  cargo build --release -p pg_lens_tui
+  vhs docs/demo.tape
   bash scripts/generate_demo.sh
   ```
   *(Note for autonomous agents: VHS requires Chromium and terminal rendering access. When executing in a sandboxed environment, ensure sandbox bypass is enabled).*

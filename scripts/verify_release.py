@@ -111,11 +111,12 @@ def main():
 
     # 9. Verify licenses generator
     print("\nVerifying license compliance...")
+    orig_licenses = (REPO_ROOT / "THIRD_PARTY_LICENSES.md").read_text(encoding="utf-8") if (REPO_ROOT / "THIRD_PARTY_LICENSES.md").exists() else ""
     res = subprocess.run([sys.executable, "scripts/generate_licenses.py"], capture_output=True, text=True)
     if res.returncode != 0:
         fail(f"scripts/generate_licenses.py failed: {res.stderr}")
-    diff_res = subprocess.run(["git", "diff", "--exit-code", "THIRD_PARTY_LICENSES.md"], capture_output=True, text=True)
-    if diff_res.returncode != 0:
+    new_licenses = (REPO_ROOT / "THIRD_PARTY_LICENSES.md").read_text(encoding="utf-8")
+    if orig_licenses != new_licenses:
         fail("THIRD_PARTY_LICENSES.md has unstaged/uncommitted diffs vs scripts/generate_licenses.py")
     pass_check("THIRD_PARTY_LICENSES.md is clean and matches dependencies")
 

@@ -4,6 +4,14 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.20.1] — 2026-09-08 — "Hotfix: PostgreSQL 16 Replication Slots Compatibility"
+
+### Fixed
+- **Replication Slots Version Gate Fix for PostgreSQL 16** — resolved a critical SQL query error (`column s.invalidated does not exist`) when connecting to PostgreSQL 16 clusters:
+  - In PostgreSQL 16, `pg_replication_slots` does not include the `invalidated` column (which was introduced in PostgreSQL 17).
+  - Moved the `s.invalidated` version gate from `server_version_num >= 160_000` to `server_version_num >= 170_000` (`replication_slots_post_170000.sql`).
+  - PostgreSQL 16 now cleanly uses the backwards-compatible query with `NULL::text AS invalidated`, restoring full replication slot polling on PostgreSQL 16.
+
 ## [0.20.0] — 2026-09-07 — "Logical & Physical Replication Deep-Dive: Dedicated Publications, Enriched Subscriptions & Slots"
 
 ### Added

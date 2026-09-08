@@ -74,6 +74,8 @@ Scenarios, in value order:
 
 ### 4. Version/packaging sanity (before releases)
 
+- workspace version == path-dep pins in pg_lens_tui/web Cargo.toml (a
+  mismatched pin has broken a release tag before)
 - Run `python3 scripts/verify_release.py` (checks all workspace version pins, README/site demo gif cache busters, docs/demo.gif existence/validity, changelog/roadmap entries, and site build)
 - `cargo build --release` binary runs `--version` correctly
 - if frontend changed: `npm ci && npm run build && node --test` in

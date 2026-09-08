@@ -1,6 +1,6 @@
--- Replication slots (pg_replication_slots, PG 16+).
+-- Replication slots (pg_replication_slots, PG 17+).
 --
--- Includes invalidated column (added in PG 16: wal_removed / max_slot_wal_keep_size).
+-- Includes invalidated column (added in PG 17: wal_removed / max_slot_wal_keep_size).
 SELECT
       s.slot_name::text AS slot_name,
       s.plugin::text AS plugin,

@@ -34,6 +34,9 @@ authorizes the release and names the version.
      - the demo image link (line ~20): MUST update the cache buster query parameter to `?v=X.Y.Z` (`https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=X.Y.Z`);
      - license badge and notice.
    - **`docs/demo.gif` (VHS Demo Recording)**:
+     - If the TUI UI, lenses, tabs, or keybindings changed, update `docs/demo.tape`
+       and regenerate the demo gif:
+       `cargo build --release -p pg_lens_tui && vhs docs/demo.tape`
      - Regenerate the demo gif via the automated script:
        `bash scripts/generate_demo.sh`
        *(Note: VHS requires Chromium and terminal rendering permissions; run unsandboxed or with bypass sandbox if inside an agent sandbox).*

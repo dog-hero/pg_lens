@@ -17,7 +17,7 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 and a [live interactive demo](https://dog-hero.github.io/pg_lens/demo/) of the
 Web Lens dashboard running on recorded data (no database required).
 
-![pg_lens TUI demo](https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=0.20.0)
+![pg_lens TUI demo](https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=0.20.1)
 
 <details>
 <summary>Web Lens dashboard (<code>pg_lens serve</code>)</summary>

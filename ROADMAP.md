@@ -311,6 +311,8 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.20.1** — "Hotfix: PostgreSQL 16 Replication Slots Compatibility":
+  - **Replication Slots Version Gate**: fixed `s.invalidated` column reference for PostgreSQL 16 by bumping the `invalidated` column gate to PG 17+ (`replication_slots_post_170000.sql`). PostgreSQL 16 now seamlessly falls back to the clean query with `NULL::text AS invalidated`.
 - **v0.20.0** — "Logical & Physical Replication Deep-Dive: Dedicated Publications, Enriched Subscriptions & Slots":
   - **Dedicated Publications Panel**: catalog discovery for logical publications (`pg_publication`, `pg_publication_tables`) with published tables list, schema scoping, and operation flags (`INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`) in TUI and Web Lens.
   - **Enriched Subscriptions**: subscriber telemetry (`pg_subscription`, `pg_stat_subscription`, PG 15+ version gate) with sanitized connection parameters, streaming/binary modes, two-phase commit, worker count, and syncing tables.
