@@ -17,7 +17,7 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 and a [live interactive demo](https://dog-hero.github.io/pg_lens/demo/) of the
 Web Lens dashboard running on recorded data (no database required).
 
-![pg_lens TUI demo](https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=0.20.1)
+![pg_lens TUI demo](https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=0.21.0)
 
 <details>
 <summary>Web Lens dashboard (<code>pg_lens serve</code>)</summary>
@@ -682,6 +682,7 @@ they ever drift, trust the overlay.
 | `p` / `o` | Switch active pane between wait-for tree and active locks table (Blocks Lens); show/hide leaf partitions (Schema Lens Tables view) |
 | `x` | Schema Lens: jump to Query Lens for table; Records Lens: delete selected recording file (asks for confirmation first) |
 | `d` | Database picker (any lens) — reconnects the poller to the chosen database |
+| `C` | Server picker (any lens) — reconnects the poller to the chosen server / cluster from `services.toml` |
 | `!` | Open a `psql` shell on the same connection (any lens) — see [The `psql` shell](#the-psql-shell) |
 | `y` | Copy selection to clipboard via OSC 52 — Micro query, Query statement, Index definition, Blocks query, Progress command, Schema table name, or Records file path; see [Copy to clipboard](#copy-to-clipboard) |
 | `?` | Keyboard help overlay — lists every binding |

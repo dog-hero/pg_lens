@@ -4,6 +4,28 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.21.0] — 2026-09-08 — "Web Modernization, 9-Lens Parity & Runtime Cluster Switching"
+
+### Added
+- **Runtime Server / Cluster Switching (`services.toml`)** — dynamic server switching in both TUI and Web UI without restarting `pg_lens`:
+  - Core domain model `ServerSwitchTarget` and poller loop handling: cleanly cancels in-flight queries via `cancel_query`, closes connection, resets history and caches, updates storage paths, and connects immediately to the new target with zero backoff.
+  - TUI Server Picker modal (accessible via `C`, uppercase) displaying configured services from `services.toml` with host, port, user coordinates, and active server marker; automatically updates the `!` (`psql`) shell-out target.
+  - Web API endpoints `GET /api/servers` (lists configured servers and active target) and `POST /api/server/switch` (token-gated, allowed in read-only mode).
+  - Web UI header server switcher (`#server-target-group`) and Command Palette "Servers" category for keyboard navigation.
+  - Strict credential safety: passwords and auth commands are never exposed via APIs or UI.
+- **Web Dashboard Modernization & Vertical Space Architecture**:
+  - Dedicated Macro Lens (Lens 1) cockpit housing Server Vitals cards, time-scrubber, and 1-hour uPlot history chart.
+  - Compact Health Ribbon: collapses cockpit on Lenses 2–9 into a sleek single-line summary (TPS, active conns, cache hit %, locks), freeing 100% viewport height for data tables with sticky headers.
+- **Slide-Over Inspector Drawer (`InspectorDrawer`)**:
+  - Replaces disruptive inline accordion row expansions with a smooth slide-over inspection drawer on the right.
+  - Dedicated drawer views for Sessions (properties, normalized SQL with syntax highlighting and copy), Blocking Chains (visual wait-for tree with root blocker and cycle detection), Schema Tables (columns, constraints, indexes, size breakdown), Replication Slots (lag, safe sizes, LSNs), and Statements.
+- **Quick Command Palette (`Cmd+K` / `Ctrl+K`)**:
+  - Global search and action runner: jump across all 9 lenses, switch databases, switch servers, toggle pause/recording, export JSON snapshots, and change themes.
+- **Full 9-Lens Parity in Web UI**:
+  - Complete parity across all 9 lenses: Macro (1), Live Activity (2), Blocks & Locks (3), Replication (4), Schema & Bloat (5), Indexes (6), Queries (7), Progress (8), and Records & Incident Replay (9).
+- **Modular CSS Design System**:
+  - Decomposed monolithic CSS into clean tokenized modules (`tokens.css`, `layout.css`, `components.css`, `drawer.css`, `palette.css`, `lenses.css`).
+
 ## [0.20.1] — 2026-09-08 — "Hotfix: PostgreSQL 16 Replication Slots Compatibility"
 
 ### Fixed

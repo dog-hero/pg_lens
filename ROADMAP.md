@@ -311,6 +311,12 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.21.0** — "Web Modernization, 9-Lens Parity & Runtime Cluster Switching":
+  - **Runtime Server / Cluster Switching**: dynamic runtime server switching (`services.toml`) in TUI (`C` server picker modal) and Web UI (`#server-target-group`, `GET /api/servers`, `POST /api/server/switch`, Command Palette "Servers" category) with safe cancellation, state reset, and immediate zero-backoff reconnect.
+  - **Web Dashboard Modernization**: vertical space overhaul with dedicated Macro Lens (Lens 1) cockpit, compact single-line health ribbon on Lenses 2–9, and 100% viewport height for sticky data tables.
+  - **Slide-Over Inspector Drawer**: smooth slide-over drawer replacing accordion rows with dedicated panels for Sessions, Blocking Chains, Schema Tables, Replication Slots, and Statements.
+  - **Quick Command Palette**: `Cmd+K` / `Ctrl+K` global palette for fuzzy navigation across lenses, databases, servers, and incident actions.
+  - **Full 9-Lens Parity & Modular CSS**: all 9 lenses in Web UI matching TUI capabilities, powered by a clean tokenized CSS architecture.
 - **v0.20.1** — "Hotfix: PostgreSQL 16 Replication Slots Compatibility":
   - **Replication Slots Version Gate**: fixed `s.invalidated` column reference for PostgreSQL 16 by bumping the `invalidated` column gate to PG 17+ (`replication_slots_post_170000.sql`). PostgreSQL 16 now seamlessly falls back to the clean query with `NULL::text AS invalidated`.
 - **v0.20.0** — "Logical & Physical Replication Deep-Dive: Dedicated Publications, Enriched Subscriptions & Slots":
