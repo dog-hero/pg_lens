@@ -135,6 +135,9 @@ pub struct ServerVitals {
     /// `current_database()` — the database this connection observes. The
     /// Schema Lens (per-database by construction) names it in its footer.
     pub database: String,
+    /// Configured service / server name from `services.toml`, if connected via one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
     pub uptime_secs: u64,
     pub connections_total: u32,
     pub max_connections: u32,
@@ -2435,6 +2438,7 @@ impl DbSnapshot {
         let vitals = ServerVitals {
             server_version: "16.3 (mock)".to_string(),
             database: "shop".to_string(),
+            server_name: Some("shop (mock)".to_string()),
             uptime_secs: 3 * 86_400 + 4 * 3_600 + 27 * 60 + seq * 2,
             connections_total,
             max_connections: 100,
@@ -3210,6 +3214,7 @@ impl DbSnapshot {
             vitals: ServerVitals {
                 server_version: "?".to_string(),
                 database: "?".to_string(),
+                server_name: None,
                 uptime_secs: 0,
                 connections_total: 0,
                 max_connections: 0,

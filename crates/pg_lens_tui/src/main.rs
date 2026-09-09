@@ -34,7 +34,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use pg_lens_core::{AdminCommand, TableDetailRequest};
+use pg_lens_core::{AdminCommand, ServerSwitchTarget, TableDetailRequest};
 
 use crate::app::{Action, App, PickerEntry, PickerState, update};
 
@@ -764,12 +764,14 @@ fn picker_entries(services: Vec<ServiceSummary>) -> Vec<PickerEntry> {
 #[allow(clippy::too_many_arguments)] // one call site's worth of poller wiring
 fn spawn_poller(
     conn: Option<Resolved>,
+    service_name: Option<String>,
     interval_rx: watch::Receiver<Duration>,
     schema_interval: Duration,
     schema_refresh_rx: watch::Receiver<u64>,
     admin_rx: mpsc::Receiver<AdminCommand>,
     shutdown_rx: watch::Receiver<bool>,
     db_switch_rx: mpsc::Receiver<String>,
+    server_switch_rx: mpsc::Receiver<ServerSwitchTarget>,
     schema_table_limit: usize,
     detail_rx: mpsc::Receiver<TableDetailRequest>,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, String, JoinHandle<()>) {
@@ -791,17 +793,12 @@ fn spawn_poller(
             // host and user, never the password. When the resolution came
             // with a password_cmd, the poller re-runs it per (re)connection.
             let label = resolved.label.to_string();
-            // `pg_lens_core` never reads env/XDG itself, so the per-database
-            // history path is computed HERE and injected as a closure the
-            // poller can re-call on a database switch (U2) — `None` uses the
-            // base config's own dbname (the classic, pre-U2 path), `Some(db)`
-            // overrides it with the newly picked database.
-            let base_config = resolved.config.clone();
             let history_path_fn: pg_lens_core::poller::HistoryPathFn =
-                Arc::new(move |db: Option<&str>| history_file_path(&base_config, db));
+                Arc::new(|config: &pg_lens_core::tokio_postgres::Config, db: Option<&str>| history_file_path(config, db));
             let (snapshots, handle) = pg_lens_core::poller::spawn(
                 resolved.config,
                 resolved.password_source,
+                service_name,
                 interval_rx,
                 schema_interval,
                 schema_refresh_rx,
@@ -809,6 +806,7 @@ fn spawn_poller(
                 Some(history_path_fn),
                 shutdown_rx,
                 db_switch_rx,
+                server_switch_rx,
                 schema_table_limit,
                 detail_rx,
             );
@@ -1206,27 +1204,49 @@ async fn run_serve(mut conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()
     // resets its per-database state exactly as it does for the TUI. Kept
     // alive (not dropped) so the router's `wait_db_switch` branch can resolve.
     let (db_switch_tx, db_switch_rx) = mpsc::channel::<String>(4);
+    let (server_switch_tx, server_switch_rx) = mpsc::channel::<ServerSwitchTarget>(4);
     // v0.15 web parity: `POST /api/schema/detail` (the web twin of the TUI's
     // Enter on a Schema Lens table) sends here.
     let (detail_tx, detail_rx) = mpsc::channel::<TableDetailRequest>(4);
+    let service_name = conn.service.clone();
     let (snapshots, label, poller_handle) = spawn_poller(
         resolved,
+        service_name,
         interval_rx,
         conn.schema_interval(&config),
         schema_refresh_rx,
         admin_rx,
         shutdown_rx,
         db_switch_rx,
+        server_switch_rx,
         conn.schema_table_limit(&config),
         detail_rx,
     );
 
     let read_only = conn.read_only(&config);
+    let spec_for_services = conn.spec_with(overlay.as_ref());
+    let spec_for_resolver = spec_for_services.clone();
+    let services_provider: pg_lens_web::ServicesProvider = Arc::new(move || {
+        let (services, _warnings) = settings::list_services(&spec_for_services).unwrap_or_default();
+        (services, None)
+    });
+    let server_resolver: pg_lens_web::ServerResolver = Arc::new(move |name: &str| {
+        let res = settings::resolve_service(&spec_for_resolver, name).map_err(|e| e.to_string())?;
+        Ok(ServerSwitchTarget {
+            config: res.config,
+            password_source: res.password_source,
+            label: res.label.to_string(),
+            service_name: name.to_string(),
+        })
+    });
     let router = pg_lens_web::router(
         snapshots,
         schema_refresh_tx,
         admin_tx,
         db_switch_tx,
+        server_switch_tx,
+        services_provider,
+        server_resolver,
         detail_tx,
         token,
         read_only,
@@ -1284,6 +1304,9 @@ async fn run(
     app.record_max_total_bytes = conn_args.record_max_total_bytes(config);
     app.record_retention_days = conn_args.record_retention_days(config);
     app.prune_records();
+    let (available_servers, _) =
+        settings::list_services(&conn_args.spec_with(remote_services.as_ref())).unwrap_or_default();
+    app.available_servers = available_servers;
 
     let (tx, mut actions) = mpsc::channel::<Action>(64);
     // `mut`/kept (not detached like the bridge tasks below): `!` (v0.11)
@@ -1316,6 +1339,7 @@ async fn run(
     // databases in-session). `--mock` never sends here (see
     // `app::handle_db_picker_key`'s toast).
     let (db_switch_tx, db_switch_rx) = mpsc::channel::<String>(4);
+    let (server_switch_tx, server_switch_rx) = mpsc::channel::<ServerSwitchTarget>(4);
     // v0.15's on-demand table detail (`\d` overlay): Enter on a Schema Lens
     // table queues at most one pending request in `app.table_detail_request`
     // (mirroring `pending_db_switch`); the loop below forwards it here, and
@@ -1339,6 +1363,7 @@ async fn run(
         mpsc::Receiver<AdminCommand>,
         watch::Receiver<bool>,
         mpsc::Receiver<String>,
+        mpsc::Receiver<ServerSwitchTarget>,
         mpsc::Receiver<TableDetailRequest>,
     )> = None;
     match startup {
@@ -1348,14 +1373,17 @@ async fn run(
             if let Some(resolved) = conn.as_ref() {
                 psql_target = Some(PsqlTarget::from_resolved(resolved));
             }
+            let service_name = conn_args.service.clone();
             let (snapshots, label, handle) = spawn_poller(
                 *conn,
+                service_name,
                 interval_rx,
                 schema_interval,
                 schema_refresh_rx,
                 admin_rx,
                 shutdown_rx,
                 db_switch_rx,
+                server_switch_rx,
                 schema_table_limit,
                 detail_rx,
             );
@@ -1376,6 +1404,7 @@ async fn run(
                 admin_rx,
                 shutdown_rx,
                 db_switch_rx,
+                server_switch_rx,
                 detail_rx,
             ));
         }
@@ -1429,6 +1458,43 @@ async fn run(
             // just means the poller is gone — the loop is about to end).
             app.pending_db_switch = Some(name);
         }
+        if let Some(service_name) = app.pending_server_switch.take() {
+            let mut spec = conn_args.spec_with(remote_services.as_ref());
+            spec.dsn = None;
+            match settings::resolve_service(&spec, &service_name) {
+                Ok(resolved) => {
+                    let label = resolved.label.to_string();
+                    let target = ServerSwitchTarget {
+                        config: resolved.config.clone(),
+                        password_source: resolved.password_source.clone(),
+                        label: label.clone(),
+                        service_name: service_name.clone(),
+                    };
+                    if server_switch_tx.try_send(target).is_ok() {
+                        psql_target = Some(PsqlTarget::from_resolved(&resolved));
+                        update(&mut app, Action::HostLabel(label));
+                        app.admin_feedback = Some(app::AdminFeedback {
+                            text: format!("switching to server '{service_name}'\u{2026}"),
+                            error: false,
+                            expires_at_tick: app.tick_count + app::ADMIN_FEEDBACK_TICKS,
+                        });
+                    } else {
+                        app.admin_feedback = Some(app::AdminFeedback {
+                            text: "server switch failed: poller busy".to_string(),
+                            error: true,
+                            expires_at_tick: app.tick_count + app::ADMIN_FEEDBACK_TICKS,
+                        });
+                    }
+                }
+                Err(err) => {
+                    app.admin_feedback = Some(app::AdminFeedback {
+                        text: format!("failed to resolve server: {err}"),
+                        error: true,
+                        expires_at_tick: app.tick_count + app::ADMIN_FEEDBACK_TICKS,
+                    });
+                }
+            }
+        }
         // v0.15: Enter on a Schema Lens table queues at most one pending
         // detail request (mirroring `pending_db_switch` immediately above).
         if let Some(req) = app.table_detail_request.take()
@@ -1457,8 +1523,15 @@ async fn run(
         // Connection failures are NOT errors here: they surface as
         // `PollerStatus::Error` on the splash, retrying with backoff.
         if let Some(entry) = app.picked.clone()
-            && let Some((interval_rx, schema_refresh_rx, admin_rx, shutdown_rx, db_switch_rx, detail_rx)) =
-                parked_rx.take()
+            && let Some((
+                interval_rx,
+                schema_refresh_rx,
+                admin_rx,
+                shutdown_rx,
+                db_switch_rx,
+                server_switch_rx,
+                detail_rx,
+            )) = parked_rx.take()
         {
             // Re-resolve with the chosen service (or none, for the default
             // entry). The file was readable moments ago at trigger time; if
@@ -1472,14 +1545,17 @@ async fn run(
             // Same capture as `Startup::Connect`, just on the delayed path —
             // computed before `resolved` moves into `spawn_poller` below.
             psql_target = Some(PsqlTarget::from_resolved(&resolved));
+            let service_name = entry.service.clone();
             let (snapshots, label, handle) = spawn_poller(
                 Some(resolved),
+                service_name,
                 interval_rx,
                 schema_interval,
                 schema_refresh_rx,
                 admin_rx,
                 shutdown_rx,
                 db_switch_rx,
+                server_switch_rx,
                 schema_table_limit,
                 detail_rx,
             );
@@ -2169,12 +2245,16 @@ mod tests {
             ServiceSummary {
                 name: "prod".to_string(),
                 host: Some("db.prod.internal".to_string()),
+                port: Some(5432),
                 user: Some("svc_ro".to_string()),
+                dbname: Some("app".to_string()),
             },
             ServiceSummary {
                 name: "dead".to_string(),
                 host: Some("dead.invalid".to_string()),
+                port: None,
                 user: None,
+                dbname: None,
             },
         ]
     }

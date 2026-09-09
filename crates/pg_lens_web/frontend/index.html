@@ -107,6 +107,12 @@
         <ellipse cx="12" cy="5.5" rx="7" ry="2.6" fill="none" stroke="currentColor" stroke-width="2" />
         <path d="M5 5.5V18.5C5 20 8.1 21 12 21C15.9 21 19 20 19 18.5V5.5" fill="none" stroke="currentColor" stroke-width="2" />
       </symbol>
+      <symbol id="icon-server" viewBox="0 0 24 24">
+        <rect x="2" y="3" width="20" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+        <rect x="2" y="13" width="20" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="2" />
+        <line x1="6" y1="7" x2="6.01" y2="7" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        <line x1="6" y1="17" x2="6.01" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </symbol>
       <symbol id="icon-dot" viewBox="0 0 24 24">
         <circle cx="12" cy="12" r="6" fill="currentColor" />
       </symbol>
@@ -146,6 +152,17 @@
         <div class="topbar-brand" id="brand-link" title="Jump to Overview (1)">
           <svg class="icon brand-mark" aria-hidden="true"><use href="#icon-lens"></use></svg>
           <span class="brand">pg_lens</span>
+        </div>
+        <div class="topbar-target topbar-server" id="server-target-group" hidden>
+          <svg class="icon" aria-hidden="true"><use href="#icon-server"></use></svg>
+          <span id="current-server" class="current-server"></span>
+          <select
+            id="server-switcher"
+            class="server-switcher db-switcher"
+            hidden
+            title="Switch server / cluster (reconnects to a different service from services.toml)"
+          ></select>
+          <span id="server-switch-status" class="server-switch-status db-switch-status" hidden></span>
         </div>
         <div class="topbar-target">
           <svg class="icon" aria-hidden="true"><use href="#icon-database"></use></svg>

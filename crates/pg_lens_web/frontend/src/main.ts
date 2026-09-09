@@ -5,13 +5,17 @@ import "./style.css";
 import type { AdminActionResult, ActivityRow, DatabaseRow, DbSnapshot, PollerStatus } from "./types.ts";
 import {
   fetchConfig,
+  fetchServers,
   requestAdmin,
   requestDbSwitch,
   requestSchemaRefresh,
+  requestServerSwitch,
   requestTableDetail,
   type AdminKind,
+  type ServiceSummary,
 } from "./actions.ts";
 import { populateDbSwitcher } from "./db_switcher.ts";
+import { populateServerSwitcher } from "./server_switcher.ts";
 import { MacroLens } from "./macro.ts";
 import { ActivityTable, type StateFilter } from "./table.ts";
 import { SchemaLens } from "./schema.ts";
@@ -56,6 +60,10 @@ function el<T extends HTMLElement>(id: string): T {
 }
 
 const serverInfo = el<HTMLSpanElement>("server-info");
+const serverTargetGroup = el<HTMLDivElement>("server-target-group");
+const currentServer = el<HTMLSpanElement>("current-server");
+const serverSwitcher = el<HTMLSelectElement>("server-switcher");
+const serverSwitchStatus = el<HTMLSpanElement>("server-switch-status");
 const currentDb = el<HTMLSpanElement>("current-db");
 const dbSwitcher = el<HTMLSelectElement>("db-switcher");
 const dbSwitchStatus = el<HTMLSpanElement>("db-switch-status");
@@ -95,6 +103,9 @@ const ribbonXact = el<HTMLElement>("ribbon-xact");
 let activeToken: string | null = null;
 let readOnly = false;
 let toastTimer: number | undefined;
+let availableServers: ServiceSummary[] = [];
+let activeServerName: string | null = null;
+let switchingServer = false;
 
 function showToast(message: string, isError = false): void {
   toast.textContent = message;
@@ -299,6 +310,23 @@ function updatePaletteActions(databases: DatabaseRow[] | null): void {
     { id: "nav-progress", group: "Lenses", label: "Progress (DDL / Maintenance)", shortcut: "8", iconId: "icon-progress", run: () => selectTab("tab-progress") },
     { id: "nav-records", group: "Lenses", label: "Records & Incident Replay", shortcut: "9", iconId: "icon-records", run: () => selectTab("tab-records") },
   ];
+
+  // Servers
+  if (availableServers && availableServers.length > 0) {
+    for (const s of availableServers) {
+      const host = s.host ?? "localhost";
+      const port = s.port ?? 5432;
+      const user = s.user ?? "-";
+      actions.push({
+        id: `server-${s.name}`,
+        group: "Servers",
+        label: `Switch server: ${s.name}`,
+        detail: `${user}@${host}:${port}`,
+        iconId: "icon-server",
+        run: () => void onServerSwitch(s.name),
+      });
+    }
+  }
 
   // Databases
   if (databases && databases.length > 0) {
@@ -611,6 +639,14 @@ function renderSnapshot(snapshot: DbSnapshot): void {
   serverInfo.textContent = `PG ${v.server_version} · ${v.connections_total}/${v.max_connections} conns`;
   currentDb.textContent = v.database;
 
+  if (v.server_name && v.server_name !== activeServerName) {
+    activeServerName = v.server_name;
+    currentServer.textContent = activeServerName;
+    if (!switchingServer) {
+      serverSwitcher.value = activeServerName;
+    }
+  }
+
   if (!switching) {
     populateDbSwitcher(dbSwitcher, snapshot.databases, v.database);
   }
@@ -633,6 +669,51 @@ async function onDbSwitch(database: string): Promise<void> {
   if (!ok) {
     showToast(`Failed to switch to ${database}`, true);
   }
+}
+
+serverSwitcher.addEventListener("change", () => void onServerSwitch(serverSwitcher.value));
+
+async function onServerSwitch(server: string): Promise<void> {
+  if (switchingServer) return;
+  switchingServer = true;
+  serverSwitcher.disabled = true;
+  serverSwitchStatus.hidden = false;
+  serverSwitchStatus.textContent = "switching…";
+  const ok = await requestServerSwitch(activeToken, server);
+  serverSwitcher.disabled = false;
+  serverSwitchStatus.hidden = true;
+  switchingServer = false;
+  if (!ok) {
+    showToast(`Failed to switch to server ${server}`, true);
+    if (activeServerName) {
+      serverSwitcher.value = activeServerName;
+    }
+  } else {
+    activeServerName = server;
+    currentServer.textContent = server;
+    showToast(`Switched server to ${server}`);
+    void refreshServers();
+  }
+}
+
+async function refreshServers(): Promise<void> {
+  const resp = await fetchServers(activeToken);
+  if (!resp || resp.servers.length === 0) {
+    serverTargetGroup.hidden = true;
+    availableServers = [];
+    activeServerName = null;
+    return;
+  }
+  availableServers = resp.servers;
+  if (resp.current) {
+    activeServerName = resp.current;
+  }
+  serverTargetGroup.hidden = false;
+  currentServer.textContent = activeServerName ?? "server";
+  if (!switchingServer) {
+    populateServerSwitcher(serverSwitcher, availableServers, activeServerName);
+  }
+  updatePaletteActions(latestSnapshot?.databases ?? null);
 }
 
 function announceAdmin(result: AdminActionResult | null): void {
@@ -796,6 +877,7 @@ function connect(token: string | null): void {
     readOnlyBadge.hidden = !readOnly;
     table.refreshHead();
   });
+  void refreshServers();
   stream = openStream(token, {
     onSnapshot,
     onStateChange: setConnState,

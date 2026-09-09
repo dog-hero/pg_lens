@@ -3,7 +3,7 @@
 
 export interface PaletteAction {
   id: string;
-  group: "Lenses" | "Databases" | "Actions";
+  group: "Lenses" | "Servers" | "Databases" | "Actions";
   label: string;
   detail?: string;
   shortcut?: string;

@@ -101,6 +101,7 @@ code,
   color: var(--fg-dim);
 }
 
+.current-server,
 .current-db {
   color: var(--fg);
   font-weight: 700;

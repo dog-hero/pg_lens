@@ -42,16 +42,28 @@ use crate::schema_growth::{GROWTH_LOOKBACK_MS, SchemaGrowthTracker};
 use crate::services::{self, PasswordSource};
 use crate::{db, queries};
 
-/// Recomputes the on-disk history file path for a given database name (U2:
-/// the poller reconnects to a different `dbname`, and history is
-/// per-database — see `SessionEnd::SwitchDatabase`). `None` = derive the
-/// path from the base connection's own dbname (the classic, pre-U2
-/// behavior, computed the very first time a session starts); `Some(db)` = a
-/// switch just happened, so use `db` instead. Injected by the frontend
-/// rather than a plain path: `pg_lens_core` never reads `std::env`/XDG
-/// itself (see `main.rs::history_file_path`), and only the frontend knows
-/// how to derive a state directory.
-pub type HistoryPathFn = Arc<dyn Fn(Option<&str>) -> Option<PathBuf> + Send + Sync>;
+/// Recomputes the on-disk history file path for a given config and database name
+pub type HistoryPathFn =
+    Arc<dyn Fn(&tokio_postgres::Config, Option<&str>) -> Option<PathBuf> + Send + Sync>;
+
+/// Target for switching the connection to a different PostgreSQL server/cluster.
+#[derive(Clone)]
+pub struct ServerSwitchTarget {
+    pub config: tokio_postgres::Config,
+    pub password_source: Option<PasswordSource>,
+    pub label: String,
+    pub service_name: String,
+}
+
+impl std::fmt::Debug for ServerSwitchTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerSwitchTarget")
+            .field("label", &self.label)
+            .field("service_name", &self.service_name)
+            .field("has_password_source", &self.password_source.is_some())
+            .finish()
+    }
+}
 
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
@@ -529,6 +541,16 @@ async fn wait_db_switch(db_switch_rx: &mut mpsc::Receiver<String>) -> String {
     }
 }
 
+/// Resolves once the frontend requests a different server/cluster definition.
+async fn wait_server_switch(
+    server_switch_rx: &mut mpsc::Receiver<ServerSwitchTarget>,
+) -> ServerSwitchTarget {
+    match server_switch_rx.recv().await {
+        Some(target) => target,
+        None => std::future::pending().await,
+    }
+}
+
 /// Per-statement safety ceiling, applied as `SET LOCAL` at the start of every
 /// query transaction. A monitoring tool must never run an unbounded query
 /// against a production server: a pathological plan (e.g. the on-demand bloat
@@ -657,6 +679,7 @@ async fn execute_admin(client: &mut Client, q: &queries::QuerySet, cmd: AdminCom
 pub fn spawn(
     config: tokio_postgres::Config,
     password_source: Option<PasswordSource>,
+    service_name: Option<String>,
     interval_rx: watch::Receiver<Duration>,
     schema_interval: Duration,
     schema_refresh_rx: watch::Receiver<u64>,
@@ -664,6 +687,7 @@ pub fn spawn(
     history_path_fn: Option<HistoryPathFn>,
     shutdown_rx: watch::Receiver<bool>,
     db_switch_rx: mpsc::Receiver<String>,
+    server_switch_rx: mpsc::Receiver<ServerSwitchTarget>,
     schema_table_limit: usize,
     detail_rx: mpsc::Receiver<TableDetailRequest>,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, JoinHandle<()>) {
@@ -672,6 +696,7 @@ pub fn spawn(
     let handle = tokio::spawn(run(
         config,
         password_source,
+        service_name,
         interval_rx,
         schema,
         admin_rx,
@@ -679,6 +704,7 @@ pub fn spawn(
         history_path_fn,
         shutdown_rx,
         db_switch_rx,
+        server_switch_rx,
         detail_rx,
     ));
     (rx, handle)
@@ -688,7 +714,8 @@ pub fn spawn(
 #[allow(clippy::too_many_arguments)] // poller-internal plumbing, one call site
 async fn run(
     mut config: tokio_postgres::Config,
-    password_source: Option<PasswordSource>,
+    mut password_source: Option<PasswordSource>,
+    mut service_name: Option<String>,
     mut interval_rx: watch::Receiver<Duration>,
     mut schema: SchemaState,
     mut admin_rx: mpsc::Receiver<AdminCommand>,
@@ -696,6 +723,7 @@ async fn run(
     history_path_fn: Option<HistoryPathFn>,
     mut shutdown_rx: watch::Receiver<bool>,
     mut db_switch_rx: mpsc::Receiver<String>,
+    mut server_switch_rx: mpsc::Receiver<ServerSwitchTarget>,
     mut detail_rx: mpsc::Receiver<TableDetailRequest>,
 ) {
     let mut backoff = BACKOFF_INITIAL;
@@ -711,7 +739,7 @@ async fn run(
     // `Some(dbname)` instead (see `SessionEnd::SwitchDatabase` below).
     let mut store = history_path_fn
         .as_ref()
-        .and_then(|f| f(None))
+        .and_then(|f| f(&config, None))
         .map(HistoryStore::new);
     if let Some(store) = &store {
         for point in store.load(DEFAULT_CAP) {
@@ -741,6 +769,7 @@ async fn run(
         let end = session(
             &config,
             password_source.as_ref(),
+            service_name.as_deref(),
             &mut interval_rx,
             &tx,
             &mut history,
@@ -755,6 +784,7 @@ async fn run(
             &mut appends_since_compact,
             &mut shutdown_rx,
             &mut db_switch_rx,
+            &mut server_switch_rx,
             &mut detail_rx,
         )
         .await;
@@ -779,7 +809,28 @@ async fn run(
                 last_admin = None;
                 store = history_path_fn
                     .as_ref()
-                    .and_then(|f| f(Some(&name)))
+                    .and_then(|f| f(&config, Some(&name)))
+                    .map(HistoryStore::new);
+                if let Some(store) = &store {
+                    for point in store.load(DEFAULT_CAP) {
+                        history.push(point);
+                    }
+                }
+            }
+            SessionEnd::SwitchServer(target) => {
+                config = target.config;
+                password_source = target.password_source;
+                service_name = Some(target.service_name);
+                history = SnapshotHistory::default();
+                appends_since_compact = 0;
+                schema.reset();
+                statements = StatementsState::new();
+                io_stats = IoStatsState::new();
+                table_detail = TableDetailState::new();
+                last_admin = None;
+                store = history_path_fn
+                    .as_ref()
+                    .and_then(|f| f(&config, None))
                     .map(HistoryStore::new);
                 if let Some(store) = &store {
                     for point in store.load(DEFAULT_CAP) {
@@ -817,6 +868,9 @@ enum SessionEnd {
     /// U2: the frontend requested a different database — reconnect
     /// immediately (no backoff) with this dbname.
     SwitchDatabase(String),
+    /// The frontend requested a different server/cluster definition — reconnect
+    /// immediately (no backoff) with new target coordinates.
+    SwitchServer(Box<ServerSwitchTarget>),
 }
 
 /// One connection worth of polling; ensures the spawned `Connection` task is
@@ -829,6 +883,7 @@ enum SessionEnd {
 async fn session(
     config: &tokio_postgres::Config,
     password_source: Option<&PasswordSource>,
+    service_name: Option<&str>,
     interval_rx: &mut watch::Receiver<Duration>,
     tx: &watch::Sender<Arc<DbSnapshot>>,
     history: &mut SnapshotHistory,
@@ -843,6 +898,7 @@ async fn session(
     appends_since_compact: &mut usize,
     shutdown_rx: &mut watch::Receiver<bool>,
     db_switch_rx: &mut mpsc::Receiver<String>,
+    server_switch_rx: &mut mpsc::Receiver<ServerSwitchTarget>,
     detail_rx: &mut mpsc::Receiver<TableDetailRequest>,
 ) -> SessionEnd {
     // The base config is never mutated: the resolved password goes into a
@@ -881,8 +937,13 @@ async fn session(
             let _ = cancel.cancel_query(NoTls).await;
             SessionEnd::SwitchDatabase(name)
         }
+        target = wait_server_switch(server_switch_rx) => {
+            let _ = cancel.cancel_query(NoTls).await;
+            SessionEnd::SwitchServer(Box::new(target))
+        }
         end = poll_loop(
             &mut client,
+            service_name,
             interval_rx,
             tx,
             history,
@@ -905,6 +966,7 @@ async fn session(
 #[allow(clippy::too_many_arguments)] // poller-internal plumbing, one call site
 async fn poll_loop(
     client: &mut Client,
+    service_name: Option<&str>,
     interval_rx: &mut watch::Receiver<Duration>,
     tx: &watch::Sender<Arc<DbSnapshot>>,
     history: &mut SnapshotHistory,
@@ -1002,6 +1064,7 @@ async fn poll_loop(
         // The most recent admin result rides in every envelope from then
         // on; frontends dedupe on its `at_epoch_ms`.
         snapshot.last_admin_action = last_admin.clone();
+        snapshot.vitals.server_name = service_name.map(|s| s.to_string());
         *polled_ok = true;
         if tx.send(Arc::new(snapshot)).is_err() {
             return SessionEnd::Closed;
@@ -1690,6 +1753,7 @@ async fn poll_once(
     let vitals = ServerVitals {
         server_version: info.server_version,
         database: info.database,
+        server_name: None,
         uptime_secs: info.uptime_secs.max(0.0) as u64,
         connections_total: info.connections_total.max(0) as u32,
         max_connections: info.max_connections.max(0) as u32,
@@ -2642,6 +2706,13 @@ mod tests {
         rx
     }
 
+    /// A server-switch channel whose sender stays alive (leaked).
+    fn server_switch_rx() -> mpsc::Receiver<ServerSwitchTarget> {
+        let (tx, rx) = mpsc::channel(4);
+        std::mem::forget(tx);
+        rx
+    }
+
     fn spawn_mock_default(ms: u64) -> watch::Receiver<Arc<DbSnapshot>> {
         spawn_mock(interval_rx(ms), refresh_rx(), admin_rx(), detail_rx())
     }
@@ -2739,6 +2810,7 @@ mod tests {
         let (mut rx, _h) = spawn(
             config,
             None,
+            None,
             interval_rx(50),
             SCHEMA_INTERVAL_DEFAULT,
             refresh_rx(),
@@ -2746,6 +2818,7 @@ mod tests {
             None,
             no_shutdown(),
             db_switch_rx(),
+            server_switch_rx(),
             queries::SCHEMA_TABLE_LIMIT_DEFAULT,
             detail_rx(),
         );
@@ -2779,6 +2852,7 @@ mod tests {
         let (mut rx, _h) = spawn(
             config,
             Some(source),
+            None,
             interval_rx(50),
             SCHEMA_INTERVAL_DEFAULT,
             refresh_rx(),
@@ -2786,6 +2860,7 @@ mod tests {
             None,
             no_shutdown(),
             db_switch_rx(),
+            server_switch_rx(),
             queries::SCHEMA_TABLE_LIMIT_DEFAULT,
             detail_rx(),
         );
@@ -2825,6 +2900,7 @@ mod tests {
         let (_rx, _h) = spawn(
             config,
             Some(PasswordSource::Command(cmd)),
+            None,
             interval_rx(50),
             SCHEMA_INTERVAL_DEFAULT,
             refresh_rx(),
@@ -2832,6 +2908,7 @@ mod tests {
             None,
             no_shutdown(),
             db_switch_rx(),
+            server_switch_rx(),
             queries::SCHEMA_TABLE_LIMIT_DEFAULT,
             detail_rx(),
         );
@@ -2881,6 +2958,32 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<String>(1);
         drop(tx);
         let outcome = tokio::time::timeout(Duration::from_millis(50), wait_db_switch(&mut rx)).await;
+        assert!(outcome.is_err(), "must stay pending, not resolve");
+    }
+
+    // --- Server switch channel -----------------------------------------------
+
+    #[tokio::test]
+    async fn wait_server_switch_resolves_with_target() {
+        let (tx, mut rx) = mpsc::channel::<ServerSwitchTarget>(1);
+        let target = ServerSwitchTarget {
+            config: "host=127.0.0.1 user=test".parse().unwrap(),
+            password_source: None,
+            label: "test@127.0.0.1".to_string(),
+            service_name: "staging".to_string(),
+        };
+        tx.send(target.clone()).await.expect("receiver alive");
+        let received = wait_server_switch(&mut rx).await;
+        assert_eq!(received.service_name, "staging");
+        assert_eq!(received.label, "test@127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn wait_server_switch_never_resolves_after_the_sender_drops() {
+        let (tx, mut rx) = mpsc::channel::<ServerSwitchTarget>(1);
+        drop(tx);
+        let outcome =
+            tokio::time::timeout(Duration::from_millis(50), wait_server_switch(&mut rx)).await;
         assert!(outcome.is_err(), "must stay pending, not resolve");
     }
 
