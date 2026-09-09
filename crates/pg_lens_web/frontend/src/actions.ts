@@ -59,6 +59,44 @@ export async function requestDbSwitch(token: string | null, database: string): P
   }
 }
 
+export interface ServiceSummary {
+  name: string;
+  host: string | null;
+  port: number | null;
+  user: string | null;
+  dbname: string | null;
+}
+
+export interface ServersResponse {
+  current: string | null;
+  servers: ServiceSummary[];
+}
+
+/** GET /api/servers — lists available services and the current service name. */
+export async function fetchServers(token: string | null): Promise<ServersResponse | null> {
+  try {
+    const res = await fetch("/api/servers", { headers: authHeaders(token) });
+    if (!res.ok) return null;
+    return (await res.json()) as ServersResponse;
+  } catch {
+    return null;
+  }
+}
+
+/** POST /api/server/switch — switches the connection to a different server/cluster. */
+export async function requestServerSwitch(token: string | null, server: string): Promise<boolean> {
+  try {
+    const res = await fetch("/api/server/switch", {
+      method: "POST",
+      headers: { ...authHeaders(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ server }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * POST /api/schema/detail — web parity for the TUI's Enter-on-a-table `\d`
  * overlay (v0.15). Like `requestDbSwitch`, this is a read against catalog

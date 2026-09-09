@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tokio_postgres::Config;
 use tokio_postgres::config::Host;
 
@@ -626,11 +627,13 @@ pub fn resolve(spec: &ConnSpec) -> Result<Resolved, SettingsError> {
 }
 
 /// One row of `--list-services` output: never a password or `password_cmd`.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceSummary {
     pub name: String,
     pub host: Option<String>,
+    pub port: Option<u16>,
     pub user: Option<String>,
+    pub dbname: Option<String>,
 }
 
 /// Loads the services file selected by `spec` and returns display-safe
@@ -645,7 +648,9 @@ pub fn list_services(spec: &ConnSpec) -> Result<(Vec<ServiceSummary>, Vec<String
             .map(|(name, entry)| ServiceSummary {
                 name: name.to_string(),
                 host: entry.host.clone(),
+                port: entry.port,
                 user: entry.user.clone(),
+                dbname: entry.dbname.clone(),
             })
             .collect();
         return Ok((summaries, Vec::new()));
@@ -664,10 +669,20 @@ pub fn list_services(spec: &ConnSpec) -> Result<(Vec<ServiceSummary>, Vec<String
         .map(|(name, entry)| ServiceSummary {
             name: name.to_string(),
             host: entry.host.clone(),
+            port: entry.port,
             user: entry.user.clone(),
+            dbname: entry.dbname.clone(),
         })
         .collect();
     Ok((summaries, warnings))
+}
+
+/// Resolves a specific named service from `spec`, overriding `spec.service` with `service_name`.
+pub fn resolve_service(spec: &ConnSpec, service_name: &str) -> Result<Resolved, SettingsError> {
+    let mut modified_spec = spec.clone();
+    modified_spec.service = Some(service_name.to_string());
+    modified_spec.dsn = None;
+    resolve(&modified_spec)
 }
 
 #[cfg(test)]

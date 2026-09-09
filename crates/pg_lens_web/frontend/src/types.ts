@@ -6,6 +6,8 @@ export interface ServerVitals {
   server_version: string;
   /** Database the DSN connected to — the Schema Lens is per-database. */
   database: string;
+  /** Configured service / server name from services.toml, if connected via one. */
+  server_name?: string | null;
   uptime_secs: number;
   connections_total: number;
   max_connections: number;

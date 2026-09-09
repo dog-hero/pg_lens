@@ -22,4 +22,23 @@ fn main() {
     }
     // Re-embed when the bundle changes; re-run this check if dist vanishes.
     println!("cargo:rerun-if-changed=frontend/dist");
+    println!("cargo:rerun-if-changed=frontend/src");
+    println!("cargo:rerun-if-changed=frontend/index.html");
+
+    // Warn if source files are newer than the compiled dist bundle.
+    if let Ok(dist_meta) = dist_index.metadata() {
+        if let Ok(dist_time) = dist_meta.modified() {
+            let src_index = Path::new(&manifest_dir).join("frontend/index.html");
+            if let Ok(src_meta) = src_index.metadata() {
+                if let Ok(src_time) = src_meta.modified() {
+                    if src_time > dist_time {
+                        println!(
+                            "cargo:warning=pg_lens_web: frontend source is newer than frontend/dist/. \
+                             Run 'cd crates/pg_lens_web/frontend && npm run build' to bundle the latest web assets."
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

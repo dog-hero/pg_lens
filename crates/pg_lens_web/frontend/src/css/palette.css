@@ -1,0 +1,145 @@
+/* pg_lens — command palette (Cmd+K) */
+
+#palette-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+  z-index: 200;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 14vh;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition-fast);
+}
+
+#palette-backdrop.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#command-palette {
+  width: 580px;
+  max-width: 90vw;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(-8px);
+  transition: transform var(--transition-fast);
+}
+
+#palette-backdrop.active #command-palette {
+  transform: translateY(0);
+}
+
+.palette-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+.palette-search-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--fg-dim);
+}
+
+.palette-input {
+  flex: 1;
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 1rem;
+  color: var(--fg);
+  outline: none;
+}
+
+.palette-input::placeholder {
+  color: var(--fg-dim);
+}
+
+.palette-list {
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.palette-group-title {
+  padding: 6px 12px 2px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+}
+
+.palette-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: var(--radius-md);
+  color: var(--fg);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition-fast);
+}
+
+.palette-item:hover,
+.palette-item.active {
+  background: var(--info-bg);
+  color: var(--accent);
+}
+
+.palette-item-icon {
+  width: 16px;
+  height: 16px;
+  color: inherit;
+}
+
+.palette-item-label {
+  flex: 1;
+  font-size: 0.88rem;
+  font-weight: 500;
+}
+
+.palette-item-shortcut {
+  font-size: 0.76rem;
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+}
+
+.palette-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 0.88rem;
+}
+
+.palette-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-raised);
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+}
+
+.palette-hints {
+  display: flex;
+  gap: 12px;
+}

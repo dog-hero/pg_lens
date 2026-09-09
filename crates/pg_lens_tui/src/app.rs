@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use pg_lens_core::settings::ServiceSummary;
 use pg_lens_core::{
     AdminCommand, AdminKind, AdminOutcome, DbSnapshot, PollerStatus, TableDetailRequest,
 };
@@ -521,6 +522,25 @@ impl DbPickerState {
     }
 }
 
+/// In-session server / cluster picker (`C`) state.
+#[derive(Clone, Debug)]
+pub struct ServerPickerState {
+    /// Available servers from services.toml.
+    pub entries: Vec<ServiceSummary>,
+    /// Index into `entries`; j/k/↑/↓ move it, saturating at both ends.
+    pub selected: usize,
+}
+
+impl ServerPickerState {
+    /// Starts the cursor on the currently active server/cluster if known.
+    pub fn new(entries: Vec<ServiceSummary>, current_server: Option<&str>) -> Self {
+        let selected = current_server
+            .and_then(|curr| entries.iter().position(|e| e.name == curr))
+            .unwrap_or(0);
+        Self { entries, selected }
+    }
+}
+
 /// State of the admin confirmation modal (`c` = cancel query, `K` =
 /// terminate backend, Micro Lens only). While `App::confirm` is `Some`,
 /// every key except `y` (confirm) and `n`/`Esc` (abort) is inert.
@@ -738,6 +758,12 @@ pub struct App {
     /// `schema_refresh_requests`/`pending_admin`). `None` once forwarded, or
     /// whenever there is nothing to switch to.
     pub pending_db_switch: Option<String>,
+    /// `Some` while the in-session server / cluster picker is on screen (`C`, any lens).
+    pub server_picker: Option<ServerPickerState>,
+    /// Available servers from services.toml known to the app.
+    pub available_servers: Vec<ServiceSummary>,
+    /// The server / service name picked by Enter in `server_picker`, queued for the main loop.
+    pub pending_server_switch: Option<String>,
     /// Set once by `main.rs` at startup (`--mock`); read by
     /// `handle_db_picker_key` to show the "not simulated" toast instead of
     /// queuing a real switch that no mock poller would ever act on.
@@ -903,6 +929,9 @@ impl App {
             confirm: None,
             db_picker: None,
             pending_db_switch: None,
+            server_picker: None,
+            available_servers: Vec::new(),
+            pending_server_switch: None,
             is_mock: false,
             read_only: false,
             pending_admin: Vec::new(),
@@ -1511,6 +1540,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         handle_db_picker_key(app, key);
         return;
     }
+    // In-session server / cluster picker (`C`): j/k move, Enter selects, Esc closes.
+    if app.server_picker.is_some() {
+        handle_server_picker_key(app, key);
+        return;
+    }
     // Filter editing (`/`): printable keys edit the ACTIVE lens's filter
     // live, so its table narrows as you type; Enter commits, Esc reverts.
     if active_filter_lens(app).is_some() {
@@ -1948,6 +1982,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
             });
         }
+        // `C` opens the server / cluster picker from ANY lens.
+        KeyCode::Char('C') => open_server_picker(app),
         // `d` opens the database picker (U2) from ANY lens — reconnecting is
         // a cluster-wide, not a per-lens, action.
         KeyCode::Char('d') => open_db_picker(app),
@@ -2390,6 +2426,73 @@ fn handle_db_picker_key(app: &mut App, key: KeyEvent) {
         _ => {}
     }
 }
+
+/// Opens the in-session server / cluster picker (`C`).
+fn open_server_picker(app: &mut App) {
+    if app.replay_state.is_some() {
+        app.admin_feedback = Some(AdminFeedback {
+            text: "replay mode: cannot switch server".to_string(),
+            error: false,
+            expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+        });
+        return;
+    }
+    if app.available_servers.is_empty() {
+        app.admin_feedback = Some(AdminFeedback {
+            text: "no servers configured in services.toml".to_string(),
+            error: false,
+            expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+        });
+        return;
+    }
+    app.server_picker = Some(ServerPickerState::new(
+        app.available_servers.clone(),
+        app.snapshot.vitals.server_name.as_deref(),
+    ));
+}
+
+/// Keymap of the in-session server / cluster picker: j/k/↑/↓ move (saturating),
+/// Enter selects, Esc closes.
+fn handle_server_picker_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.server_picker = None,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(picker) = app.server_picker.as_mut() {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(picker) = app.server_picker.as_mut()
+                && !picker.entries.is_empty()
+            {
+                picker.selected = (picker.selected + 1).min(picker.entries.len() - 1);
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(picker) = app.server_picker.take()
+                && let Some(entry) = picker.entries.get(picker.selected)
+            {
+                let name = entry.name.clone();
+                if app.snapshot.vitals.server_name.as_deref() == Some(&name) {
+                    // Already connected here: nothing to do.
+                } else if app.is_mock {
+                    app.admin_feedback = Some(AdminFeedback {
+                        text: "mock mode: server switch not simulated".to_string(),
+                        error: false,
+                        expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
+                    });
+                } else {
+                    app.pending_server_switch = Some(name);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 
 /// Keymap of the keyboard help overlay (`?`): `Esc` or `?` again closes it
 /// WITHOUT arming the top-level quit barrier — the same overlay-dismissal
@@ -5271,6 +5374,60 @@ mod tests {
         let feedback = app.admin_feedback.as_ref().expect("toast shown");
         assert!(feedback.text.contains("mock mode"), "{}", feedback.text);
         assert!(!feedback.error);
+    }
+
+    // --- in-session server / cluster picker -----------------------------------
+
+    #[test]
+    fn c_opens_the_server_picker_when_servers_available() {
+        let mut app = App::new();
+        app.available_servers = vec![
+            ServiceSummary {
+                name: "prod".to_string(),
+                host: Some("127.0.0.1".to_string()),
+                port: Some(5432),
+                user: Some("postgres".to_string()),
+                dbname: Some("app".to_string()),
+            },
+            ServiceSummary {
+                name: "staging".to_string(),
+                host: Some("127.0.0.1".to_string()),
+                port: Some(5433),
+                user: Some("postgres".to_string()),
+                dbname: Some("staging".to_string()),
+            },
+        ];
+        update(&mut app, press(KeyCode::Char('C')));
+        let picker = app.server_picker.as_ref().expect("server picker opened");
+        assert_eq!(picker.entries.len(), 2);
+        assert_eq!(picker.selected, 0);
+
+        // j / k navigation
+        update(&mut app, press(KeyCode::Char('j')));
+        assert_eq!(app.server_picker.as_ref().unwrap().selected, 1);
+        update(&mut app, press(KeyCode::Char('k')));
+        assert_eq!(app.server_picker.as_ref().unwrap().selected, 0);
+
+        // Esc closes
+        update(&mut app, press(KeyCode::Esc));
+        assert!(app.server_picker.is_none());
+
+        // Reopen, pick staging, hit Enter
+        update(&mut app, press(KeyCode::Char('C')));
+        update(&mut app, press(KeyCode::Char('j')));
+        update(&mut app, press(KeyCode::Enter));
+        assert!(app.server_picker.is_none());
+        assert_eq!(app.pending_server_switch, Some("staging".to_string()));
+    }
+
+    #[test]
+    fn c_toasts_when_no_servers_configured() {
+        let mut app = App::new();
+        app.available_servers.clear();
+        update(&mut app, press(KeyCode::Char('C')));
+        assert!(app.server_picker.is_none());
+        let feedback = app.admin_feedback.as_ref().expect("toast shown");
+        assert!(feedback.text.contains("no servers configured"));
     }
 
     #[test]

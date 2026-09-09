@@ -53,6 +53,7 @@ const ROWS: &[Row] = &[
     Row::Bind("i", "jump to Index Lens filtered on this table (Schema Tables)"),
     Row::Bind("x", "jump to Query Lens filtered on this table (Schema Tables)"),
     Row::Bind("Delete / x", "delete selected file (Records Lens)"),
+    Row::Bind("C", "server / cluster picker (any lens)"),
     Row::Bind("d", "database picker (any lens)"),
     Row::Bind("!", "open a psql shell on the same connection (any lens)"),
     Row::Bind("y", "copy selection/path to clipboard (OSC 52)"),

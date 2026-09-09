@@ -45,6 +45,7 @@ pub use models::{
     VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow, WalStats,
     calculate_sequence_exhaustion,
 };
+pub use poller::ServerSwitchTarget;
 pub use idle_sessions::{
     OldestIdleSession, Severity as IdleSessionSeverity, oldest_idle_session,
     severity as idle_session_severity,

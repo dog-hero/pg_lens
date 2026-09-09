@@ -36,10 +36,15 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::stream::Stream;
+use pg_lens_core::poller::ServerSwitchTarget;
+use pg_lens_core::settings::ServiceSummary;
 use pg_lens_core::{AdminCommand, DbSnapshot, TableDetailRequest};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch};
+
+pub type ServicesProvider = Arc<dyn Fn() -> (Vec<ServiceSummary>, Option<String>) + Send + Sync>;
+pub type ServerResolver = Arc<dyn Fn(&str) -> Result<ServerSwitchTarget, String> + Send + Sync>;
 
 /// Shared state: the snapshot channel, the (optional) bearer token, and the
 /// two control channels into the poller (Fase #24 web parity).
@@ -63,6 +68,12 @@ struct WebState {
     /// [`read_only`] — only by the token, like `schema_refresh` (see
     /// [`db_switch_handler`]).
     db_switch: mpsc::Sender<String>,
+    /// Server/cluster switch channel into the poller.
+    server_switch: mpsc::Sender<ServerSwitchTarget>,
+    /// Services catalog provider: returns available services and current service name.
+    services_provider: ServicesProvider,
+    /// Resolves a named service into a connectable target.
+    server_resolver: ServerResolver,
     /// v0.15 web parity for the TUI's Enter-on-a-table `\d` overlay: sending
     /// a request here asks the poller to fetch that table's on-demand
     /// detail (columns/constraints/indexes) and stamp it into the next
@@ -145,6 +156,9 @@ pub fn router(
     schema_refresh: watch::Sender<u64>,
     admin: mpsc::Sender<AdminCommand>,
     db_switch: mpsc::Sender<String>,
+    server_switch: mpsc::Sender<ServerSwitchTarget>,
+    services_provider: ServicesProvider,
+    server_resolver: ServerResolver,
     detail: mpsc::Sender<TableDetailRequest>,
     auth_token: Option<String>,
     read_only: bool,
@@ -155,6 +169,9 @@ pub fn router(
         schema_refresh,
         admin,
         db_switch,
+        server_switch,
+        services_provider,
+        server_resolver,
         detail,
         read_only,
     };
@@ -171,6 +188,9 @@ pub fn router(
         .route("/admin/terminate/{pid}", post(admin_terminate))
         // v0.13: web parity for the TUI's `d` database picker.
         .route("/db/switch", post(db_switch_handler))
+        // Dynamic server/cluster switching from services.toml
+        .route("/servers", get(servers_handler))
+        .route("/server/switch", post(server_switch_handler))
         // v0.15: web parity for the TUI's Enter-on-a-table `\d` overlay.
         .route("/schema/detail", post(schema_detail_handler))
         // Records Lens: list, download, and delete incident recordings/bookmarks
@@ -337,6 +357,56 @@ async fn db_switch_handler(
     match state.db_switch.try_send(body.database) {
         Ok(()) => (StatusCode::ACCEPTED, "database switch requested").into_response(),
         // Full or closed: the poller is busy or gone — never block the request.
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "poller unavailable; try again",
+        )
+            .into_response(),
+    }
+}
+
+/// Response payload for `GET /api/servers`.
+#[derive(Serialize)]
+struct ServersResponse {
+    current: Option<String>,
+    servers: Vec<ServiceSummary>,
+}
+
+/// `GET /api/servers` — lists available services from the configured services.toml
+/// along with the currently active server/service name (if any).
+async fn servers_handler(State(state): State<WebState>) -> Response {
+    let (servers, current) = (state.services_provider)();
+    let current = current.or_else(|| {
+        let snap = state.snapshots.borrow();
+        snap.vitals.server_name.clone()
+    });
+    let resp = ServersResponse { current, servers };
+    match serde_json::to_string(&resp) {
+        Ok(body) => ([(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
+}
+
+/// Body of `POST /api/server/switch`.
+#[derive(Deserialize)]
+struct ServerSwitchRequest {
+    server: String,
+}
+
+/// `POST /api/server/switch` — switches the poller's connection to a different
+/// server/cluster defined in `services.toml`. Gated by [`require_auth`].
+async fn server_switch_handler(
+    State(state): State<WebState>,
+    Json(body): Json<ServerSwitchRequest>,
+) -> Response {
+    let target = match (state.server_resolver)(&body.server) {
+        Ok(t) => t,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+    };
+    match state.server_switch.try_send(target) {
+        Ok(()) => (StatusCode::ACCEPTED, "server switch requested").into_response(),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             "poller unavailable; try again",
@@ -609,6 +679,7 @@ mod tests {
         schema_refresh: watch::Receiver<u64>,
         admin_rx: mpsc::Receiver<AdminCommand>,
         db_switch_rx: mpsc::Receiver<String>,
+        server_switch_rx: mpsc::Receiver<ServerSwitchTarget>,
         detail_rx: mpsc::Receiver<TableDetailRequest>,
         router: Router,
     }
@@ -622,12 +693,49 @@ mod tests {
         let (schema_tx, schema_rx) = watch::channel(0u64);
         let (admin_tx, admin_rx) = mpsc::channel(8);
         let (db_switch_tx, db_switch_rx) = mpsc::channel(4);
+        let (server_switch_tx, server_switch_rx) = mpsc::channel(4);
         let (detail_tx, detail_rx) = mpsc::channel(4);
+        let services_provider: ServicesProvider = Arc::new(|| {
+            (
+                vec![
+                    ServiceSummary {
+                        name: "prod".to_string(),
+                        host: Some("10.0.0.1".to_string()),
+                        port: Some(5432),
+                        user: Some("postgres".to_string()),
+                        dbname: Some("app".to_string()),
+                    },
+                    ServiceSummary {
+                        name: "staging".to_string(),
+                        host: Some("10.0.0.2".to_string()),
+                        port: Some(5432),
+                        user: Some("postgres".to_string()),
+                        dbname: Some("staging".to_string()),
+                    },
+                ],
+                Some("prod".to_string()),
+            )
+        });
+        let server_resolver: ServerResolver = Arc::new(|name| {
+            if name == "prod" || name == "staging" {
+                Ok(ServerSwitchTarget {
+                    config: "host=127.0.0.1 user=test".parse().unwrap(),
+                    password_source: None,
+                    label: format!("test@{name}"),
+                    service_name: name.to_string(),
+                })
+            } else {
+                Err(format!("unknown service {name:?}"))
+            }
+        });
         let router = router(
             snap_rx,
             schema_tx,
             admin_tx,
             db_switch_tx,
+            server_switch_tx,
+            services_provider,
+            server_resolver,
             detail_tx,
             token.map(str::to_string),
             read_only,
@@ -637,6 +745,7 @@ mod tests {
             schema_refresh: schema_rx,
             admin_rx,
             db_switch_rx,
+            server_switch_rx,
             detail_rx,
             router,
         }
@@ -1176,4 +1285,110 @@ mod tests {
         let res = get_response(router, "/api/records/download/..%2F..%2Fetc%2Fpasswd", None).await;
         assert!(res.status() == StatusCode::NOT_FOUND || res.status() == StatusCode::BAD_REQUEST);
     }
+
+    // --- v0.21: GET /api/servers & POST /api/server/switch --------------------
+
+    #[tokio::test]
+    async fn servers_endpoint_returns_list_and_current_server() {
+        let (_tx, router) = mock_router(None);
+        let response = get_response(router, "/api/servers", None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(value["current"], "prod");
+        let servers = value["servers"].as_array().expect("servers array");
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0]["name"], "prod");
+        assert_eq!(servers[1]["name"], "staging");
+
+        // Security: no password leaked
+        let text = String::from_utf8_lossy(&body).to_lowercase();
+        assert!(!text.contains("password"));
+    }
+
+    #[tokio::test]
+    async fn server_switch_accepts_a_known_server() {
+        let mut h = mock_harness(None);
+        let response = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/server/switch",
+            None,
+            r#"{"server":"staging"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let target = h.server_switch_rx.try_recv().expect("forwarded");
+        assert_eq!(target.service_name, "staging");
+        assert_eq!(target.label, "test@staging");
+    }
+
+    #[tokio::test]
+    async fn server_switch_rejects_an_unknown_server() {
+        let mut h = mock_harness(None);
+        let response = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/server/switch",
+            None,
+            r#"{"server":"does-not-exist"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(h.server_switch_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn server_switch_is_token_gated_when_a_token_is_set() {
+        let mut h = mock_harness(Some("sekret"));
+        let denied = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/server/switch",
+            None,
+            r#"{"server":"staging"}"#,
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert!(h.server_switch_rx.try_recv().is_err());
+
+        let allowed = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/server/switch",
+            Some("sekret"),
+            r#"{"server":"staging"}"#,
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            h.server_switch_rx.try_recv().expect("forwarded").service_name,
+            "staging"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_switch_is_not_blocked_by_read_only_mode() {
+        let mut h = mock_harness_with(None, true);
+        let response = send_json(
+            h.router.clone(),
+            "POST",
+            "/api/server/switch",
+            None,
+            r#"{"server":"staging"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            h.server_switch_rx.try_recv().expect("forwarded").service_name,
+            "staging"
+        );
+    }
 }
+

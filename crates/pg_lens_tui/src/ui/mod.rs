@@ -3,6 +3,7 @@
 pub mod format;
 mod confirm;
 mod db_picker;
+mod server_picker;
 mod help;
 mod index_lens;
 mod macro_lens;
@@ -104,6 +105,9 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     }
     if app.db_picker.is_some() {
         db_picker::draw(app, frame);
+    }
+    if app.server_picker.is_some() {
+        server_picker::draw(app, frame);
     }
     // Highest-priority overlay: drawn last, over everything (including the
     // other overlays above) — matches `handle_key`'s precedence, and the
@@ -633,6 +637,22 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(sep.clone());
         spans.push(dk);
         spans.push(dd);
+    }
+    // `C: server` opens the server / cluster picker from any lens (where width allows).
+    if !app.available_servers.is_empty() {
+        let [ck, cd] = style::hint("C", ": server");
+        let fits_c = Line::from(spans.clone()).width()
+            + sep.width()
+            + ck.width()
+            + cd.width()
+            + sep.width()
+            + data_span.width()
+            <= area.width as usize;
+        if fits_c {
+            spans.push(sep.clone());
+            spans.push(ck);
+            spans.push(cd);
+        }
     }
     // v0.11: `!` suspends the TUI for a psql shell on the same connection —
     // works from any lens, same "where width allows" budget discipline as

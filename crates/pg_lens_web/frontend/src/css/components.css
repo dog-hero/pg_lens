@@ -1,0 +1,288 @@
+/* pg_lens — reusable UI components (tables, badges, inputs, chips) */
+
+/* ── filter inputs & toolbars ──────────────────────────────────────── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filter-input {
+  flex: 1;
+  min-width: 240px;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.86rem;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.filter-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--info-bg);
+}
+
+.filter-input::placeholder {
+  color: var(--fg-dim);
+}
+
+/* ── state filter chips ────────────────────────────────────────────── */
+.filter-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--fg-dim);
+  cursor: pointer;
+  user-select: none;
+  transition: all var(--transition-fast);
+}
+
+.chip:hover {
+  background: var(--bg-raised);
+  color: var(--fg);
+  border-color: var(--fg-dim);
+}
+
+.chip.active {
+  background: var(--info-bg);
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.chip-count {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  opacity: 0.85;
+}
+
+/* ── tables ────────────────────────────────────────────────────────── */
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  max-height: calc(100vh - 170px);
+  overflow-y: auto;
+  position: relative;
+}
+
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.84rem;
+  text-align: left;
+}
+
+thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg-raised);
+}
+
+thead th {
+  padding: 8px 12px;
+  color: var(--fg-dim);
+  font-weight: 600;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  user-select: none;
+}
+
+thead th.sortable {
+  cursor: pointer;
+}
+
+thead th.sortable:hover {
+  color: var(--fg);
+}
+
+thead th.sorted {
+  color: var(--accent);
+}
+
+tbody tr {
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+tbody tr:hover {
+  background: var(--bg-hover) !important;
+}
+
+tbody tr.is-selected {
+  background: var(--info-bg) !important;
+  outline: 1px solid var(--accent);
+}
+
+tbody td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border-muted);
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+td.num,
+th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+td.query {
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+/* ── badges & tags ─────────────────────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+}
+
+.badge-ok {
+  background: var(--ok-bg);
+  color: var(--ok);
+  border: 1px solid var(--ok-border);
+}
+
+.badge-warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border: 1px solid var(--warn-border);
+}
+
+.badge-bad {
+  background: var(--bad-bg);
+  color: var(--bad);
+  border: 1px solid var(--bad-border);
+}
+
+.badge-info {
+  background: var(--info-bg);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.ssl-badge {
+  color: var(--ok);
+  margin-right: 4px;
+}
+
+/* ── cell buttons ──────────────────────────────────────────────────── */
+.cell-btn {
+  padding: 2px 7px;
+  font-size: 0.72rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.cell-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.cell-btn.btn-cancel:hover {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: var(--warn-bg);
+}
+
+.cell-btn.btn-kill:hover {
+  border-color: var(--bad);
+  color: var(--bad);
+  background: var(--bad-bg);
+}
+
+/* ── progress meter ────────────────────────────────────────────────── */
+.meter {
+  height: 4px;
+  background: var(--border-muted);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.meter.warn .meter-fill { background: var(--warn); }
+.meter.bad .meter-fill { background: var(--bad); }
+
+/* ── severity styles for activity rows ─────────────────────────────── */
+.status-blocked {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+.status-waiting {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.pid-blocked {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+.state-active { color: var(--ok); font-weight: 600; }
+.state-idle { color: var(--fg-dim); }
+.state-idle-txn { color: var(--warn); font-weight: 600; }
+.state-idle-txn-aborted { color: var(--bad); font-weight: 600; }
+
+.duration-ok { color: var(--fg); }
+.duration-warn { color: var(--warn); font-weight: 600; }
+.duration-bad { color: var(--bad); font-weight: 700; }
+.duration-idle { color: var(--fg-dim); }
+
+.xact-warn { color: var(--warn); font-weight: 600; }
+.xact-bad { color: var(--bad); font-weight: 700; }
+.xact-none { color: var(--fg-subtle); }
+
+.wait-lock { color: var(--bad); font-weight: 600; }
+.wait-other { color: var(--warn); }
+.wait-none { color: var(--fg-subtle); }
