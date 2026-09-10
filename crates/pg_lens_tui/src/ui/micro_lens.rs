@@ -44,9 +44,10 @@ use ratatui::{
 use crate::app::{App, MicroView};
 use crate::ui::{format, sql, style};
 
-/// (width, spacing-follows) of every fixed column, in order. The last,
-/// flexible column (Query) takes whatever is left.
-const FIXED_WIDTHS: [u16; 8] = [6, 10, 12, 12, 11, 22, 8, 8];
+/// (width, spacing-follows) of every fixed column, in order: PID, DB, User,
+/// Client, Wait, Duration, Xact, State. The last, flexible column (Query)
+/// takes whatever is left.
+const FIXED_WIDTHS: [u16; 8] = [6, 10, 12, 12, 22, 8, 8, 11];
 const STATUS_WIDTH: u16 = 1;
 const COLUMN_SPACING: u16 = 1;
 /// Highlight symbol "▶ " rendered left of the selected row.
@@ -428,7 +429,7 @@ fn wait_event_style(wait_event: Option<&str>) -> Style {
 
 fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
     let header = Row::new([
-        "S", "PID", "DB", "User", "Client", "State", "Wait", "Duration", "Xact", "Query",
+        "S", "PID", "DB", "User", "Client", "Wait", "Duration", "Xact", "State", "Query",
     ])
     .style(Style::new().bold());
 
@@ -508,10 +509,10 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
                 db_cell,
                 user_cell,
                 client_cell,
-                state_cell,
                 wait_cell,
                 duration_cell,
                 xact_cell,
+                state_cell,
                 query_cell,
             ])
         });

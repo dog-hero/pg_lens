@@ -1,9 +1,9 @@
 // Human formatting helpers, mirroring the TUI's ui/format.rs conventions.
 
-/** `4m32s`, `1h04m`, `3d 4h` — compact human duration. */
+/** `0.0050s`, `12s`, `4m32s`, `1h04m` — compact human duration with 4 decimals for very fast times (< 1s). */
 export function humanDuration(totalSecs: number): string {
   if (!Number.isFinite(totalSecs) || totalSecs < 0) return "-";
-  if (totalSecs < 1) return `${(totalSecs * 1000).toFixed(0)}ms`;
+  if (totalSecs < 1) return `${totalSecs.toFixed(4)}s`;
   const s = Math.floor(totalSecs);
   if (s < 60) return `${totalSecs.toFixed(1)}s`;
   const m = Math.floor(s / 60);
@@ -47,7 +47,10 @@ export function humanAgo(
   nowEpochSecs: number,
 ): string {
   if (epochSecs === null || !Number.isFinite(epochSecs)) return "—";
-  return `${humanDuration(Math.max(0, nowEpochSecs - epochSecs))} ago`;
+  const diff = nowEpochSecs - epochSecs;
+  if (diff <= 0) return "0s ago";
+  if (diff < 1) return `${diff.toFixed(4)}s ago`;
+  return `${humanDuration(diff)} ago`;
 }
 
 /** `95.7%` from a 0..1 ratio. */
@@ -57,10 +60,10 @@ export function humanPercent(ratio: number): string {
 }
 
 /** `189442.7ms` → `3m09s`-style: source values are already milliseconds
- * (pg_stat_statements, checkpoint write/sync time). */
+ * (pg_stat_statements, checkpoint write/sync time). Sub-ms times show 4 decimals. */
 export function humanMs(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "0ms";
-  if (ms < 1) return `${ms.toFixed(2)}ms`;
+  if (!Number.isFinite(ms) || ms <= 0) return "0.0000ms";
+  if (ms < 1) return `${ms.toFixed(4)}ms`;
   if (ms < 1000) return `${ms.toFixed(1)}ms`;
   return humanDuration(ms / 1000);
 }

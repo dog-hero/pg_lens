@@ -4,15 +4,15 @@
 //! mapping, unit-tested below. Used by the header, the Macro Lens vitals and
 //! the Micro Lens table.
 
-/// Compact human duration for query/session ages: `980ms`, `12s`, `4m32s`,
+/// Compact human duration for query/session ages: `0.0050s`, `12s`, `4m32s`,
 /// `1h04m`. Negative inputs (clock skew between `now()` and `query_start`)
-/// clamp to `0s`.
+/// clamp to `0.0000s`. Very fast times (< 1s) show 4 decimal places.
 pub fn human_duration(secs: f64) -> String {
     if !secs.is_finite() || secs <= 0.0 {
-        return "0s".to_string();
+        return "0.0000s".to_string();
     }
     if secs < 1.0 {
-        return format!("{:.0}ms", secs * 1_000.0);
+        return format!("{secs:.4}s");
     }
     let total = secs as u64;
     if total < 60 {
@@ -89,16 +89,16 @@ pub fn human_count(n: i64) -> String {
 }
 
 /// Human execution time from MILLISECONDS (pg_stat_statements ships times
-/// in ms): `0.05ms`, `12.4ms`, then delegates to [`human_duration`] from one
+/// in ms): `0.0500ms`, `12.4ms`, then delegates to [`human_duration`] from one
 /// second up (`12s`, `4m32s`, ...). Sub-millisecond precision matters here —
 /// a hot OLTP statement's mean is routinely far below 1ms. Negative/NaN
-/// inputs clamp to `0ms`.
+/// inputs clamp to `0.0000ms`.
 pub fn human_ms(ms: f64) -> String {
     if !ms.is_finite() || ms <= 0.0 {
-        return "0ms".to_string();
+        return "0.0000ms".to_string();
     }
     if ms < 1.0 {
-        format!("{ms:.2}ms")
+        format!("{ms:.4}ms")
     } else if ms < 1_000.0 {
         format!("{ms:.1}ms")
     } else {
@@ -111,7 +111,16 @@ pub fn human_ms(ms: f64) -> String {
 /// the function stays a pure value mapping.
 pub fn human_ago(epoch_secs: Option<f64>, now_epoch_secs: f64) -> String {
     match epoch_secs {
-        Some(at) => format!("{} ago", human_duration(now_epoch_secs - at)),
+        Some(at) => {
+            let diff = now_epoch_secs - at;
+            if diff <= 0.0 {
+                "0s ago".to_string()
+            } else if diff < 1.0 {
+                format!("{diff:.4}s ago")
+            } else {
+                format!("{} ago", human_duration(diff))
+            }
+        }
         None => "\u{2014}".to_string(),
     }
 }
@@ -136,7 +145,8 @@ mod tests {
 
     #[test]
     fn duration_covers_all_magnitudes() {
-        assert_eq!(human_duration(0.98), "980ms");
+        assert_eq!(human_duration(0.0001), "0.0001s");
+        assert_eq!(human_duration(0.98), "0.9800s");
         assert_eq!(human_duration(12.7), "12s");
         assert_eq!(human_duration(4.0 * 60.0 + 32.0), "4m32s");
         assert_eq!(human_duration(3_600.0 + 4.0 * 60.0), "1h04m");
@@ -145,10 +155,10 @@ mod tests {
 
     #[test]
     fn duration_clamps_negatives_and_nan_to_zero() {
-        assert_eq!(human_duration(-0.002), "0s");
-        assert_eq!(human_duration(-500.0), "0s");
-        assert_eq!(human_duration(f64::NAN), "0s");
-        assert_eq!(human_duration(0.0), "0s");
+        assert_eq!(human_duration(-0.002), "0.0000s");
+        assert_eq!(human_duration(-500.0), "0.0000s");
+        assert_eq!(human_duration(f64::NAN), "0.0000s");
+        assert_eq!(human_duration(0.0), "0.0000s");
     }
 
     #[test]
@@ -190,15 +200,16 @@ mod tests {
 
     #[test]
     fn ms_covers_all_magnitudes() {
-        assert_eq!(human_ms(0.05), "0.05ms");
-        assert_eq!(human_ms(0.999), "1.00ms");
+        assert_eq!(human_ms(0.0001), "0.0001ms");
+        assert_eq!(human_ms(0.05), "0.0500ms");
+        assert_eq!(human_ms(0.999), "0.9990ms");
         assert_eq!(human_ms(12.44), "12.4ms");
         assert_eq!(human_ms(999.9), "999.9ms");
         assert_eq!(human_ms(12_700.0), "12s");
         assert_eq!(human_ms(272_000.0), "4m32s");
         assert_eq!(human_ms(3_840_000.0), "1h04m");
-        assert_eq!(human_ms(-3.0), "0ms");
-        assert_eq!(human_ms(f64::NAN), "0ms");
+        assert_eq!(human_ms(-3.0), "0.0000ms");
+        assert_eq!(human_ms(f64::NAN), "0.0000ms");
     }
 
     #[test]

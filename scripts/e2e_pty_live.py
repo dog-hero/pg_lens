@@ -114,9 +114,9 @@ def main():
               args.expect_micro in snaps["t3_micro"])
 
     def parse_duration(line):
-        """Duration cell -> seconds: 980ms / 12s / 4m32s / 1h04m."""
+        """Duration cell -> seconds: 0.0050s / 12s / 4m32s / 1h04m."""
         import re
-        m = re.search(r"(?:(\d+)h(\d+)m|(\d+)m(\d+)s|(\d+)ms|(\d+)s)", line)
+        m = re.search(r"(?:(\d+)h(\d+)m|(\d+)m(\d+)s|(\d+)ms|(\d+(?:\.\d+)?)s)", line)
         if not m:
             return None
         h, hm, mm, ms_, msec, sec = m.groups()
@@ -126,7 +126,7 @@ def main():
             return int(mm) * 60 + int(ms_)
         if msec is not None:
             return int(msec) / 1000.0
-        return int(sec)
+        return float(sec)
 
     if args.expect_micro_growing and args.expect_micro:
         pump(4.5)

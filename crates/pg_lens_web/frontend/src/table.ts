@@ -65,10 +65,10 @@ const COLUMNS: Column[] = [
   { key: "database", label: "DB", numeric: false },
   { key: "username", label: "User", numeric: false },
   { key: "client", label: "Client", numeric: false },
-  { key: "state", label: "State", numeric: false },
   { key: "wait_event", label: "Wait", numeric: false },
   { key: "duration_secs", label: "Duration", numeric: true },
   { key: "xact_age_secs", label: "Xact", numeric: true },
+  { key: "state", label: "State", numeric: false },
   { key: "query", label: "Query", numeric: false },
 ];
 
@@ -364,14 +364,6 @@ export class ActivityTable {
       clientTd.append(document.createTextNode(row.client));
       tr.append(clientTd);
 
-      // State column
-      const stateTd = document.createElement("td");
-      stateTd.classList.add("col-state");
-      const sClass = stateColorClass(row.state);
-      if (sClass) stateTd.classList.add(sClass);
-      stateTd.textContent = row.state;
-      tr.append(stateTd);
-
       // Wait column
       const waitTd = document.createElement("td");
       waitTd.classList.add("col-wait");
@@ -399,6 +391,14 @@ export class ActivityTable {
         xactTd.classList.add("xact-none");
       }
       tr.append(xactTd);
+
+      // State column
+      const stateTd = document.createElement("td");
+      stateTd.classList.add("col-state");
+      const sClass = stateColorClass(row.state);
+      if (sClass) stateTd.classList.add(sClass);
+      stateTd.textContent = row.state;
+      tr.append(stateTd);
 
       // Query cell
       const query = document.createElement("td");
