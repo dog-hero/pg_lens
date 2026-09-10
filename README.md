@@ -17,7 +17,7 @@ binary** that idles at **~7 MB of RSS** while monitoring a loaded server.
 and a [live interactive demo](https://dog-hero.github.io/pg_lens/demo/) of the
 Web Lens dashboard running on recorded data (no database required).
 
-![pg_lens TUI demo](https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=0.21.0)
+![pg_lens TUI demo](https://raw.githubusercontent.com/dog-hero/pg_lens/main/docs/demo.gif?v=0.22.0)
 
 <details>
 <summary>Web Lens dashboard (<code>pg_lens serve</code>)</summary>
@@ -468,6 +468,7 @@ pg_lens serve                      # Web Lens HTTP / SSE dashboard
 | `--schema-table-limit <N>` | Schema Lens `table_stats` row cap — the Tables view shows the top-N tables by size (clamped 10–10000). Raise it on a cluster with more than 200 user tables so the honest "N of M tables" footer stops truncating; the query stays bounded to this many expensive per-table size computations however high it's raised. Also `PG_LENS_SCHEMA_TABLE_LIMIT` env or `schema_table_limit` in config.toml. Default: 200 |
 | `--mock` | Use built-in mock data instead of a real database |
 | `--read-only` | Hard-disable admin actions (`c`/`K` in the TUI, `/api/admin/*` in the web server) — enforced server-side, not just hidden. Also `PG_LENS_READ_ONLY` env (any value other than empty/`0`/`false`/`no`/`off`, case-insensitive) or `read_only = true` in [config.toml](#config-file). See [Read-only mode](#read-only-mode) |
+| `--single-connection` | Force single-connection polling mode instead of the default dual-lane poller architecture. Useful for strict connection limits or poolers |
 | `--config-url <URL>` | Load a shared `services.toml` from a remote source: `github:OWNER/REPO/PATH[@REF]` or a plain `https://`/`http://` URL. Also `PG_LENS_CONFIG_URL` env or `remote_config` in config.toml. See [Remote connection config](#remote-connection-config) |
 
 > **Tip:** for production monitoring, use a read-only role granted the

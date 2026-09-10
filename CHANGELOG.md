@@ -4,6 +4,19 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.22.0] — 2026-09-09 — "Dual-Lane Poller Architecture, Fast Incident Path & Sub-Second Precision"
+
+### Added
+- **Dual-Lane Poller Architecture (`client_fast` & `client_telemetry`)** — decoupled polling engine separating urgent incident triage from heavy catalog telemetry:
+  - **Fast Lane (`client_fast`)**: pipelines the 6 critical incident queries (`activity`, `blocking`, `server_info`, `bgwriter`, `active_locks`, `locks_by_relation`) into a single read-only transaction (`begin_read()`), slashing network round-trips from ~39 RTTs to 1 single RTT per tick and eliminating UI lag over remote or high-latency database connections.
+  - **Telemetry Lane (`client_telemetry`)**: offloads slower catalog queries into independent tiered cycles: Tier 2 @ 3s (Databases, Statements, Replication, Functions, Progress), Tier 3 @ 30s (Tables, Bloat, Sequences, SLRU, Conflicts), Tier 4 @ 60s (Indices, Table Stats, Index Stats), and on-demand schema table inspection.
+  - **Thread-safe Atomic Synthesis (`Arc<RwLock<SharedTelemetry>>`)**: Fast Lane synthesizes full `DbSnapshot` instances immediately from cached telemetry snapshots, preventing slow catalog queries from blocking live activity refreshes.
+  - **Single-Connection CLI Flag & Fallback (`--single-connection`)**: flag forcing single-connection operation for resource-constrained environments (e.g. strict pooler limits), with automatic graceful fallback if the telemetry connection fails to establish.
+
+### Changed
+- **Activity Table Column Ordering** — moved `State` column directly after `Xact` in both TUI Micro Lens and Web dashboard, placing transaction lifecycle and session state side-by-side with query duration for faster operational triage.
+- **High-Precision Time Formatting** — sub-second durations (`< 1s`, e.g. `0.0001s`) and sub-millisecond query execution times (`< 1ms`, e.g. `0.0500ms`) now render with 4 decimal places across both TUI (`format.rs`) and Web (`format.ts`).
+
 ## [0.21.0] — 2026-09-08 — "Web Modernization, 9-Lens Parity & Runtime Cluster Switching"
 
 ### Added

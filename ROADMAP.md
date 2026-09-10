@@ -311,6 +311,11 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.22.0** — "Dual-Lane Poller Architecture, Fast Incident Path & Sub-Second Precision":
+  - **Dual-Lane Poller Architecture**: dedicated Fast Lane (`client_fast`) with 1-RTT transaction pipelining for incident queries (`activity`, `blocking`, `server_info`, `bgwriter`, `active_locks`, `locks_by_relation`) reducing RTT from ~39 to 1; independent Telemetry Lane (`client_telemetry`) decoupling slower catalog queries into Tiers 2/3/4 (3s, 30s, 60s) with atomic state synthesis via `Arc<RwLock<SharedTelemetry>>`.
+  - **Single Connection Mode**: `--single-connection` CLI flag and auto-fallback when connection limits or poolers prevent secondary connections.
+  - **Activity State Column Placement**: moved `State` column after `Xact` in TUI and Web table views for tighter operational context.
+  - **Sub-Second & Sub-Millisecond Precision**: 4-decimal precision formatting for execution times `< 1s` (`0.0001s`) and `< 1ms` (`0.0500ms`) across TUI and Web.
 - **v0.21.0** — "Web Modernization, 9-Lens Parity & Runtime Cluster Switching":
   - **Runtime Server / Cluster Switching**: dynamic runtime server switching (`services.toml`) in TUI (`C` server picker modal) and Web UI (`#server-target-group`, `GET /api/servers`, `POST /api/server/switch`, Command Palette "Servers" category) with safe cancellation, state reset, and immediate zero-backoff reconnect.
   - **Web Dashboard Modernization**: vertical space overhaul with dedicated Macro Lens (Lens 1) cockpit, compact single-line health ribbon on Lenses 2–9, and 100% viewport height for sticky data tables.
