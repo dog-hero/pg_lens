@@ -238,6 +238,10 @@ struct ConnArgs {
     /// settable via `PG_LENS_CONFIG_URL` or `remote_config` in config.toml.
     #[arg(long, value_name = "URL", env = "PG_LENS_CONFIG_URL", global = true)]
     config_url: Option<String>,
+
+    /// Force single connection mode instead of dedicated Fast and Telemetry connections.
+    #[arg(long, global = true)]
+    single_connection: bool,
 }
 
 /// Loose boolean parse for `PG_LENS_READ_ONLY` — a plain presence-style env
@@ -774,6 +778,7 @@ fn spawn_poller(
     server_switch_rx: mpsc::Receiver<ServerSwitchTarget>,
     schema_table_limit: usize,
     detail_rx: mpsc::Receiver<TableDetailRequest>,
+    single_connection: bool,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, String, JoinHandle<()>) {
     match conn {
         // The mock has no DB queries to cancel on shutdown — a already-done
@@ -809,6 +814,7 @@ fn spawn_poller(
                 server_switch_rx,
                 schema_table_limit,
                 detail_rx,
+                single_connection,
             );
             (snapshots, label, handle)
         }
@@ -1221,6 +1227,7 @@ async fn run_serve(mut conn: ConnArgs, args: ServeArgs) -> color_eyre::Result<()
         server_switch_rx,
         conn.schema_table_limit(&config),
         detail_rx,
+        conn.single_connection,
     );
 
     let read_only = conn.read_only(&config);
@@ -1386,6 +1393,7 @@ async fn run(
                 server_switch_rx,
                 schema_table_limit,
                 detail_rx,
+                conn_args.single_connection,
             );
             poller_handle = Some(handle);
             app.host = label;
@@ -1558,6 +1566,7 @@ async fn run(
                 server_switch_rx,
                 schema_table_limit,
                 detail_rx,
+                conn_args.single_connection,
             );
             poller_handle = Some(handle);
             update(&mut app, Action::HostLabel(label));
@@ -1826,6 +1835,7 @@ mod tests {
             record_compress: false,
             record_max_total_mb: None,
             record_retention_days: None,
+            single_connection: false,
         };
         let config = settings::AppConfig {
             remote_config: Some("https://example.com/from-config-toml".to_string()),
@@ -1854,6 +1864,7 @@ mod tests {
             record_compress: false,
             record_max_total_mb: None,
             record_retention_days: None,
+            single_connection: false,
         };
         let config = settings::AppConfig {
             remote_config: Some("https://example.com/from-config-toml".to_string()),
@@ -1883,6 +1894,7 @@ mod tests {
             record_compress: false,
             record_max_total_mb: None,
             record_retention_days: None,
+            single_connection: false,
         };
         let overlay = conn
             .resolve_remote_overlay(&settings::AppConfig::default())

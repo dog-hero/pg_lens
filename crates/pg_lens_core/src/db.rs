@@ -50,8 +50,13 @@ pub async fn server_version_num(tx: &Transaction<'_>) -> Result<i32, tokio_postg
 /// — the per-statement safety timeout is applied as `SET LOCAL` inside each
 /// query transaction instead (see the poller), so it holds in both modes.
 pub async fn configure_session(client: &Client) -> Result<(), tokio_postgres::Error> {
+    configure_named_session(client, "pg_lens").await
+}
+
+/// Identifies a specific named poller session (e.g. "pg_lens (fast)" or "pg_lens (telemetry)").
+pub async fn configure_named_session(client: &Client, name: &str) -> Result<(), tokio_postgres::Error> {
     client
-        .batch_execute("SET application_name = 'pg_lens'")
+        .batch_execute(&format!("SET application_name = '{name}'"))
         .await
 }
 

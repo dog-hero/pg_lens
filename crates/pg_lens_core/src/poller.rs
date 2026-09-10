@@ -20,7 +20,7 @@
 //! libraries or about any frontend's internal message types.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
@@ -73,9 +73,82 @@ pub const SCHEMA_INTERVAL_DEFAULT: Duration = Duration::from_secs(60);
 /// Floor for `--schema-interval`: the size/stats queries are too expensive
 /// to run more often than this on purpose.
 pub const SCHEMA_INTERVAL_MIN: Duration = Duration::from_secs(5);
+/// Operational telemetry cadence on the background Telemetry Lane (Tier 2).
+pub const TELEMETRY_TIER2_INTERVAL: Duration = Duration::from_secs(3);
+/// Heavy catalog telemetry cadence on the background Telemetry Lane (Tier 3).
+pub const TELEMETRY_TIER3_INTERVAL: Duration = Duration::from_secs(30);
 /// The mock poller refreshes its fake schema every N ticks — short, so the
 /// staleness UI can be exercised without waiting a minute in `--mock`.
 const MOCK_SCHEMA_EVERY_TICKS: u64 = 5;
+
+/// Shared telemetry state synthesized across poller connections and tiers.
+#[derive(Clone, Default)]
+pub struct SharedTelemetry {
+    // Tier 2 (3s)
+    pub replication: Option<ReplicationInfo>,
+    pub replication_slots: Option<Vec<ReplicationSlotRow>>,
+    pub vacuum_progress: Option<Vec<VacuumProgressRow>>,
+    pub ddl_progress: Option<Vec<DdlProgressRow>>,
+    pub wal: Option<WalStats>,
+    pub slru: Option<SlruStats>,
+    pub conflicts: Option<DatabaseConflicts>,
+    pub idle_sessions: Option<Vec<IdleSessionRow>>,
+    pub prepared_xacts: Option<Vec<PreparedXactRow>>,
+    pub lock_capacity: Option<LockCapacity>,
+
+    // Tier 3 (30s)
+    pub databases: Option<Vec<DatabaseRow>>,
+    pub publications: Option<Vec<PublicationRow>>,
+    pub subscriptions: Option<Vec<SubscriptionRow>>,
+
+    // Tier 4 (Schema / Statements / IO - 60s or on demand)
+    pub schema: Option<Arc<SchemaSnapshot>>,
+    pub statements: Option<Arc<StatementsSnapshot>>,
+    pub io_stats: Option<Vec<IoStatRow>>,
+
+    // On-demand table detail
+    pub table_detail: Option<Arc<TableDetail>>,
+}
+
+/// Telemetry Lane delta window for rate calculations across ticks.
+#[derive(Default)]
+struct TelemetryDeltaState {
+    wal: Option<WalDeltaState>,
+    slru: Option<SlruDeltaState>,
+    conflicts: Option<ConflictsDeltaState>,
+}
+
+/// Output of Tier 2 operational telemetry queries.
+struct Tier2Collection {
+    replication: Option<ReplicationInfo>,
+    replication_slots: Option<Vec<ReplicationSlotRow>>,
+    vacuum_progress: Option<Vec<VacuumProgressRow>>,
+    ddl_progress: Option<Vec<DdlProgressRow>>,
+    wal: Option<WalStats>,
+    slru: Option<SlruStats>,
+    conflicts: Option<DatabaseConflicts>,
+    idle_sessions: Option<Vec<IdleSessionRow>>,
+    prepared_xacts: Option<Vec<PreparedXactRow>>,
+    lock_capacity: Option<LockCapacity>,
+}
+
+/// Output of Tier 3 catalog telemetry queries.
+struct Tier3Collection {
+    databases: Option<Vec<DatabaseRow>>,
+    publications: Option<Vec<PublicationRow>>,
+    subscriptions: Option<Vec<SubscriptionRow>>,
+}
+
+/// Result of the fast-lane pipelined query.
+struct PollFastResult {
+    vitals: ServerVitals,
+    activity: Vec<crate::models::ActivityRow>,
+    locks: Vec<crate::models::LockRow>,
+    checkpointer: CheckpointerStats,
+    active_locks: Vec<ActiveLockRow>,
+    relation_locks: Vec<db::RelationLockRow>,
+    is_in_recovery: bool,
+}
 
 /// Everything the slow schema collection needs, owned by the poller task —
 /// no Mutex: the force-refresh request arrives as a bumped counter on a
@@ -690,6 +763,7 @@ pub fn spawn(
     server_switch_rx: mpsc::Receiver<ServerSwitchTarget>,
     schema_table_limit: usize,
     detail_rx: mpsc::Receiver<TableDetailRequest>,
+    single_connection: bool,
 ) -> (watch::Receiver<Arc<DbSnapshot>>, JoinHandle<()>) {
     let (tx, rx) = watch::channel(Arc::new(DbSnapshot::connecting()));
     let schema = SchemaState::new(schema_interval, schema_refresh_rx, schema_table_limit);
@@ -706,6 +780,7 @@ pub fn spawn(
         db_switch_rx,
         server_switch_rx,
         detail_rx,
+        single_connection,
     ));
     (rx, handle)
 }
@@ -725,12 +800,15 @@ async fn run(
     mut db_switch_rx: mpsc::Receiver<String>,
     mut server_switch_rx: mpsc::Receiver<ServerSwitchTarget>,
     mut detail_rx: mpsc::Receiver<TableDetailRequest>,
+    single_connection: bool,
 ) {
     let mut backoff = BACKOFF_INITIAL;
     // Survives reconnects so the sparklines don't reset on a blip.
     // (`schema` too: the last collection outlives a connection blip.
     // `last_admin` likewise: the result banner must not vanish on a blip.)
     let mut history = SnapshotHistory::default();
+    // Shared telemetry synthesized across Dual-Lane poller connections (or single connection fallback).
+    let shared_telemetry = Arc::new(RwLock::new(SharedTelemetry::default()));
     // Persistence (best-effort): seed the ring from disk so the chart resumes
     // after a restart, and append/compact as new points arrive. `None`
     // (e.g. --mock, or no derivable state dir) simply keeps everything
@@ -786,6 +864,8 @@ async fn run(
             &mut db_switch_rx,
             &mut server_switch_rx,
             &mut detail_rx,
+            &shared_telemetry,
+            single_connection,
         )
         .await;
         match end {
@@ -807,6 +887,7 @@ async fn run(
                 io_stats = IoStatsState::new();
                 table_detail = TableDetailState::new();
                 last_admin = None;
+                *shared_telemetry.write().unwrap_or_else(|p| p.into_inner()) = SharedTelemetry::default();
                 store = history_path_fn
                     .as_ref()
                     .and_then(|f| f(&config, Some(&name)))
@@ -828,6 +909,7 @@ async fn run(
                 io_stats = IoStatsState::new();
                 table_detail = TableDetailState::new();
                 last_admin = None;
+                *shared_telemetry.write().unwrap_or_else(|p| p.into_inner()) = SharedTelemetry::default();
                 store = history_path_fn
                     .as_ref()
                     .and_then(|f| f(&config, None))
@@ -900,6 +982,8 @@ async fn session(
     db_switch_rx: &mut mpsc::Receiver<String>,
     server_switch_rx: &mut mpsc::Receiver<ServerSwitchTarget>,
     detail_rx: &mut mpsc::Receiver<TableDetailRequest>,
+    shared_telemetry: &Arc<RwLock<SharedTelemetry>>,
+    single_connection: bool,
 ) -> SessionEnd {
     // The base config is never mutated: the resolved password goes into a
     // per-attempt clone (and is dropped with it).
@@ -913,59 +997,421 @@ async fn session(
             Err(e) => return SessionEnd::Error(e.to_string()),
         }
     }
-    let (mut client, conn_handle) = match db::connect(&config).await {
+    let (mut client_fast, conn_handle_fast) = match db::connect(&config).await {
         Ok(pair) => pair,
         Err(e) => return SessionEnd::Error(format!("connect failed: {e}")),
     };
-    // Captured up front (owned — no borrow held), so the shutdown/switch
-    // branches can cancel whatever query poll_loop has in flight without
-    // conflicting with its `&mut client`.
-    let cancel = client.cancel_token();
-    // Race the poll loop against a shutdown request AND a database-switch
-    // request. Either way, send a CancelRequest so a running server-side
-    // query (notably the heavy bloat estimate) stops immediately instead of
-    // lingering until it finishes or hits statement_timeout — the socket
-    // dropping alone does NOT cancel it. `biased`: shutdown wins over a
-    // switch request racing it at the exact same instant.
-    let end = tokio::select! {
-        biased;
-        _ = wait_shutdown(shutdown_rx) => {
-            let _ = cancel.cancel_query(NoTls).await;
-            SessionEnd::Closed
-        }
-        name = wait_db_switch(db_switch_rx) => {
-            let _ = cancel.cancel_query(NoTls).await;
-            SessionEnd::SwitchDatabase(name)
-        }
-        target = wait_server_switch(server_switch_rx) => {
-            let _ = cancel.cancel_query(NoTls).await;
-            SessionEnd::SwitchServer(Box::new(target))
-        }
-        end = poll_loop(
-            &mut client,
-            service_name,
-            interval_rx,
-            tx,
-            history,
-            schema,
-            statements,
-            io_stats,
-            table_detail,
-            admin_rx,
-            last_admin,
-            polled_ok,
-            store,
-            appends_since_compact,
-            detail_rx,
-        ) => end,
+    let _ = db::configure_named_session(&client_fast, "pg_lens (fast)").await;
+
+    // Session init, in one read transaction (pooler-safe): the server version
+    // (which picks the SQL variants) and whether the Query Lens is available.
+    let (version_num, statements_extversion) = {
+        let init_tx = match begin_read(&mut client_fast).await {
+            Ok(t) => t,
+            Err(e) => {
+                conn_handle_fast.abort();
+                return SessionEnd::Error(db_error_message("version detection failed", &e));
+            }
+        };
+        let version_num = match db::server_version_num(&init_tx).await {
+            Ok(v) => v,
+            Err(e) => {
+                conn_handle_fast.abort();
+                return SessionEnd::Error(db_error_message("version detection failed", &e));
+            }
+        };
+        let extversion = match db::statements_extension_version(&init_tx).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(db_error_message("pg_stat_statements detection failed", &e)),
+        };
+        (version_num, extversion)
     };
-    conn_handle.abort();
-    end
+    let query_set = match queries::for_version(version_num) {
+        Ok(q) => q,
+        Err(msg) => {
+            conn_handle_fast.abort();
+            return SessionEnd::Error(msg);
+        }
+    };
+    let statements_available: Result<(), String> = match &statements_extversion {
+        Ok(extversion) => db::statements_availability(extversion.as_deref()),
+        Err(msg) => Err(msg.clone()),
+    };
+    let statements_sql: &'static str = statements_extversion
+        .as_ref()
+        .ok()
+        .and_then(|v| v.as_deref())
+        .and_then(db::parse_extension_version)
+        .map_or(query_set.statements, |(major, minor)| {
+            queries::statements_sql_for_extension(major, minor)
+        });
+
+    let telemetry_conn = if single_connection {
+        None
+    } else {
+        match db::connect(&config).await {
+            Ok((client_tel, handle_tel)) => {
+                let _ = db::configure_named_session(&client_tel, "pg_lens (telemetry)").await;
+                Some((client_tel, handle_tel))
+            }
+            Err(_) => None,
+        }
+    };
+
+    if let Some((mut client_telemetry, conn_handle_telemetry)) = telemetry_conn {
+        let cancel_fast = client_fast.cancel_token();
+        let cancel_telemetry = client_telemetry.cancel_token();
+        let fast_wake = Arc::new(tokio::sync::Notify::new());
+        let is_in_recovery = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let end = tokio::select! {
+            biased;
+            _ = wait_shutdown(shutdown_rx) => {
+                let _ = tokio::join!(
+                    cancel_fast.cancel_query(NoTls),
+                    cancel_telemetry.cancel_query(NoTls),
+                );
+                SessionEnd::Closed
+            }
+            name = wait_db_switch(db_switch_rx) => {
+                let _ = tokio::join!(
+                    cancel_fast.cancel_query(NoTls),
+                    cancel_telemetry.cancel_query(NoTls),
+                );
+                SessionEnd::SwitchDatabase(name)
+            }
+            target = wait_server_switch(server_switch_rx) => {
+                let _ = tokio::join!(
+                    cancel_fast.cancel_query(NoTls),
+                    cancel_telemetry.cancel_query(NoTls),
+                );
+                SessionEnd::SwitchServer(Box::new(target))
+            }
+            end = async {
+                tokio::select! {
+                    end = fast_loop(
+                        &mut client_fast,
+                        &query_set,
+                        service_name,
+                        interval_rx,
+                        tx,
+                        history,
+                        store,
+                        appends_since_compact,
+                        admin_rx,
+                        last_admin,
+                        polled_ok,
+                        &fast_wake,
+                        shared_telemetry,
+                        &is_in_recovery,
+                    ) => end,
+                    end = telemetry_loop(
+                        &mut client_telemetry,
+                        &query_set,
+                        &statements_available,
+                        statements_sql,
+                        schema,
+                        statements,
+                        io_stats,
+                        detail_rx,
+                        &fast_wake,
+                        shared_telemetry,
+                        &is_in_recovery,
+                    ) => end,
+                }
+            } => end,
+        };
+
+        conn_handle_fast.abort();
+        conn_handle_telemetry.abort();
+        end
+    } else {
+        let cancel = client_fast.cancel_token();
+        let end = tokio::select! {
+            biased;
+            _ = wait_shutdown(shutdown_rx) => {
+                let _ = cancel.cancel_query(NoTls).await;
+                SessionEnd::Closed
+            }
+            name = wait_db_switch(db_switch_rx) => {
+                let _ = cancel.cancel_query(NoTls).await;
+                SessionEnd::SwitchDatabase(name)
+            }
+            target = wait_server_switch(server_switch_rx) => {
+                let _ = cancel.cancel_query(NoTls).await;
+                SessionEnd::SwitchServer(Box::new(target))
+            }
+            end = single_conn_poll_loop(
+                &mut client_fast,
+                &query_set,
+                service_name,
+                interval_rx,
+                tx,
+                history,
+                schema,
+                statements,
+                io_stats,
+                table_detail,
+                admin_rx,
+                last_admin,
+                polled_ok,
+                store,
+                appends_since_compact,
+                detail_rx,
+                shared_telemetry,
+                &statements_available,
+                statements_sql,
+            ) => end,
+        };
+        conn_handle_fast.abort();
+        end
+    }
 }
 
-#[allow(clippy::too_many_arguments)] // poller-internal plumbing, one call site
-async fn poll_loop(
+#[allow(clippy::too_many_arguments)]
+async fn fast_loop(
     client: &mut Client,
+    q: &queries::QuerySet,
+    service_name: Option<&str>,
+    interval_rx: &mut watch::Receiver<Duration>,
+    tx: &watch::Sender<Arc<DbSnapshot>>,
+    history: &mut SnapshotHistory,
+    store: Option<&HistoryStore>,
+    appends_since_compact: &mut usize,
+    admin_rx: &mut mpsc::Receiver<AdminCommand>,
+    last_admin: &mut Option<AdminActionResult>,
+    polled_ok: &mut bool,
+    fast_wake: &tokio::sync::Notify,
+    shared_telemetry: &Arc<RwLock<SharedTelemetry>>,
+    is_in_recovery: &std::sync::atomic::AtomicBool,
+) -> SessionEnd {
+    let mut deltas: Option<DeltaState> = None;
+
+    loop {
+        if tx.is_closed() {
+            return SessionEnd::Closed;
+        }
+
+        let res = match poll_once_fast(client, q, &mut deltas).await {
+            Ok(r) => r,
+            Err(msg) => return SessionEnd::Error(format!("poll failed: {msg}")),
+        };
+
+        is_in_recovery.store(res.is_in_recovery, std::sync::atomic::Ordering::Relaxed);
+
+        let shared = {
+            shared_telemetry.read().unwrap_or_else(|p| p.into_inner()).clone()
+        };
+
+        let oldest_xid_age = shared
+            .schema
+            .as_deref()
+            .and_then(|s| s.vacuum_cluster_age.as_ref())
+            .map(|v| v.max_age_xids);
+
+        history.push(HistoryPoint {
+            epoch_ms: epoch_ms_now(),
+            tps: res.vitals.tps.max(0.0),
+            active_sessions: res.vitals.active,
+            connections_total: res.vitals.connections_total,
+            cache_hit_pct: Some((res.vitals.cache_hit_ratio * 100.0) as f32),
+            lock_pressure_pct: shared
+                .lock_capacity
+                .as_ref()
+                .map(|l| (l.used_fraction * 100.0) as f32),
+            oldest_xid_age,
+        });
+
+        let blocking_tree = Some(crate::blocks::build_blocking_tree(
+            &res.locks,
+            &res.activity,
+            shared.idle_sessions.as_deref(),
+        ));
+
+        let schema = fold_relation_locks(shared.schema.clone(), Some(&res.relation_locks));
+
+        let mut vitals = res.vitals;
+        vitals.server_name = service_name.map(|s| s.to_string());
+
+        let snapshot = DbSnapshot {
+            vitals,
+            activity: res.activity,
+            locks: res.locks,
+            history: history.clone(),
+            schema,
+            statements: shared.statements.clone(),
+            last_admin_action: last_admin.clone(),
+            replication: shared.replication.clone(),
+            replication_slots: shared.replication_slots.clone(),
+            vacuum_progress: shared.vacuum_progress.clone(),
+            checkpointer: Some(res.checkpointer),
+            databases: shared.databases.clone(),
+            prepared_xacts: shared.prepared_xacts.clone(),
+            lock_capacity: shared.lock_capacity.clone(),
+            idle_sessions: shared.idle_sessions.clone(),
+            table_detail: shared.table_detail.clone(),
+            io_stats: shared.io_stats.clone(),
+            wal: shared.wal.clone(),
+            active_locks: Some(res.active_locks),
+            blocking_tree,
+            ddl_progress: shared.ddl_progress.clone(),
+            slru: shared.slru.clone(),
+            conflicts: shared.conflicts.clone(),
+            publications: shared.publications.clone(),
+            subscriptions: shared.subscriptions.clone(),
+            status: PollerStatus::Ok,
+        };
+
+        *polled_ok = true;
+        if tx.send(Arc::new(snapshot)).is_err() {
+            return SessionEnd::Closed;
+        }
+
+        if let Some(store) = store
+            && let Some(point) = history.latest()
+        {
+            store.append(point);
+            *appends_since_compact += 1;
+            if *appends_since_compact >= DEFAULT_CAP {
+                store.compact(&history.iter().cloned().collect::<Vec<_>>());
+                *appends_since_compact = 0;
+            }
+        }
+
+        tokio::select! {
+            _ = wait_interval(interval_rx) => {}
+            cmd = admin_rx.recv() => match cmd {
+                Some(cmd) => {
+                    *last_admin = Some(execute_admin(client, q, cmd).await);
+                }
+                None => {
+                    wait_interval(interval_rx).await;
+                }
+            },
+            _ = fast_wake.notified() => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn telemetry_loop(
+    client: &mut Client,
+    q: &queries::QuerySet,
+    statements_available: &Result<(), String>,
+    statements_sql: &'static str,
+    schema: &mut SchemaState,
+    statements: &mut StatementsState,
+    io_stats: &mut IoStatsState,
+    detail_rx: &mut mpsc::Receiver<TableDetailRequest>,
+    fast_wake: &tokio::sync::Notify,
+    shared_telemetry: &Arc<RwLock<SharedTelemetry>>,
+    is_in_recovery: &std::sync::atomic::AtomicBool,
+) -> SessionEnd {
+    let mut tier2_deltas = TelemetryDeltaState::default();
+    let mut last_tier2: Option<Instant> = None;
+    let mut last_tier3: Option<Instant> = None;
+
+    loop {
+        if client.is_closed() {
+            return SessionEnd::Error("telemetry connection closed".to_string());
+        }
+
+        let now = Instant::now();
+
+        // Tier 2 (every 3s)
+        if cadence_elapsed(last_tier2, now, TELEMETRY_TIER2_INTERVAL) {
+            last_tier2 = Some(now);
+            let in_rec = is_in_recovery.load(std::sync::atomic::Ordering::Relaxed);
+            let t2 = collect_tier2(client, q, in_rec, &mut tier2_deltas).await;
+            if let Ok(mut shared) = shared_telemetry.write() {
+                shared.replication = t2.replication;
+                shared.replication_slots = t2.replication_slots;
+                shared.vacuum_progress = t2.vacuum_progress;
+                shared.ddl_progress = t2.ddl_progress;
+                shared.wal = t2.wal;
+                shared.slru = t2.slru;
+                shared.conflicts = t2.conflicts;
+                shared.idle_sessions = t2.idle_sessions;
+                shared.prepared_xacts = t2.prepared_xacts;
+                shared.lock_capacity = t2.lock_capacity;
+            }
+            fast_wake.notify_one();
+        }
+
+        // Tier 3 (every 30s)
+        if cadence_elapsed(last_tier3, now, TELEMETRY_TIER3_INTERVAL) {
+            last_tier3 = Some(now);
+            let t3 = collect_tier3(client, q).await;
+            if let Ok(mut shared) = shared_telemetry.write() {
+                shared.databases = t3.databases;
+                shared.publications = t3.publications;
+                shared.subscriptions = t3.subscriptions;
+            }
+            fast_wake.notify_one();
+        }
+
+        // Tier 4 (schema / statements / io_stats)
+        if let Some(with_bloat) = schema.due(now) {
+            schema.last_attempt = Some(now);
+            match collect_schema(client, q, with_bloat, schema.table_stats_limit).await {
+                Ok(collection) => schema.store(collection),
+                Err(msg) => schema.store_error(format!("schema collection failed: {msg}")),
+            }
+            match statements_available {
+                Ok(()) => match collect_statements(client, statements_sql).await {
+                    Ok(rows) => statements.store(rows),
+                    Err(msg) => statements.store_error(format!("statements collection failed: {msg}")),
+                },
+                Err(reason) => statements.store_unavailable(reason.clone()),
+            }
+            if let Some(sql) = q.io_stats
+                && let Ok(raws) = collect_io_stats(client, sql).await
+            {
+                io_stats.store(raws);
+            }
+            if let Ok(mut shared) = shared_telemetry.write() {
+                shared.schema = schema.current.clone();
+                shared.statements = statements.current.clone();
+                shared.io_stats = io_stats.current.clone();
+            }
+            fast_wake.notify_one();
+        }
+
+        let next_tier2_in = match last_tier2 {
+            None => Duration::ZERO,
+            Some(_) => TELEMETRY_TIER2_INTERVAL.saturating_sub(now.elapsed()),
+        };
+        let sleep_dur = next_tier2_in.min(Duration::from_millis(500)).max(Duration::from_millis(100));
+
+        tokio::select! {
+            _ = tokio::time::sleep(sleep_dur) => {}
+            _ = schema.refresh_rx.changed() => {}
+            req = detail_rx.recv() => match req {
+                Some(TableDetailRequest::Fetch { oid, schema: s, name }) => {
+                    let detail = collect_table_detail(client, q, oid, s, name).await;
+                    if let Ok(mut shared) = shared_telemetry.write() {
+                        shared.table_detail = Some(Arc::new(detail));
+                    }
+                    fast_wake.notify_one();
+                }
+                Some(TableDetailRequest::Clear) => {
+                    if let Ok(mut shared) = shared_telemetry.write() {
+                        shared.table_detail = None;
+                    }
+                    fast_wake.notify_one();
+                }
+                None => {
+                    tokio::time::sleep(sleep_dur).await;
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn single_conn_poll_loop(
+    client: &mut Client,
+    q: &queries::QuerySet,
     service_name: Option<&str>,
     interval_rx: &mut watch::Receiver<Duration>,
     tx: &watch::Sender<Arc<DbSnapshot>>,
@@ -980,98 +1426,146 @@ async fn poll_loop(
     store: Option<&HistoryStore>,
     appends_since_compact: &mut usize,
     detail_rx: &mut mpsc::Receiver<TableDetailRequest>,
+    shared_telemetry: &Arc<RwLock<SharedTelemetry>>,
+    statements_available: &Result<(), String>,
+    statements_sql: &'static str,
 ) -> SessionEnd {
-    // Identify our session (application_name). Best-effort and session-level:
-    // it never blocks the dashboard, and behind a pooler it simply won't
-    // persist (harmless — the safety timeout rides SET LOCAL per transaction).
-    let _ = db::configure_session(client).await;
-
-    // Session init, in one read transaction (pooler-safe): the server version
-    // (which picks the SQL variants) and whether the Query Lens is available.
-    // The statements decision is made once per session — so every reconnect
-    // re-checks it — and unavailability is a calm per-lens state, never a
-    // session error: activity polling continues untouched.
-    let (version_num, statements_extversion) = {
-        let init_tx = match begin_read(client).await {
-            Ok(t) => t,
-            Err(e) => return SessionEnd::Error(db_error_message("version detection failed", &e)),
-        };
-        let version_num = match db::server_version_num(&init_tx).await {
-            Ok(v) => v,
-            Err(e) => return SessionEnd::Error(db_error_message("version detection failed", &e)),
-        };
-        let extversion = match db::statements_extension_version(&init_tx).await {
-            Ok(v) => Ok(v),
-            Err(e) => Err(db_error_message("pg_stat_statements detection failed", &e)),
-        };
-        (version_num, extversion)
-    };
-    let query_set = match queries::for_version(version_num) {
-        Ok(q) => q,
-        Err(msg) => return SessionEnd::Error(msg),
-    };
-    let statements_available: Result<(), String> = match &statements_extversion {
-        Ok(extversion) => db::statements_availability(extversion.as_deref()),
-        Err(msg) => Err(msg.clone()),
-    };
-    // v0.14: the I/O & temp-spill column set (and the PG17 blk_*_time
-    // rename) tracks the EXTENSION version, a SEPARATE decision from
-    // `query_set.statements` (which `for_version` picked by SERVER
-    // version — see `queries::statements_sql_for_extension`'s doc comment).
-    // Only reached meaningfully when `statements_available` is `Ok`; falls
-    // back to the base tier otherwise (never queried when unavailable).
-    let statements_sql: &'static str = statements_extversion
-        .as_ref()
-        .ok()
-        .and_then(|v| v.as_deref())
-        .and_then(db::parse_extension_version)
-        .map_or(query_set.statements, |(major, minor)| {
-            queries::statements_sql_for_extension(major, minor)
-        });
-
     let mut deltas: Option<DeltaState> = None;
+    let mut tier2_deltas = TelemetryDeltaState::default();
+    let mut last_tier2: Option<Instant> = None;
+    let mut last_tier3: Option<Instant> = None;
 
-    // First iteration polls immediately (right after connecting); every
-    // later one sleeps for the *current* interval first.
     loop {
         if tx.is_closed() {
             return SessionEnd::Closed;
         }
-        // Publish the fast tick FIRST so the dashboard appears immediately on
-        // connect — the slow schema/statements collection never blocks the
-        // first (or any) snapshot; its result rides the NEXT tick.
-        // The vacuum-cluster age is slow-cadence (Schema Lens); carry the
-        // last known reading (or None before the first collection) into this
-        // fast tick's history point — see `poll_once`'s doc comment.
-        let oldest_xid_age = schema
-            .current
+
+        let res = match poll_once_fast(client, q, &mut deltas).await {
+            Ok(r) => r,
+            Err(msg) => return SessionEnd::Error(format!("poll failed: {msg}")),
+        };
+
+        let now = Instant::now();
+
+        if cadence_elapsed(last_tier2, now, TELEMETRY_TIER2_INTERVAL) {
+            last_tier2 = Some(now);
+            let t2 = collect_tier2(client, q, res.is_in_recovery, &mut tier2_deltas).await;
+            if let Ok(mut shared) = shared_telemetry.write() {
+                shared.replication = t2.replication;
+                shared.replication_slots = t2.replication_slots;
+                shared.vacuum_progress = t2.vacuum_progress;
+                shared.ddl_progress = t2.ddl_progress;
+                shared.wal = t2.wal;
+                shared.slru = t2.slru;
+                shared.conflicts = t2.conflicts;
+                shared.idle_sessions = t2.idle_sessions;
+                shared.prepared_xacts = t2.prepared_xacts;
+                shared.lock_capacity = t2.lock_capacity;
+            }
+        }
+
+        if cadence_elapsed(last_tier3, now, TELEMETRY_TIER3_INTERVAL) {
+            last_tier3 = Some(now);
+            let t3 = collect_tier3(client, q).await;
+            if let Ok(mut shared) = shared_telemetry.write() {
+                shared.databases = t3.databases;
+                shared.publications = t3.publications;
+                shared.subscriptions = t3.subscriptions;
+            }
+        }
+
+        if let Some(with_bloat) = schema.due(now) {
+            schema.last_attempt = Some(now);
+            match collect_schema(client, q, with_bloat, schema.table_stats_limit).await {
+                Ok(collection) => schema.store(collection),
+                Err(msg) => schema.store_error(format!("schema collection failed: {msg}")),
+            }
+            match statements_available {
+                Ok(()) => match collect_statements(client, statements_sql).await {
+                    Ok(rows) => statements.store(rows),
+                    Err(msg) => statements.store_error(format!("statements collection failed: {msg}")),
+                },
+                Err(reason) => statements.store_unavailable(reason.clone()),
+            }
+            if let Some(sql) = q.io_stats
+                && let Ok(raws) = collect_io_stats(client, sql).await
+            {
+                io_stats.store(raws);
+            }
+            if let Ok(mut shared) = shared_telemetry.write() {
+                shared.schema = schema.current.clone();
+                shared.statements = statements.current.clone();
+                shared.io_stats = io_stats.current.clone();
+            }
+        }
+
+        let shared = {
+            shared_telemetry.read().unwrap_or_else(|p| p.into_inner()).clone()
+        };
+
+        let oldest_xid_age = shared
+            .schema
             .as_deref()
             .and_then(|s| s.vacuum_cluster_age.as_ref())
             .map(|v| v.max_age_xids);
-        let (mut snapshot, relation_locks) =
-            match poll_once(client, &query_set, &mut deltas, history, oldest_xid_age).await {
-                Ok(s) => s,
-                Err(msg) => return SessionEnd::Error(format!("poll failed: {msg}")),
-            };
-        // Ticks between collections reuse the last one at Arc-clone cost —
-        // except the per-table lock indicator (v0.15), which is FAST-tick
-        // data: `fold_relation_locks` rebuilds a fresh `Arc` every tick so
-        // lock_count/lock_waiters never lag behind the slow schema cadence.
-        snapshot.schema = fold_relation_locks(schema.current.clone(), relation_locks.as_deref());
-        snapshot.statements = statements.current.clone();
-        snapshot.table_detail = table_detail.current.clone();
-        snapshot.io_stats = io_stats.current.clone();
-        // The most recent admin result rides in every envelope from then
-        // on; frontends dedupe on its `at_epoch_ms`.
-        snapshot.last_admin_action = last_admin.clone();
-        snapshot.vitals.server_name = service_name.map(|s| s.to_string());
+
+        history.push(HistoryPoint {
+            epoch_ms: epoch_ms_now(),
+            tps: res.vitals.tps.max(0.0),
+            active_sessions: res.vitals.active,
+            connections_total: res.vitals.connections_total,
+            cache_hit_pct: Some((res.vitals.cache_hit_ratio * 100.0) as f32),
+            lock_pressure_pct: shared
+                .lock_capacity
+                .as_ref()
+                .map(|l| (l.used_fraction * 100.0) as f32),
+            oldest_xid_age,
+        });
+
+        let blocking_tree = Some(crate::blocks::build_blocking_tree(
+            &res.locks,
+            &res.activity,
+            shared.idle_sessions.as_deref(),
+        ));
+
+        let schema_snapshot = fold_relation_locks(shared.schema.clone(), Some(&res.relation_locks));
+        let mut vitals = res.vitals;
+        vitals.server_name = service_name.map(|s| s.to_string());
+
+        let snapshot = DbSnapshot {
+            vitals,
+            activity: res.activity,
+            locks: res.locks,
+            history: history.clone(),
+            schema: schema_snapshot,
+            statements: shared.statements.clone(),
+            last_admin_action: last_admin.clone(),
+            replication: shared.replication.clone(),
+            replication_slots: shared.replication_slots.clone(),
+            vacuum_progress: shared.vacuum_progress.clone(),
+            checkpointer: Some(res.checkpointer),
+            databases: shared.databases.clone(),
+            prepared_xacts: shared.prepared_xacts.clone(),
+            lock_capacity: shared.lock_capacity.clone(),
+            idle_sessions: shared.idle_sessions.clone(),
+            table_detail: table_detail.current.clone(),
+            io_stats: shared.io_stats.clone(),
+            wal: shared.wal.clone(),
+            active_locks: Some(res.active_locks),
+            blocking_tree,
+            ddl_progress: shared.ddl_progress.clone(),
+            slru: shared.slru.clone(),
+            conflicts: shared.conflicts.clone(),
+            publications: shared.publications.clone(),
+            subscriptions: shared.subscriptions.clone(),
+            status: PollerStatus::Ok,
+        };
+
         *polled_ok = true;
         if tx.send(Arc::new(snapshot)).is_err() {
             return SessionEnd::Closed;
         }
-        // Persist this tick's point (best-effort). Compact every DEFAULT_CAP
-        // appends so a long-running session's file stays bounded to ~2× the
-        // ring; the rewrite keeps exactly the current ring.
+
         if let Some(store) = store
             && let Some(point) = history.latest()
         {
@@ -1083,60 +1577,22 @@ async fn poll_loop(
             }
         }
 
-        // Slow collection AFTER the fast snapshot is out. `due` returns
-        // Some(with_bloat): table stats refresh on the auto cadence
-        // (with_bloat = false), while the heavy estimated-bloat queries run
-        // ONLY on an explicit force refresh (`R`, with_bloat = true) — they
-        // are too slow to run automatically. A failed collection stays inside
-        // SchemaStatus (activity intact) and re-arms the timer.
-        let now = Instant::now();
-        if let Some(with_bloat) = schema.due(now) {
-            schema.last_attempt = Some(now);
-            match collect_schema(client, &query_set, with_bloat, schema.table_stats_limit).await {
-                Ok(collection) => schema.store(collection),
-                Err(msg) => schema.store_error(format!("schema collection failed: {msg}")),
-            }
-            // Statements share the SAME slow tick — no third timer. The
-            // unavailable decision was made at session start; a failing
-            // query keeps the last good rows (status carries the error).
-            match &statements_available {
-                Ok(()) => match collect_statements(client, statements_sql).await {
-                    Ok(rows) => statements.store(rows),
-                    Err(msg) => {
-                        statements.store_error(format!("statements collection failed: {msg}"));
-                    }
-                },
-                Err(reason) => statements.store_unavailable(reason.clone()),
-            }
-            // v0.16: the I/O profile shares the SAME slow tick too. Absent
-            // (not an error) below PG 16 — `q.io_stats` is `None` there, so
-            // the query is simply never issued and `io_stats.current` stays
-            // `None` forever on that server. A failing query on 16+ (a
-            // restricted role, a future privilege change) degrades to "keep
-            // the last good rows" would be nice, but `pg_stat_io` is
-            // world-readable and cheap, so a genuine failure is rare enough
-            // that dropping to `None` (no panel this tick) is acceptable —
-            // same best-effort contract as `replication`/`databases`, unlike
-            // schema/statements' keep-last-good treatment.
-            if let Some(sql) = query_set.io_stats
-                && let Ok(raws) = collect_io_stats(client, sql).await
-            {
-                io_stats.store(raws);
-            }
-        }
-        // The tick sleep doubles as the admin-command AND table-detail-
-        // request listener: either wakes it and skips the rest of the sleep
-        // so the next poll (carrying the admin result or the fresh detail)
-        // happens immediately.
         match wait_interval_or_control(interval_rx, admin_rx, detail_rx).await {
             Some(PollWake::Admin(cmd)) => {
-                *last_admin = Some(execute_admin(client, &query_set, cmd).await);
+                *last_admin = Some(execute_admin(client, q, cmd).await);
             }
             Some(PollWake::Detail(TableDetailRequest::Fetch { oid, schema: s, name })) => {
-                table_detail.store(collect_table_detail(client, &query_set, oid, s, name).await);
+                let detail = collect_table_detail(client, q, oid, s, name).await;
+                table_detail.store(detail);
+                if let Ok(mut shared) = shared_telemetry.write() {
+                    shared.table_detail = table_detail.current.clone();
+                }
             }
             Some(PollWake::Detail(TableDetailRequest::Clear)) => {
                 table_detail.clear();
+                if let Ok(mut shared) = shared_telemetry.write() {
+                    shared.table_detail = None;
+                }
             }
             None => {}
         }
@@ -1152,17 +1608,6 @@ struct DeltaState {
     blks_read: i64,
     cache_hit_ratio: f64,
     checkpointer: CheckpointerDeltaState,
-    /// v0.16's WAL generation rate delta window — `None` until the first
-    /// successful `wal_stats` collection of a session (the query is
-    /// best-effort, unlike `checkpointer`'s essential one, so this cannot
-    /// live as a plain non-`Option` field the way `CheckpointerDeltaState`
-    /// does). Carried forward unchanged across a tick whose collection
-    /// failed, so a transient failure never resets the delta window.
-    wal: Option<WalDeltaState>,
-    /// v0.19's SLRU cache stats delta window.
-    slru: Option<SlruDeltaState>,
-    /// v0.19's Standby recovery conflicts delta window.
-    conflicts: Option<ConflictsDeltaState>,
 }
 
 /// v0.16's previous-tick `pg_stat_wal` counters, the basis for
@@ -1537,28 +1982,14 @@ fn derive_checkpointer_stats(
     (stats, next)
 }
 
-/// `oldest_xid_age` is v0.14's carried-last-known vacuum-cluster-age reading
-/// (`VacuumClusterAge::max_age_xids`) — Schema Lens data on the slow cadence,
-/// stamped onto this tick's [`HistoryPoint`] anyway so the trend arrow has a
-/// step-function series instead of flapping to `None` between slow-cadence
-/// collections. The caller derives it from `SchemaState::current` (the same
-/// Arc every fast tick between collections reuses) before calling in.
-async fn poll_once(
+/// Fast lane poll: pipelines all 6 critical incident queries in 1 single
+/// read-only transaction (1 round-trip) and derives checkpointer and activity vitals.
+async fn poll_once_fast(
     client: &mut Client,
     q: &queries::QuerySet,
     deltas: &mut Option<DeltaState>,
-    history: &mut SnapshotHistory,
-    oldest_xid_age: Option<i64>,
-) -> Result<(DbSnapshot, Option<Vec<db::RelationLockRow>>), String> {
-    // Essential queries: four futures pipelined inside ONE read-only
-    // transaction — a single consistent snapshot, and pooler-safe (prepare +
-    // execute stay on the same backend). Their failure is a real fault, so it
-    // is fatal to the poll, surfaced with the actual server message
-    // (tokio-postgres's raw Display is just "db error"). `bgwriter` (F4) rides
-    // here rather than best-effort: pg_stat_bgwriter/checkpointer are
-    // readable by everyone, same class as pg_stat_database, and the query is
-    // a single cheap catalog row.
-    let (activity_rows, blocking_rows, info_rows, bgwriter_rows) = {
+) -> Result<PollFastResult, String> {
+    let (activity_rows, blocking_rows, info_rows, bgwriter_rows, active_locks_rows, rel_locks_rows) = {
         let etx = begin_read(client)
             .await
             .map_err(|e| db_error_message("poll failed", &e))?;
@@ -1567,6 +1998,8 @@ async fn poll_once(
             etx.query(q.blocking, &[]),
             etx.query(q.server_info, &[]),
             etx.query(q.bgwriter, &[]),
+            etx.query(q.active_locks, &[]),
+            etx.query(q.locks_by_relation, &[]),
         )
         .map_err(|e| db_error_message("poll failed", &e))?;
         etx.commit()
@@ -1592,71 +2025,19 @@ async fn poll_once(
         .ok_or_else(|| "bgwriter/checkpointer query returned no rows".to_string())?;
     let bgwriter_raw = db::bgwriter_from_row(bgwriter_row).map_err(|e| e.to_string())?;
 
-    // Replication is BEST-EFFORT: a restricted or managed server (RDS,
-    // Cloud SQL, …) may forbid the WAL views/functions. A failure here
-    // degrades to "no replication panel" — it must NEVER take the whole poll
-    // (and the dashboard) down. Only the query for the server's actual role
-    // runs.
-    let (replication, replication_slots, publications, subscriptions) =
-        collect_replication(client, q, info.is_in_recovery).await;
+    let mut active_locks = Vec::with_capacity(active_locks_rows.len());
+    for row in &active_locks_rows {
+        if let Ok(lock) = db::active_lock_from_row(row) {
+            active_locks.push(lock);
+        }
+    }
 
-    // Vacuum progress (F2) is likewise best-effort on the fast tick: absent
-    // (`None`) on any failure, never a poll fault — see
-    // `collect_vacuum_progress`.
-    let vacuum_progress = collect_vacuum_progress(client, q).await;
-
-    // Databases (U2) are best-effort on the fast tick too — the picker
-    // simply has nothing to show this tick on any failure.
-    let databases = collect_databases(client, q).await;
-
-    // Orphaned 2PC watch (v0.9) is likewise best-effort — a restricted role
-    // or a server that hides the view degrades to "no panel this tick",
-    // never a poll fault, even though pg_prepared_xacts is world-readable.
-    let prepared_xacts = collect_prepared_xacts(client, q).await;
-
-    // Lock-table pressure gauge (v0.11) is likewise best-effort — cheap
-    // (a count + three scalar settings), but a restricted role or a future
-    // GUC rename must degrade to "no gauge this tick", never a poll fault.
-    let lock_capacity = collect_lock_capacity(client, q).await;
-
-    // Idle connection / connection-age census (v0.11) is likewise
-    // best-effort — a separate, capped query from `activity`, so it must
-    // never fail the poll even on a restricted role.
-    let idle_sessions = collect_idle_sessions(client, q).await;
-
-    // Per-table lock indicator (v0.15) is likewise best-effort — a cheap
-    // grouped aggregate, folded onto the (separately, slow-cadence-collected)
-    // schema table rows by the caller (`fold_relation_locks`), since this
-    // function has no access to that cached collection.
-    let relation_locks = collect_relation_locks(client, q).await;
-
-    // WAL generation rate (v0.16) is likewise best-effort — absent on PG <
-    // 14 (`q.wal_stats` is `None` there, so the query is never issued) or on
-    // any query/parse failure on 14+, never a poll fault. The rate
-    // derivation happens below, once `now`/`deltas` are in scope.
-    let wal_raw = match q.wal_stats {
-        Some(sql) => collect_wal_stats(client, sql).await,
-        None => None,
-    };
-
-    // SLRU cache stats (v0.19, PG 13+) — best-effort.
-    let slru_raw = collect_slru_raw(client, q.slru).await;
-
-    // Standby recovery conflicts (v0.19) — best-effort.
-    let conflicts_raw = collect_conflicts_raw(client, q.replication_conflicts).await;
-
-    // Active locks in current database (v0.17, Blocks Lens) — best-effort.
-    let active_locks = collect_active_locks(client, q).await;
-
-    // In-flight DDL & maintenance progress (v0.17) — best-effort.
-    let ddl_progress = collect_ddl_progress(client, q).await;
-
-    // Hierarchical blocking tree (v0.17, Blocks Lens) — derived in-memory.
-    let blocking_tree = Some(crate::blocks::build_blocking_tree(
-        &locks,
-        &activity,
-        idle_sessions.as_deref(),
-    ));
+    let mut relation_locks = Vec::with_capacity(rel_locks_rows.len());
+    for row in &rel_locks_rows {
+        if let Ok(lock) = db::relation_lock_from_row(row) {
+            relation_locks.push(lock);
+        }
+    }
 
     let now = Instant::now();
     let xact_total = info.xact_commit + info.xact_rollback;
@@ -1676,56 +2057,21 @@ async fn poll_once(
                 if dh + dr > 0 {
                     dh as f64 / (dh + dr) as f64
                 } else {
-                    // No block activity this tick: carry the last reading.
                     prev.cache_hit_ratio
                 }
             } else {
-                // Stats reset (pg_stat_reset / crash): back to cumulative.
                 cumulative_ratio
             };
             (tps, ratio)
         }
-        // First poll of a session: no delta window yet — cumulative ratio,
-        // no TPS reading (plan: acceptable for the first snapshot).
         None => (0.0, cumulative_ratio),
     };
+
     let (checkpointer_stats, checkpointer_delta) = derive_checkpointer_stats(
         &bgwriter_raw,
         now,
         deltas.as_ref().map(|d| &d.checkpointer),
     );
-
-    // v0.16's WAL generation rate: `None` (no panel) when this tick's
-    // collection failed or the server is < 14, otherwise derived against the
-    // session's delta window — carried forward unchanged (not reset to
-    // `None`) across a tick whose collection failed, so a transient failure
-    // never loses the window.
-    let prev_wal = deltas.as_ref().and_then(|d| d.wal);
-    let (wal, next_wal_delta) = match &wal_raw {
-        Some(raw) => {
-            let (stats, next) = derive_wal_stats(raw, now, prev_wal.as_ref());
-            (Some(stats), Some(next))
-        }
-        None => (None, prev_wal),
-    };
-
-    let prev_slru = deltas.as_ref().and_then(|d| d.slru.clone());
-    let (slru, next_slru_delta) = match &slru_raw {
-        Some(raw) => {
-            let (stats, next) = derive_slru_stats(raw, now, prev_slru.as_ref());
-            (Some(stats), Some(next))
-        }
-        None => (None, prev_slru),
-    };
-
-    let prev_conflicts = deltas.as_ref().and_then(|d| d.conflicts);
-    let (conflicts, next_conflicts_delta) = match &conflicts_raw {
-        Some(raw) => {
-            let (stats, next) = derive_conflicts(raw, now, prev_conflicts.as_ref());
-            (Some(stats), Some(next))
-        }
-        None => (None, prev_conflicts),
-    };
 
     *deltas = Some(DeltaState {
         at: now,
@@ -1734,20 +2080,6 @@ async fn poll_once(
         blks_read: info.blks_read,
         cache_hit_ratio,
         checkpointer: checkpointer_delta,
-        wal: next_wal_delta,
-        slru: next_slru_delta,
-        conflicts: next_conflicts_delta,
-    });
-
-    // One incremental push per poll — the ring is never rebuilt.
-    history.push(HistoryPoint {
-        epoch_ms: epoch_ms_now(),
-        tps: tps.max(0.0),
-        active_sessions: info.active.max(0) as u32,
-        connections_total: info.connections_total.max(0) as u32,
-        cache_hit_pct: Some((cache_hit_ratio * 100.0) as f32),
-        lock_pressure_pct: lock_capacity.as_ref().map(|l| (l.used_fraction * 100.0) as f32),
-        oldest_xid_age,
     });
 
     let vitals = ServerVitals {
@@ -1770,38 +2102,15 @@ async fn poll_once(
         deadlocks: info.deadlocks,
     };
 
-    Ok((
-        DbSnapshot {
-            vitals,
-            activity,
-            locks,
-            history: history.clone(),
-            // All five stamped by the caller from poller-owned state.
-            schema: None,
-            statements: None,
-            table_detail: None,
-            io_stats: None,
-            last_admin_action: None,
-            replication,
-            replication_slots,
-            publications,
-            subscriptions,
-            vacuum_progress,
-            checkpointer: Some(checkpointer_stats),
-            databases,
-            prepared_xacts,
-            lock_capacity,
-            idle_sessions,
-            wal,
-            slru,
-            conflicts,
-            active_locks,
-            blocking_tree,
-            ddl_progress,
-            status: PollerStatus::Ok,
-        },
+    Ok(PollFastResult {
+        vitals,
+        activity,
+        locks,
+        checkpointer: checkpointer_stats,
+        active_locks,
         relation_locks,
-    ))
+        is_in_recovery: info.is_in_recovery,
+    })
 }
 
 /// One slow-cadence collection: table stats plus the two estimated-bloat
@@ -2155,19 +2464,14 @@ async fn collect_table_detail(
 /// restricted or managed server may forbid one view but not the other), and
 /// neither failure can fail the poll. Only the sender/receiver query
 /// matching the role runs; the slots query always runs — slots exist on
-/// BOTH a primary and a standby, unlike senders/receiver.
-async fn collect_replication(
+/// Tier 2 replication info and slots.
+async fn collect_replication_tier2(
     client: &mut Client,
     q: &queries::QuerySet,
     is_in_recovery: bool,
-) -> (
-    Option<ReplicationInfo>,
-    Option<Vec<ReplicationSlotRow>>,
-    Option<Vec<PublicationRow>>,
-    Option<Vec<SubscriptionRow>>,
-) {
+) -> (Option<ReplicationInfo>, Option<Vec<ReplicationSlotRow>>) {
     let Ok(tx) = begin_read(client).await else {
-        return (None, None, None, None);
+        return (None, None);
     };
 
     let info = if is_in_recovery {
@@ -2209,6 +2513,19 @@ async fn collect_replication(
         Err(_) => None,
     };
 
+    let _ = tx.commit().await;
+    (info, slots)
+}
+
+/// Tier 3 logical replication publications and subscriptions.
+async fn collect_logical_replication(
+    client: &mut Client,
+    q: &queries::QuerySet,
+) -> (Option<Vec<PublicationRow>>, Option<Vec<SubscriptionRow>>) {
+    let Ok(tx) = begin_read(client).await else {
+        return (None, None);
+    };
+
     let publications = match tx.query(q.publications, &[]).await {
         Ok(rows) => {
             let mut out = Vec::with_capacity(rows.len());
@@ -2245,11 +2562,77 @@ async fn collect_replication(
         Err(_) => None,
     };
 
-    // Best-effort: a failed commit just means no panels this tick.
-    if tx.commit().await.is_err() {
-        return (None, None, None, None);
+    let _ = tx.commit().await;
+    (publications, subscriptions)
+}
+
+/// Collects all Tier 2 operational telemetry (cadence 3s) on the Telemetry Lane.
+async fn collect_tier2(
+    client: &mut Client,
+    q: &queries::QuerySet,
+    is_in_recovery: bool,
+    deltas: &mut TelemetryDeltaState,
+) -> Tier2Collection {
+    let (replication, replication_slots) = collect_replication_tier2(client, q, is_in_recovery).await;
+    let vacuum_progress = collect_vacuum_progress(client, q).await;
+    let ddl_progress = collect_ddl_progress(client, q).await;
+
+    let now = Instant::now();
+    let wal = if let Some(sql) = q.wal_stats {
+        if let Some(raw) = collect_wal_stats(client, sql).await {
+            let (stats, next) = derive_wal_stats(&raw, now, deltas.wal.as_ref());
+            deltas.wal = Some(next);
+            Some(stats)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let slru = if let Some(raw) = collect_slru_raw(client, q.slru).await {
+        let (stats, next) = derive_slru_stats(&raw, now, deltas.slru.as_ref());
+        deltas.slru = Some(next);
+        Some(stats)
+    } else {
+        None
+    };
+
+    let conflicts = if let Some(raw) = collect_conflicts_raw(client, q.replication_conflicts).await {
+        let (stats, next) = derive_conflicts(&raw, now, deltas.conflicts.as_ref());
+        deltas.conflicts = Some(next);
+        Some(stats)
+    } else {
+        None
+    };
+
+    let idle_sessions = collect_idle_sessions(client, q).await;
+    let prepared_xacts = collect_prepared_xacts(client, q).await;
+    let lock_capacity = collect_lock_capacity(client, q).await;
+
+    Tier2Collection {
+        replication,
+        replication_slots,
+        vacuum_progress,
+        ddl_progress,
+        wal,
+        slru,
+        conflicts,
+        idle_sessions,
+        prepared_xacts,
+        lock_capacity,
     }
-    (info, slots, publications, subscriptions)
+}
+
+/// Collects all Tier 3 catalog telemetry (cadence 30s) on the Telemetry Lane.
+async fn collect_tier3(client: &mut Client, q: &queries::QuerySet) -> Tier3Collection {
+    let databases = collect_databases(client, q).await;
+    let (publications, subscriptions) = collect_logical_replication(client, q).await;
+    Tier3Collection {
+        databases,
+        publications,
+        subscriptions,
+    }
 }
 
 /// Best-effort in-flight vacuum progress (F2, `pg_stat_progress_vacuum`),
@@ -2364,27 +2747,7 @@ async fn collect_lock_capacity(client: &mut Client, q: &queries::QuerySet) -> Op
 /// Best-effort per-table lock indicator (v0.15,
 /// `queries/locks_by_relation.sql`), refreshed every fast tick — locks come
 /// and go far faster than the Schema Lens's slow cadence, so this rides the
-/// fast tick like `lock_capacity`/`databases`, and is folded onto the
-/// (separately, slow-cadence-collected) table rows by [`fold_relation_locks`]
-/// at snapshot assembly time. Returns `None` on ANY query or parse
-/// failure — same contract as [`collect_lock_capacity`]; it must never fail
-/// the poll. `Some(vec![])` means the collection succeeded and found no
-/// relation locks at all.
-async fn collect_relation_locks(
-    client: &mut Client,
-    q: &queries::QuerySet,
-) -> Option<Vec<db::RelationLockRow>> {
-    let tx = begin_read(client).await.ok()?;
-    let rows = tx.query(q.locks_by_relation, &[]).await.ok()?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        out.push(db::relation_lock_from_row(row).ok()?);
-    }
-    tx.commit().await.ok()?;
-    Some(out)
-}
-
-/// Folds this tick's [`collect_relation_locks`] result onto every table row
+/// Folds the pipelined relation locks result onto every table row
 /// of `schema` (v0.15's per-table lock indicator), keyed by `oid` ==
 /// `rel_oid`. `schema` itself is the poller's cached slow-cadence
 /// [`SchemaSnapshot`] (unchanged since its last collection); this rebuilds a
@@ -2436,25 +2799,6 @@ async fn collect_idle_sessions(
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(db::idle_session_from_row(row).ok()?);
-    }
-    tx.commit().await.ok()?;
-    Some(out)
-}
-
-/// Active locks in current database (v0.17, Blocks Lens,
-/// `queries/locks_active.sql`), refreshed every fast tick. Best-effort: returns
-/// `None` on ANY query or parse failure, never fails the poll.
-async fn collect_active_locks(
-    client: &mut Client,
-    q: &queries::QuerySet,
-) -> Option<Vec<ActiveLockRow>> {
-    let tx = begin_read(client).await.ok()?;
-    let rows = tx.query(q.active_locks, &[]).await.ok()?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        if let Ok(lock) = db::active_lock_from_row(row) {
-            out.push(lock);
-        }
     }
     tx.commit().await.ok()?;
     Some(out)
@@ -2821,6 +3165,7 @@ mod tests {
             server_switch_rx(),
             queries::SCHEMA_TABLE_LIMIT_DEFAULT,
             detail_rx(),
+            false,
         );
 
         assert!(matches!(rx.borrow().status, PollerStatus::Connecting));
@@ -2863,6 +3208,7 @@ mod tests {
             server_switch_rx(),
             queries::SCHEMA_TABLE_LIMIT_DEFAULT,
             detail_rx(),
+            false,
         );
 
         tokio::time::timeout(Duration::from_secs(5), rx.changed())
@@ -2911,6 +3257,7 @@ mod tests {
             server_switch_rx(),
             queries::SCHEMA_TABLE_LIMIT_DEFAULT,
             detail_rx(),
+            false,
         );
 
         // First attempt at ~0s, second after the 1s backoff. Poll the file
