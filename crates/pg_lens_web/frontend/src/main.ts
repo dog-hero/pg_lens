@@ -2,7 +2,7 @@
 // compact health ribbon, inspector drawer, and command palette.
 
 import "./style.css";
-import type { AdminActionResult, ActivityRow, DatabaseRow, DbSnapshot, PollerStatus } from "./types.ts";
+import type { AdminActionResult, ActivityRow, DatabaseRow, DbSnapshot, PollerStatus, TelemetryError } from "./types.ts";
 import {
   fetchConfig,
   fetchServers,
@@ -292,6 +292,7 @@ replicationFilter?.addEventListener("input", () => {
       latestSnapshot.subscriptions ?? null,
       replicationFilter.value,
       (slot) => drawer.openSlot(slot),
+      latestSnapshot.last_error ?? null,
     );
   }
 });
@@ -481,9 +482,10 @@ function setConnState(state: "connecting" | "live" | "reconnecting"): void {
   connState.textContent = state === "live" ? "● live" : `${state}…`;
 }
 
-function renderStatus(status: PollerStatus): void {
+function renderStatus(status: PollerStatus, lastError?: TelemetryError | null): void {
   if (typeof status === "object" && "Error" in status) {
-    statusBanner.textContent = `poller error: ${status.Error} — showing last good data`;
+    const logSuffix = lastError ? ` (see ${lastError.log_path})` : "";
+    statusBanner.textContent = `poller error: ${status.Error} — showing last good data${logSuffix}`;
     statusBanner.hidden = false;
   } else if (status === "Connecting") {
     statusBanner.textContent = "connecting to PostgreSQL…";
@@ -583,7 +585,7 @@ function updateActivityChipCounts(snapshot: DbSnapshot): void {
 }
 
 function renderSnapshot(snapshot: DbSnapshot): void {
-  renderStatus(snapshot.status);
+  renderStatus(snapshot.status, snapshot.last_error);
 
   // 1. Macro Lens update
   macroLens.update(
@@ -613,6 +615,7 @@ function renderSnapshot(snapshot: DbSnapshot): void {
     snapshot.subscriptions ?? null,
     replicationFilter?.value ?? "",
     (slot) => drawer.openSlot(slot),
+    snapshot.last_error ?? null,
   );
 
   // 4. Waits & Oldest Xact

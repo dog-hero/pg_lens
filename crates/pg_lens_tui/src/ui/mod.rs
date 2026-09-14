@@ -140,7 +140,12 @@ fn draw_status_banner(app: &App, frame: &mut Frame, area: Rect) {
         PollerStatus::Ok => return,
         PollerStatus::Connecting => Line::from(" connecting to PostgreSQL\u{2026}").dim(),
         PollerStatus::Error(msg) => {
-            Line::from(format!(" DB error: {msg} \u{2014} showing last known data"))
+            let log_suffix = if let Some(ref err) = app.snapshot.last_error {
+                format!(" (see {})", err.log_path)
+            } else {
+                format!(" (see {})", pg_lens_core::error_log_path().display())
+            };
+            Line::from(format!(" DB error: {msg} \u{2014} showing last known data{log_suffix}"))
                 .style(Style::new().fg(Color::White).bg(Color::Red).bold())
         }
     };
@@ -543,7 +548,6 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     // the budget so data staleness is never pushed off screen).
     // `/` filters Micro Lens, Schema Lens (Tables & Sequences), Index Lens, and Query Lens
     if app.active_tab == Tab::MicroLens
-        || (app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables)
         || (app.active_tab == Tab::SchemaLens
             && (app.schema_view == SchemaView::Tables || app.schema_view == SchemaView::Sequences))
         || app.active_tab == Tab::QueryLens
@@ -619,6 +623,22 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
             spans.push(sep.clone());
             spans.push(bk);
             spans.push(bd);
+        }
+    }
+    if let Some(ref err) = app.snapshot.last_error {
+        let err_span = Span::styled(
+            format!(" \u{26a0} error: {}", err.subsystem),
+            Style::new().fg(Color::Yellow).bold(),
+        );
+        let fits = Line::from(spans.clone()).width()
+            + sep.width()
+            + err_span.width()
+            + sep.width()
+            + data_span.width()
+            <= area.width as usize;
+        if fits {
+            spans.push(sep.clone());
+            spans.push(err_span);
         }
     }
     // U2's `d: database` hint works from any lens, but the tight lenses
@@ -1545,6 +1565,38 @@ mod tests {
         assert!(screen.contains("showing last known data"));
         // Last data still rendered underneath the banner.
         assert!(screen.contains("Connections"));
+    }
+
+    #[test]
+    fn error_status_renders_log_file_hint_and_replication_slots_error() {
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Snapshot(Arc::new(pg_lens_core::DbSnapshot::mock())),
+        );
+        let mut snap = app.snapshot.as_ref().clone();
+        snap.replication_slots = None;
+        snap.last_error = Some(pg_lens_core::TelemetryError {
+            subsystem: "replication_slots".to_string(),
+            message: "column s.invalidated does not exist".to_string(),
+            log_path: "/tmp/pg_lens/error.log".to_string(),
+            timestamp_epoch_secs: 1000,
+        });
+        app.snapshot = Arc::new(snap);
+        app.active_tab = Tab::ReplicationLens;
+
+        let screen = render(&mut app);
+        assert!(
+            screen.contains("Error collecting replication slots: column s.invalidated does not exist"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Details logged to: /tmp/pg_lens/error.log"),
+            "{screen}"
+        );
+        assert!(screen.contains("error: replication_slots"), "{screen}");
     }
 
     /// Pre-first-data Connecting: the splash replaces the dashboard.

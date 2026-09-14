@@ -7,6 +7,7 @@
 pub mod blocking;
 pub mod blocks;
 pub mod db;
+pub mod error_log;
 pub mod history;
 pub mod history_store;
 pub mod idle_sessions;
@@ -41,8 +42,8 @@ pub use models::{
     ProgressUnifiedRow, PublicationRow, ReplicationInfo, ReplicationSlotRow, SchemaSnapshot,
     SchemaStatus, SequenceRow, SequenceSeverity, ServerVitals, SlruRow, SlruStats, StatementRow,
     StatementsSnapshot, StatementsStatus, SubscriptionRow, TableDetail, TableDetailColumn,
-    TableDetailConstraint, TableDetailIndex, TableDetailRequest, TableStatRow, VacuumClusterAge,
-    VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow, WalStats,
+    TableDetailConstraint, TableDetailIndex, TableDetailRequest, TableStatRow, TelemetryError,
+    VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalReceiverRow, WalSenderRow, WalStats,
     calculate_sequence_exhaustion,
 };
 pub use poller::ServerSwitchTarget;
@@ -63,3 +64,5 @@ pub use services::PasswordSource;
 pub use waits::{WaitSummary, top_waits};
 pub use settings::{ConnLabel, ConnSpec, Resolved, SettingsError};
 pub use xact_age::{OldestXact, Severity as XactAgeSeverity, oldest_open_xact, xact_age_severity};
+pub use error_log::{error_log_path, log_error};
+

@@ -311,6 +311,11 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.23.0** — "Universal Error Cataloging & PostgreSQL 17 Replication Fix":
+  - **Universal Error Cataloging Subsystem (`error.log`)**: structured persistent error logging to `~/.local/state/pg_lens/error.log` (or `$PG_LENS_STATE_DIR/error.log`) with 30-second in-memory deduplication and rate-limiting across all database telemetry collectors.
+  - **On-Screen Error Notifications (TUI & Web)**: status bar alert badge (`⚠ error: <subsystem>`), contextual in-panel error cards with server error details and log file paths, and database error banner references.
+  - **PostgreSQL 17 Replication Slots Compatibility**: corrected query targeting `s.invalidation_reason` for PostgreSQL 17.
+  - **Telemetry Query Isolation**: independent transactions for replication senders and replication slots in Tier 2 polling.
 - **v0.22.0** — "Dual-Lane Poller Architecture, Fast Incident Path & Sub-Second Precision":
   - **Dual-Lane Poller Architecture**: dedicated Fast Lane (`client_fast`) with 1-RTT transaction pipelining for incident queries (`activity`, `blocking`, `server_info`, `bgwriter`, `active_locks`, `locks_by_relation`) reducing RTT from ~39 to 1; independent Telemetry Lane (`client_telemetry`) decoupling slower catalog queries into Tiers 2/3/4 (3s, 30s, 60s) with atomic state synthesis via `Arc<RwLock<SharedTelemetry>>`.
   - **Single Connection Mode**: `--single-connection` CLI flag and auto-fallback when connection limits or poolers prevent secondary connections.

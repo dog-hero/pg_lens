@@ -33,7 +33,7 @@ fn is_permission_denied(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(1)
 }
 
-fn state_base_dir() -> Option<PathBuf> {
+pub fn state_base_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("PG_LENS_STATE_DIR") {
         return Some(PathBuf::from(dir));
     }

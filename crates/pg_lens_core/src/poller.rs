@@ -36,7 +36,7 @@ use crate::models::{
     LockCapacity, PollerStatus, PreparedXactRow, PublicationRow, ReplicationInfo,
     ReplicationSlotRow, SchemaSnapshot, SchemaStatus, SequenceRow, ServerVitals, SlruRow, SlruStats,
     StatementRow, StatementsSnapshot, StatementsStatus, SubscriptionRow, TableDetail,
-    TableDetailRequest, VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalStats,
+    TableDetailRequest, TelemetryError, VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalStats,
 };
 use crate::schema_growth::{GROWTH_LOOKBACK_MS, SchemaGrowthTracker};
 use crate::services::{self, PasswordSource};
@@ -108,6 +108,9 @@ pub struct SharedTelemetry {
 
     // On-demand table detail
     pub table_detail: Option<Arc<TableDetail>>,
+
+    // Error tracking
+    pub last_error: Option<TelemetryError>,
 }
 
 /// Telemetry Lane delta window for rate calculations across ticks.
@@ -130,6 +133,7 @@ struct Tier2Collection {
     idle_sessions: Option<Vec<IdleSessionRow>>,
     prepared_xacts: Option<Vec<PreparedXactRow>>,
     lock_capacity: Option<LockCapacity>,
+    last_error: Option<TelemetryError>,
 }
 
 /// Output of Tier 3 catalog telemetry queries.
@@ -137,6 +141,7 @@ struct Tier3Collection {
     databases: Option<Vec<DatabaseRow>>,
     publications: Option<Vec<PublicationRow>>,
     subscriptions: Option<Vec<SubscriptionRow>>,
+    last_error: Option<TelemetryError>,
 }
 
 /// Result of the fast-lane pipelined query.
@@ -1259,6 +1264,7 @@ async fn fast_loop(
             conflicts: shared.conflicts.clone(),
             publications: shared.publications.clone(),
             subscriptions: shared.subscriptions.clone(),
+            last_error: shared.last_error.clone(),
             status: PollerStatus::Ok,
         };
 
@@ -1334,6 +1340,16 @@ async fn telemetry_loop(
                 shared.idle_sessions = t2.idle_sessions;
                 shared.prepared_xacts = t2.prepared_xacts;
                 shared.lock_capacity = t2.lock_capacity;
+                if t2.last_error.is_some() {
+                    shared.last_error = t2.last_error;
+                } else if shared.replication_slots.is_some()
+                    && shared
+                        .last_error
+                        .as_ref()
+                        .is_some_and(|e| e.subsystem == "replication_slots")
+                {
+                    shared.last_error = None;
+                }
             }
             fast_wake.notify_one();
         }
@@ -1346,6 +1362,9 @@ async fn telemetry_loop(
                 shared.databases = t3.databases;
                 shared.publications = t3.publications;
                 shared.subscriptions = t3.subscriptions;
+                if t3.last_error.is_some() {
+                    shared.last_error = t3.last_error;
+                }
             }
             fast_wake.notify_one();
         }
@@ -1355,19 +1374,44 @@ async fn telemetry_loop(
             schema.last_attempt = Some(now);
             match collect_schema(client, q, with_bloat, schema.table_stats_limit).await {
                 Ok(collection) => schema.store(collection),
-                Err(msg) => schema.store_error(format!("schema collection failed: {msg}")),
+                Err(msg) => {
+                    let path = crate::error_log::log_error("schema", &msg);
+                    if let Ok(mut shared) = shared_telemetry.write() {
+                        shared.last_error = Some(TelemetryError {
+                            subsystem: "schema".to_string(),
+                            message: msg.clone(),
+                            log_path: path.to_string_lossy().to_string(),
+                            timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                        });
+                    }
+                    schema.store_error(format!("schema collection failed: {msg}"));
+                }
             }
             match statements_available {
                 Ok(()) => match collect_statements(client, statements_sql).await {
                     Ok(rows) => statements.store(rows),
-                    Err(msg) => statements.store_error(format!("statements collection failed: {msg}")),
+                    Err(msg) => {
+                        let path = crate::error_log::log_error("statements", &msg);
+                        if let Ok(mut shared) = shared_telemetry.write() {
+                            shared.last_error = Some(TelemetryError {
+                                subsystem: "statements".to_string(),
+                                message: msg.clone(),
+                                log_path: path.to_string_lossy().to_string(),
+                                timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                            });
+                        }
+                        statements.store_error(format!("statements collection failed: {msg}"));
+                    }
                 },
                 Err(reason) => statements.store_unavailable(reason.clone()),
             }
-            if let Some(sql) = q.io_stats
-                && let Ok(raws) = collect_io_stats(client, sql).await
-            {
-                io_stats.store(raws);
+            if let Some(sql) = q.io_stats {
+                match collect_io_stats(client, sql).await {
+                    Ok(raws) => io_stats.store(raws),
+                    Err(e) => {
+                        crate::error_log::log_error("io_stats", &e);
+                    }
+                }
             }
             if let Ok(mut shared) = shared_telemetry.write() {
                 shared.schema = schema.current.clone();
@@ -1461,6 +1505,16 @@ async fn single_conn_poll_loop(
                 shared.idle_sessions = t2.idle_sessions;
                 shared.prepared_xacts = t2.prepared_xacts;
                 shared.lock_capacity = t2.lock_capacity;
+                if t2.last_error.is_some() {
+                    shared.last_error = t2.last_error;
+                } else if shared.replication_slots.is_some()
+                    && shared
+                        .last_error
+                        .as_ref()
+                        .is_some_and(|e| e.subsystem == "replication_slots")
+                {
+                    shared.last_error = None;
+                }
             }
         }
 
@@ -1471,6 +1525,9 @@ async fn single_conn_poll_loop(
                 shared.databases = t3.databases;
                 shared.publications = t3.publications;
                 shared.subscriptions = t3.subscriptions;
+                if t3.last_error.is_some() {
+                    shared.last_error = t3.last_error;
+                }
             }
         }
 
@@ -1478,19 +1535,44 @@ async fn single_conn_poll_loop(
             schema.last_attempt = Some(now);
             match collect_schema(client, q, with_bloat, schema.table_stats_limit).await {
                 Ok(collection) => schema.store(collection),
-                Err(msg) => schema.store_error(format!("schema collection failed: {msg}")),
+                Err(msg) => {
+                    let path = crate::error_log::log_error("schema", &msg);
+                    if let Ok(mut shared) = shared_telemetry.write() {
+                        shared.last_error = Some(TelemetryError {
+                            subsystem: "schema".to_string(),
+                            message: msg.clone(),
+                            log_path: path.to_string_lossy().to_string(),
+                            timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                        });
+                    }
+                    schema.store_error(format!("schema collection failed: {msg}"));
+                }
             }
             match statements_available {
                 Ok(()) => match collect_statements(client, statements_sql).await {
                     Ok(rows) => statements.store(rows),
-                    Err(msg) => statements.store_error(format!("statements collection failed: {msg}")),
+                    Err(msg) => {
+                        let path = crate::error_log::log_error("statements", &msg);
+                        if let Ok(mut shared) = shared_telemetry.write() {
+                            shared.last_error = Some(TelemetryError {
+                                subsystem: "statements".to_string(),
+                                message: msg.clone(),
+                                log_path: path.to_string_lossy().to_string(),
+                                timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                            });
+                        }
+                        statements.store_error(format!("statements collection failed: {msg}"));
+                    }
                 },
                 Err(reason) => statements.store_unavailable(reason.clone()),
             }
-            if let Some(sql) = q.io_stats
-                && let Ok(raws) = collect_io_stats(client, sql).await
-            {
-                io_stats.store(raws);
+            if let Some(sql) = q.io_stats {
+                match collect_io_stats(client, sql).await {
+                    Ok(raws) => io_stats.store(raws),
+                    Err(e) => {
+                        crate::error_log::log_error("io_stats", &e);
+                    }
+                }
             }
             if let Ok(mut shared) = shared_telemetry.write() {
                 shared.schema = schema.current.clone();
@@ -1558,6 +1640,7 @@ async fn single_conn_poll_loop(
             conflicts: shared.conflicts.clone(),
             publications: shared.publications.clone(),
             subscriptions: shared.subscriptions.clone(),
+            last_error: shared.last_error.clone(),
             status: PollerStatus::Ok,
         };
 
@@ -2438,22 +2521,25 @@ async fn collect_table_detail(
             heap_cache_hit_pct,
             idx_cache_hit_pct,
         },
-        Err(msg) => TableDetail {
-            oid,
-            schema,
-            name,
-            collected_at_epoch_ms: now,
-            columns: Vec::new(),
-            constraints: Vec::new(),
-            indexes: Vec::new(),
-            error: Some(format!("table detail collection failed: {msg}")),
-            heap_bytes: 0,
-            toast_bytes: 0,
-            index_bytes: 0,
-            total_bytes: 0,
-            heap_cache_hit_pct: None,
-            idx_cache_hit_pct: None,
-        },
+        Err(msg) => {
+            crate::error_log::log_error("table_detail", &msg);
+            TableDetail {
+                oid,
+                schema,
+                name,
+                collected_at_epoch_ms: now,
+                columns: Vec::new(),
+                constraints: Vec::new(),
+                indexes: Vec::new(),
+                error: Some(format!("table detail collection failed: {msg}")),
+                heap_bytes: 0,
+                toast_bytes: 0,
+                index_bytes: 0,
+                total_bytes: 0,
+                heap_cache_hit_pct: None,
+                idx_cache_hit_pct: None,
+            }
+        }
     }
 }
 
@@ -2464,106 +2550,197 @@ async fn collect_table_detail(
 /// restricted or managed server may forbid one view but not the other), and
 /// neither failure can fail the poll. Only the sender/receiver query
 /// matching the role runs; the slots query always runs — slots exist on
-/// Tier 2 replication info and slots.
+/// Tier 2 replication info and slots. Both run in independent read transactions
+/// so a failure in one view (e.g. restricted permissions) never aborts the other.
 async fn collect_replication_tier2(
     client: &mut Client,
     q: &queries::QuerySet,
     is_in_recovery: bool,
-) -> (Option<ReplicationInfo>, Option<Vec<ReplicationSlotRow>>) {
-    let Ok(tx) = begin_read(client).await else {
-        return (None, None);
-    };
+) -> (Option<ReplicationInfo>, Option<Vec<ReplicationSlotRow>>, Option<TelemetryError>) {
+    let mut last_err = None;
 
-    let info = if is_in_recovery {
-        match tx.query(q.wal_receiver, &[]).await {
-            Ok(rows) => {
-                let receiver = rows.first().and_then(|r| db::wal_receiver_from_row(r).ok());
-                Some(ReplicationInfo::Standby { receiver })
-            }
-            Err(_) => None,
-        }
-    } else {
-        match tx.query(q.replication, &[]).await {
-            Ok(rows) => {
-                let senders = rows
-                    .iter()
-                    .filter_map(|r| db::wal_sender_from_row(r).ok())
-                    .collect();
-                Some(ReplicationInfo::Primary { senders })
-            }
-            Err(_) => None,
-        }
-    };
-
-    let slots = match tx.query(q.replication_slots, &[]).await {
-        Ok(rows) => {
-            let mut out = Vec::with_capacity(rows.len());
-            let mut all_parsed = true;
-            for row in &rows {
-                match db::replication_slot_from_row(row) {
-                    Ok(slot) => out.push(slot),
-                    Err(_) => {
-                        all_parsed = false;
-                        break;
-                    }
+    // 1. Wal senders (primary) or wal receiver (standby)
+    let info = if let Ok(tx) = begin_read(client).await {
+        let res = if is_in_recovery {
+            match tx.query(q.wal_receiver, &[]).await {
+                Ok(rows) => {
+                    let receiver = rows.first().and_then(|r| db::wal_receiver_from_row(r).ok());
+                    Some(ReplicationInfo::Standby { receiver })
+                }
+                Err(e) => {
+                    let _ = crate::error_log::log_error("wal_receiver", &e);
+                    None
                 }
             }
-            if all_parsed { Some(out) } else { None }
-        }
-        Err(_) => None,
+        } else {
+            match tx.query(q.replication, &[]).await {
+                Ok(rows) => {
+                    let senders = rows
+                        .iter()
+                        .filter_map(|r| db::wal_sender_from_row(r).ok())
+                        .collect();
+                    Some(ReplicationInfo::Primary { senders })
+                }
+                Err(e) => {
+                    let _ = crate::error_log::log_error("replication", &e);
+                    None
+                }
+            }
+        };
+        let _ = tx.commit().await;
+        res
+    } else {
+        None
     };
 
-    let _ = tx.commit().await;
-    (info, slots)
+    // 2. Replication slots in independent transaction
+    let slots = if let Ok(tx) = begin_read(client).await {
+        let res = match tx.query(q.replication_slots, &[]).await {
+            Ok(rows) => {
+                let mut out = Vec::with_capacity(rows.len());
+                let mut parse_err = None;
+                for row in &rows {
+                    match db::replication_slot_from_row(row) {
+                        Ok(slot) => out.push(slot),
+                        Err(e) => {
+                            parse_err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = parse_err {
+                    let path = crate::error_log::log_error("replication_slots", &e);
+                    last_err = Some(TelemetryError {
+                        subsystem: "replication_slots".to_string(),
+                        message: format!("parse error: {e}"),
+                        log_path: path.to_string_lossy().to_string(),
+                        timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                    });
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+            Err(e) => {
+                let path = crate::error_log::log_error("replication_slots", &e);
+                last_err = Some(TelemetryError {
+                    subsystem: "replication_slots".to_string(),
+                    message: e.to_string(),
+                    log_path: path.to_string_lossy().to_string(),
+                    timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                });
+                None
+            }
+        };
+        let _ = tx.commit().await;
+        res
+    } else {
+        None
+    };
+
+    (info, slots, last_err)
 }
 
 /// Tier 3 logical replication publications and subscriptions.
 async fn collect_logical_replication(
     client: &mut Client,
     q: &queries::QuerySet,
-) -> (Option<Vec<PublicationRow>>, Option<Vec<SubscriptionRow>>) {
-    let Ok(tx) = begin_read(client).await else {
-        return (None, None);
-    };
+) -> (Option<Vec<PublicationRow>>, Option<Vec<SubscriptionRow>>, Option<TelemetryError>) {
+    let mut last_err = None;
 
-    let publications = match tx.query(q.publications, &[]).await {
-        Ok(rows) => {
-            let mut out = Vec::with_capacity(rows.len());
-            let mut all_parsed = true;
-            for row in &rows {
-                match db::publication_from_row(row) {
-                    Ok(p) => out.push(p),
-                    Err(_) => {
-                        all_parsed = false;
-                        break;
+    let publications = if let Ok(tx) = begin_read(client).await {
+        let res = match tx.query(q.publications, &[]).await {
+            Ok(rows) => {
+                let mut out = Vec::with_capacity(rows.len());
+                let mut parse_err = None;
+                for row in &rows {
+                    match db::publication_from_row(row) {
+                        Ok(p) => out.push(p),
+                        Err(e) => {
+                            parse_err = Some(e);
+                            break;
+                        }
                     }
                 }
-            }
-            if all_parsed { Some(out) } else { None }
-        }
-        Err(_) => None,
-    };
-
-    let subscriptions = match tx.query(q.subscriptions, &[]).await {
-        Ok(rows) => {
-            let mut out = Vec::with_capacity(rows.len());
-            let mut all_parsed = true;
-            for row in &rows {
-                match db::subscription_from_row(row) {
-                    Ok(s) => out.push(s),
-                    Err(_) => {
-                        all_parsed = false;
-                        break;
-                    }
+                if let Some(e) = parse_err {
+                    let path = crate::error_log::log_error("publications", &e);
+                    last_err = Some(TelemetryError {
+                        subsystem: "publications".to_string(),
+                        message: format!("parse error: {e}"),
+                        log_path: path.to_string_lossy().to_string(),
+                        timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                    });
+                    None
+                } else {
+                    Some(out)
                 }
             }
-            if all_parsed { Some(out) } else { None }
-        }
-        Err(_) => None,
+            Err(e) => {
+                let path = crate::error_log::log_error("publications", &e);
+                last_err = Some(TelemetryError {
+                    subsystem: "publications".to_string(),
+                    message: e.to_string(),
+                    log_path: path.to_string_lossy().to_string(),
+                    timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                });
+                None
+            }
+        };
+        let _ = tx.commit().await;
+        res
+    } else {
+        None
     };
 
-    let _ = tx.commit().await;
-    (publications, subscriptions)
+    let subscriptions = if let Ok(tx) = begin_read(client).await {
+        let res = match tx.query(q.subscriptions, &[]).await {
+            Ok(rows) => {
+                let mut out = Vec::with_capacity(rows.len());
+                let mut parse_err = None;
+                for row in &rows {
+                    match db::subscription_from_row(row) {
+                        Ok(s) => out.push(s),
+                        Err(e) => {
+                            parse_err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = parse_err {
+                    let path = crate::error_log::log_error("subscriptions", &e);
+                    if last_err.is_none() {
+                        last_err = Some(TelemetryError {
+                            subsystem: "subscriptions".to_string(),
+                            message: format!("parse error: {e}"),
+                            log_path: path.to_string_lossy().to_string(),
+                            timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                        });
+                    }
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+            Err(e) => {
+                let path = crate::error_log::log_error("subscriptions", &e);
+                if last_err.is_none() {
+                    last_err = Some(TelemetryError {
+                        subsystem: "subscriptions".to_string(),
+                        message: e.to_string(),
+                        log_path: path.to_string_lossy().to_string(),
+                        timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                    });
+                }
+                None
+            }
+        };
+        let _ = tx.commit().await;
+        res
+    } else {
+        None
+    };
+
+    (publications, subscriptions, last_err)
 }
 
 /// Collects all Tier 2 operational telemetry (cadence 3s) on the Telemetry Lane.
@@ -2573,7 +2750,8 @@ async fn collect_tier2(
     is_in_recovery: bool,
     deltas: &mut TelemetryDeltaState,
 ) -> Tier2Collection {
-    let (replication, replication_slots) = collect_replication_tier2(client, q, is_in_recovery).await;
+    let (replication, replication_slots, last_error) =
+        collect_replication_tier2(client, q, is_in_recovery).await;
     let vacuum_progress = collect_vacuum_progress(client, q).await;
     let ddl_progress = collect_ddl_progress(client, q).await;
 
@@ -2621,17 +2799,19 @@ async fn collect_tier2(
         idle_sessions,
         prepared_xacts,
         lock_capacity,
+        last_error,
     }
 }
 
 /// Collects all Tier 3 catalog telemetry (cadence 30s) on the Telemetry Lane.
 async fn collect_tier3(client: &mut Client, q: &queries::QuerySet) -> Tier3Collection {
     let databases = collect_databases(client, q).await;
-    let (publications, subscriptions) = collect_logical_replication(client, q).await;
+    let (publications, subscriptions, last_error) = collect_logical_replication(client, q).await;
     Tier3Collection {
         databases,
         publications,
         subscriptions,
+        last_error,
     }
 }
 
@@ -2646,10 +2826,22 @@ async fn collect_vacuum_progress(
     q: &queries::QuerySet,
 ) -> Option<Vec<VacuumProgressRow>> {
     let tx = begin_read(client).await.ok()?;
-    let rows = tx.query(q.vacuum_progress, &[]).await.ok()?;
+    let rows = match tx.query(q.vacuum_progress, &[]).await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::error_log::log_error("vacuum_progress", &e);
+            return None;
+        }
+    };
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        out.push(db::vacuum_progress_from_row(row).ok()?);
+        match db::vacuum_progress_from_row(row) {
+            Ok(v) => out.push(v),
+            Err(e) => {
+                crate::error_log::log_error("vacuum_progress", &e);
+                return None;
+            }
+        }
     }
     // Best-effort: a failed commit just means no panel this tick.
     tx.commit().await.ok()?;
@@ -2662,10 +2854,22 @@ async fn collect_vacuum_progress(
 /// [`collect_vacuum_progress`]; it must never fail the poll.
 async fn collect_databases(client: &mut Client, q: &queries::QuerySet) -> Option<Vec<DatabaseRow>> {
     let tx = begin_read(client).await.ok()?;
-    let rows = tx.query(q.databases, &[]).await.ok()?;
+    let rows = match tx.query(q.databases, &[]).await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::error_log::log_error("databases", &e);
+            return None;
+        }
+    };
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        out.push(db::database_from_row(row).ok()?);
+        match db::database_from_row(row) {
+            Ok(d) => out.push(d),
+            Err(e) => {
+                crate::error_log::log_error("databases", &e);
+                return None;
+            }
+        }
     }
     tx.commit().await.ok()?;
     Some(out)
@@ -2680,8 +2884,21 @@ async fn collect_databases(client: &mut Client, q: &queries::QuerySet) -> Option
 /// against the session's delta window, since only it owns that state.
 async fn collect_wal_stats(client: &mut Client, sql: &str) -> Option<db::WalStatsRawRow> {
     let tx = begin_read(client).await.ok()?;
-    let row = tx.query_opt(sql, &[]).await.ok()??;
-    let raw = db::wal_stats_from_row(&row).ok()?;
+    let row = match tx.query_opt(sql, &[]).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return None,
+        Err(e) => {
+            crate::error_log::log_error("wal", &e);
+            return None;
+        }
+    };
+    let raw = match db::wal_stats_from_row(&row) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::error_log::log_error("wal", &e);
+            return None;
+        }
+    };
     // Best-effort: a failed commit just means no panel this tick.
     tx.commit().await.ok()?;
     Some(raw)
@@ -2690,10 +2907,22 @@ async fn collect_wal_stats(client: &mut Client, sql: &str) -> Option<db::WalStat
 /// Best-effort SLRU cache stats (v0.19, `queries/slru_post_130000.sql`).
 async fn collect_slru_raw(client: &mut Client, sql: &str) -> Option<Vec<db::SlruRawRow>> {
     let tx = begin_read(client).await.ok()?;
-    let rows = tx.query(sql, &[]).await.ok()?;
+    let rows = match tx.query(sql, &[]).await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::error_log::log_error("slru", &e);
+            return None;
+        }
+    };
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        out.push(db::slru_from_row(row).ok()?);
+        match db::slru_from_row(row) {
+            Ok(s) => out.push(s),
+            Err(e) => {
+                crate::error_log::log_error("slru", &e);
+                return None;
+            }
+        }
     }
     tx.commit().await.ok()?;
     Some(out)
@@ -2702,8 +2931,21 @@ async fn collect_slru_raw(client: &mut Client, sql: &str) -> Option<Vec<db::Slru
 /// Best-effort database recovery conflicts (v0.19, `queries/replication_conflicts.sql`).
 async fn collect_conflicts_raw(client: &mut Client, sql: &str) -> Option<db::ConflictsRawRow> {
     let tx = begin_read(client).await.ok()?;
-    let row = tx.query_opt(sql, &[]).await.ok()??;
-    let raw = db::conflicts_from_row(&row).ok()?;
+    let row = match tx.query_opt(sql, &[]).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return None,
+        Err(e) => {
+            crate::error_log::log_error("conflicts", &e);
+            return None;
+        }
+    };
+    let raw = match db::conflicts_from_row(&row) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::error_log::log_error("conflicts", &e);
+            return None;
+        }
+    };
     tx.commit().await.ok()?;
     Some(raw)
 }
@@ -2719,10 +2961,22 @@ async fn collect_prepared_xacts(
     q: &queries::QuerySet,
 ) -> Option<Vec<PreparedXactRow>> {
     let tx = begin_read(client).await.ok()?;
-    let rows = tx.query(q.prepared_xacts, &[]).await.ok()?;
+    let rows = match tx.query(q.prepared_xacts, &[]).await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::error_log::log_error("prepared_xacts", &e);
+            return None;
+        }
+    };
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        out.push(db::prepared_xact_from_row(row).ok()?);
+        match db::prepared_xact_from_row(row) {
+            Ok(p) => out.push(p),
+            Err(e) => {
+                crate::error_log::log_error("prepared_xacts", &e);
+                return None;
+            }
+        }
     }
     tx.commit().await.ok()?;
     Some(out)
@@ -2738,8 +2992,20 @@ async fn collect_prepared_xacts(
 /// the poll.
 async fn collect_lock_capacity(client: &mut Client, q: &queries::QuerySet) -> Option<LockCapacity> {
     let tx = begin_read(client).await.ok()?;
-    let row = tx.query_one(q.lock_capacity, &[]).await.ok()?;
-    let raw = db::lock_capacity_from_row(&row).ok()?;
+    let row = match tx.query_one(q.lock_capacity, &[]).await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::error_log::log_error("lock_capacity", &e);
+            return None;
+        }
+    };
+    let raw = match db::lock_capacity_from_row(&row) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::error_log::log_error("lock_capacity", &e);
+            return None;
+        }
+    };
     tx.commit().await.ok()?;
     Some(crate::lock_capacity::compute(raw))
 }
@@ -2795,10 +3061,22 @@ async fn collect_idle_sessions(
     q: &queries::QuerySet,
 ) -> Option<Vec<IdleSessionRow>> {
     let tx = begin_read(client).await.ok()?;
-    let rows = tx.query(q.idle_sessions, &[]).await.ok()?;
+    let rows = match tx.query(q.idle_sessions, &[]).await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::error_log::log_error("idle_sessions", &e);
+            return None;
+        }
+    };
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        out.push(db::idle_session_from_row(row).ok()?);
+        match db::idle_session_from_row(row) {
+            Ok(s) => out.push(s),
+            Err(e) => {
+                crate::error_log::log_error("idle_sessions", &e);
+                return None;
+            }
+        }
     }
     tx.commit().await.ok()?;
     Some(out)
@@ -2812,11 +3090,21 @@ async fn collect_ddl_progress(
     q: &queries::QuerySet,
 ) -> Option<Vec<DdlProgressRow>> {
     let tx = begin_read(client).await.ok()?;
-    let rows = tx.query(q.progress_ddl, &[]).await.ok()?;
+    let rows = match tx.query(q.progress_ddl, &[]).await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::error_log::log_error("ddl_progress", &e);
+            return None;
+        }
+    };
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        if let Ok(p) = db::ddl_progress_from_row(row) {
-            out.push(p);
+        match db::ddl_progress_from_row(row) {
+            Ok(p) => out.push(p),
+            Err(e) => {
+                crate::error_log::log_error("ddl_progress", &e);
+                return None;
+            }
         }
     }
     tx.commit().await.ok()?;
@@ -2842,8 +3130,15 @@ fn hit_ratio(hit: i64, read: i64) -> f64 {
 /// Re-publishes the last snapshot with `status = Error(msg)`: frontends show
 /// a banner while keeping the last good data on screen.
 fn publish_error(tx: &watch::Sender<Arc<DbSnapshot>>, msg: String) {
+    let log_path = crate::error_log::log_error("poller", &msg);
     let mut snapshot: DbSnapshot = tx.borrow().as_ref().clone();
-    snapshot.status = PollerStatus::Error(msg);
+    snapshot.status = PollerStatus::Error(msg.clone());
+    snapshot.last_error = Some(TelemetryError {
+        subsystem: "poller".to_string(),
+        message: msg,
+        log_path: log_path.to_string_lossy().to_string(),
+        timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+    });
     let _ = tx.send(Arc::new(snapshot));
 }
 

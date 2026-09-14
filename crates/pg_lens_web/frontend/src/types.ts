@@ -853,8 +853,17 @@ export interface DbSnapshot {
   publications?: PublicationRow[] | null;
   /** Logical replication subscriptions for current database (v0.20, `pg_subscription`). */
   subscriptions?: SubscriptionRow[] | null;
+  /** Last telemetry collection or poller error (with path to error.log). */
+  last_error?: TelemetryError | null;
   status: PollerStatus;
   last_admin_action: AdminActionResult | null;
+}
+
+export interface TelemetryError {
+  subsystem: string;
+  message: string;
+  log_path: string;
+  timestamp_epoch_secs: number;
 }
 
 export interface SlruRow {

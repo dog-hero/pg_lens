@@ -1,6 +1,6 @@
 -- Replication slots (pg_replication_slots, PG 17+).
 --
--- Includes invalidated column (added in PG 17: wal_removed / max_slot_wal_keep_size).
+-- Includes invalidation_reason column (added in PG 17: wal_removed / max_slot_wal_keep_size).
 SELECT
       s.slot_name::text AS slot_name,
       s.plugin::text AS plugin,
@@ -25,7 +25,7 @@ SELECT
       CASE WHEN s.catalog_xmin IS NOT NULL THEN age(s.catalog_xmin)::int8 ELSE NULL END AS catalog_xmin_age,
       s.two_phase,
       s.conflicting,
-      s.invalidated::text AS invalidated
+      s.invalidation_reason::text AS invalidated
  FROM pg_replication_slots s
  LEFT JOIN pg_database d ON d.oid = s.datoid
  LEFT JOIN pg_stat_activity a ON a.pid = s.active_pid

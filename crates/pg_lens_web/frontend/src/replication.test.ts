@@ -321,3 +321,38 @@ test("renderReplication renders separate sections for publications, subscription
     "Replication Slots",
   ]);
 });
+
+test("renderReplication renders error row when replication slots collection fails", () => {
+  const body = new MockElement("div");
+  const placeholder = new MockElement("p");
+  renderReplication(
+    body as unknown as HTMLElement,
+    placeholder as unknown as HTMLElement,
+    { Primary: { senders: [] } },
+    null,
+    null,
+    null,
+    null,
+    null,
+    "",
+    undefined,
+    {
+      subsystem: "replication_slots",
+      message: "column s.invalidated does not exist",
+      log_path: "/tmp/error.log",
+      timestamp_epoch_secs: 123456789,
+    },
+  );
+
+  assert.equal(placeholder.hidden, true);
+  // Find Replication Slots section
+  const slotSection = body.children.find(
+    (sec) => sec.children[0]?.textContent === "Replication Slots",
+  );
+  assert.ok(slotSection);
+  const errRow = slotSection.children[1];
+  assert.ok(errRow);
+  assert.match(errRow.textContent ?? "", /Error collecting replication slots: column s\.invalidated does not exist/);
+  assert.match(errRow.textContent ?? "", /\/tmp\/error\.log/);
+});
+

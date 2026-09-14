@@ -8,6 +8,7 @@ import type {
   ReplicationInfo,
   ReplicationSlotRow,
   SubscriptionRow,
+  TelemetryError,
   WalReceiverRow,
   WalSenderRow,
   WalStats,
@@ -352,6 +353,7 @@ export function renderReplication(
   subscriptions: SubscriptionRow[] | null = null,
   filter = "",
   onInspectSlot?: (slot: ReplicationSlotRow) => void,
+  lastError: TelemetryError | null = null,
 ): void {
   if (
     repl === null &&
@@ -423,6 +425,11 @@ export function renderReplication(
     for (const s of filteredSlots) {
       slotRows.push(slotRow(s, onInspectSlot));
     }
+  } else if (slots === null && lastError?.subsystem === "replication_slots") {
+    const errDiv = document.createElement("div");
+    errDiv.className = "repl-row repl-lag bad";
+    errDiv.textContent = `⚠ Error collecting replication slots: ${lastError.message} (details logged to ${lastError.log_path})`;
+    slotRows.push(errDiv);
   } else {
     slotRows.push(calmRow("no replication slots"));
   }

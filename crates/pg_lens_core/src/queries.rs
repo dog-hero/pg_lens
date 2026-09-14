@@ -789,7 +789,7 @@ mod tests {
         assert!(q17.replication_slots.contains("xmin_age"));
         assert!(q17
             .replication_slots
-            .contains("invalidated::text AS invalidated"));
+            .contains("invalidation_reason::text AS invalidated"));
     }
 
     #[test]

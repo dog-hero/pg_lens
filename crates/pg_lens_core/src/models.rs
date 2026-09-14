@@ -2288,6 +2288,15 @@ pub enum ReplicationInfo {
     Standby { receiver: Option<WalReceiverRow> },
 }
 
+/// Summary of a non-fatal telemetry or catalog query error.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelemetryError {
+    pub subsystem: String,
+    pub message: String,
+    pub log_path: String,
+    pub timestamp_epoch_secs: u64,
+}
+
 /// Health of the poller loop, carried inside every snapshot so that all
 /// frontends can surface collection errors without a side channel.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2417,6 +2426,9 @@ pub struct DbSnapshot {
     /// Logical replication subscriptions in current database (v0.20, `pg_subscription`).
     #[serde(default)]
     pub subscriptions: Option<Vec<SubscriptionRow>>,
+    /// Last non-fatal telemetry / catalog error (if any) and its log location.
+    #[serde(default)]
+    pub last_error: Option<TelemetryError>,
     pub status: PollerStatus,
 }
 
@@ -3203,6 +3215,7 @@ impl DbSnapshot {
                     sync_error_count: Some(1),
                 },
             ]),
+            last_error: None,
             status: PollerStatus::Ok,
         }
     }
@@ -3254,6 +3267,7 @@ impl DbSnapshot {
             conflicts: None,
             publications: None,
             subscriptions: None,
+            last_error: None,
             status: PollerStatus::Connecting,
         }
     }

@@ -4,6 +4,22 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.23.0] — 2026-09-14 — "Universal Error Cataloging & PostgreSQL 17 Replication Fix"
+
+### Added
+- **Universal Error Cataloging Subsystem (`error.log`)** — persistent, timestamped error logging for database queries and polling subsystems:
+  - Writes diagnostics directly to `~/.local/state/pg_lens/error.log` (or `$PG_LENS_STATE_DIR/error.log`).
+  - Equipped with an in-memory 30-second deduplication and rate-limiting engine to prevent log thrashing while preserving unique error signatures.
+  - Covers all collectors across the system: poller connection errors, statements, schema inspection, bloat, I/O stats, table details, replication senders/receivers, replication slots, publications, subscriptions, vacuum/DDL progress, WAL, SLRU, conflicts, prepared xacts, and lock capacity.
+- **On-Screen Error Reporting & Diagnostics (TUI & Web UI)**:
+  - **TUI Status Bar Warning**: dynamic `⚠ error: <subsystem>` alert in the footer statusbar highlighting background telemetry collection errors.
+  - **Contextual In-Panel Diagnostics**: dedicated panel error cards (e.g. Replication Slots card in TUI and Web) showing the exact PostgreSQL error message and log file location for rapid diagnosis.
+  - **Status Banner Log Guidance**: connection/DB error banners now directly reference the exact path of `error.log`.
+
+### Fixed
+- **PostgreSQL 17 Replication Slots Compatibility**: resolved `column s.invalidated does not exist` on PostgreSQL 17 instances by querying the official PG 17 `s.invalidation_reason` column (`replication_slots_post_170000.sql`).
+- **Telemetry Query Isolation**: decoupled replication queries (`pg_stat_replication` and `pg_replication_slots`) into independent read transactions (`begin_read()`), ensuring transient errors in one catalog view never abort other collectors.
+
 ## [0.22.0] — 2026-09-09 — "Dual-Lane Poller Architecture, Fast Incident Path & Sub-Second Precision"
 
 ### Added

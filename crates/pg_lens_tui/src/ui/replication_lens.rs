@@ -291,8 +291,26 @@ fn slot_table_row(
 
 fn draw_slots(app: &mut App, frame: &mut Frame, area: Rect) {
     let Some(slots) = app.snapshot.replication_slots.as_deref() else {
-        let placeholder = Paragraph::new(Line::from(" collecting replication slots\u{2026}").dim())
-            .block(Block::bordered().title("Slots"));
+        let text = if let Some(ref err) = app.snapshot.last_error
+            && err.subsystem == "replication_slots"
+        {
+            vec![
+                Line::from(vec![
+                    Span::styled(
+                        " \u{26a0} Error collecting replication slots: ",
+                        Style::new().fg(Color::Yellow).bold(),
+                    ),
+                    Span::raw(&err.message),
+                ]),
+                Line::from(vec![
+                    Span::styled("   Details logged to: ", Style::new().dim()),
+                    Span::styled(&err.log_path, Style::new().fg(Color::Cyan)),
+                ]),
+            ]
+        } else {
+            vec![Line::from(" collecting replication slots\u{2026}").dim()]
+        };
+        let placeholder = Paragraph::new(text).block(Block::bordered().title("Slots"));
         frame.render_widget(placeholder, area);
         return;
     };
