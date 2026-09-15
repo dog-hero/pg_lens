@@ -109,6 +109,14 @@ def main():
         fail(f"docs/demo.gif does not have a valid GIF header (found {header!r})")
     pass_check(f"docs/demo.gif is a valid GIF ({gif_size / (1024 * 1024):.2f} MB)")
 
+    # 8b. Check demo GIF version alignment
+    demo_version_file = REPO_ROOT / "docs" / "demo.version"
+    check_file_exists(demo_version_file, "docs/demo.version")
+    recorded_version = demo_version_file.read_text(encoding="utf-8").strip()
+    if recorded_version != f"v{version}":
+        fail(f"docs/demo.version contains '{recorded_version}', expected 'v{version}'. Run 'bash scripts/generate_demo.sh' to re-record demo.gif.")
+    pass_check(f"docs/demo.version aligns with release version v{version}")
+
     # 9. Verify licenses generator
     print("\nVerifying license compliance...")
     orig_licenses = (REPO_ROOT / "THIRD_PARTY_LICENSES.md").read_text(encoding="utf-8") if (REPO_ROOT / "THIRD_PARTY_LICENSES.md").exists() else ""
