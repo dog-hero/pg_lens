@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 📖 pg_lens Documentation
+    url: https://dog-hero.github.io/pg_lens/
+    about: Read the official documentation, connection guides, and least-privilege setup.
+  - name: 🎮 Interactive Live Demo
+    url: https://dog-hero.github.io/pg_lens/demo/
+    about: Try the live Web Lens dashboard on recorded benchmark data directly in your browser.
+  - name: 📜 Changelog
+    url: https://dog-hero.github.io/pg_lens/docs/changelog.html
+    about: Read the release history and see what's new in each version.
+  - name: 💬 GitHub Discussions
+    url: https://github.com/dog-hero/pg_lens/discussions
+    about: Ask questions, share setups, and discuss ideas with the community.

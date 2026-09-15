@@ -1,0 +1,63 @@
+name: Feature Request
+description: Propose a new feature, lens, metric, or enhancement for pg_lens
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a feature for **pg_lens**! 🚀
+        pg_lens aims to provide lightweight, instant, deep observability into live PostgreSQL performance with near-zero overhead.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Component or Lens
+      description: Which part of pg_lens would this feature enhance?
+      options:
+        - "1 Macro Lens (Instance Vitals & Cockpit)"
+        - "2 Micro Lens (Activity, Top-Waits, Durations)"
+        - "3 Blocks & Locks Lens (Wait-For Tree, Active Locks)"
+        - "4 Replication Lens (Slots, Publications, Subscriptions, Conflicts)"
+        - "5 Schema Lens (Tables, Bloat, Partitions, Sequences)"
+        - "6 Indexes Lens (Unused, Duplicate, Invalid, Bloat)"
+        - "7 Query Lens (pg_stat_statements, Temp Spills)"
+        - "8 Progress Lens (DDL, Vacuum, Cluster, Analyze)"
+        - "9 Records Lens (Incident Recordings, Replay)"
+        - "Web Dashboard (`pg_lens serve`)"
+        - "CLI, Configuration (`services.toml`), or Poller Engine"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Is your feature request related to a problem?
+      description: A clear and concise description of what problem or observability gap you are trying to solve.
+      placeholder: "I'm always frustrated when trying to diagnose..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution / Observability Data Source
+      description: |
+        Describe what you would like pg_lens to do.
+        If applicable, mention the PostgreSQL system catalog / stat view (e.g. `pg_stat_*`, `pg_catalog.*`) and minimum PG version required.
+      placeholder: "Surface pg_stat_archiver or pg_stat_checkpointer metrics in..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: A clear and concise description of any alternative solutions, tools (e.g. pg_activity, pghero, pganalyze), or workarounds you've considered.
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Add any other context, UI mockups, or SQL snippets about the feature request here.

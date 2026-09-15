@@ -1,0 +1,77 @@
+name: Database Compatibility & Catalog Issue
+description: Report an issue with a specific PostgreSQL version, cloud provider, or catalog query failure
+title: "[Compat]: "
+labels: ["compatibility", "sql"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template when a specific PostgreSQL catalog query, view, or extension behaves unexpectedly on your database server.
+        pg_lens supports PostgreSQL 13 through 17+ across bare-metal, containers, and managed cloud databases.
+
+  - type: input
+    id: server_version
+    attributes:
+      label: Database Flavor & Version
+      description: Output of `SELECT version();`
+      placeholder: "PostgreSQL 17.0 (Debian 17.0-1.pgdg120+1) on aarch64-unknown-linux-gnu..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hosting
+    attributes:
+      label: Hosting Environment
+      description: Where is this PostgreSQL instance running?
+      options:
+        - "Self-hosted / Dedicated Linux Server"
+        - "Docker / Container / Kubernetes"
+        - "Amazon RDS / Aurora PostgreSQL"
+        - "Google Cloud SQL / AlloyDB"
+        - "Azure Database for PostgreSQL"
+        - "Supabase"
+        - "Neon"
+        - "Crunchy Bridge"
+        - "Other / Fork (Citus, Timescale, etc.)"
+    validations:
+      required: true
+
+  - type: input
+    id: connection_proxy
+    attributes:
+      label: Connection Proxy / Pooler (if applicable)
+      description: Are you connecting through PgBouncer, pgpool, Supavisor, or direct connection?
+      placeholder: "Direct connection / PgBouncer 1.22 in session pooling mode"
+
+  - type: dropdown
+    id: user_privileges
+    attributes:
+      label: Monitoring User Privileges
+      description: What role/grants does the connecting user have?
+      options:
+        - "Superuser"
+        - "Member of pg_monitor / pg_read_all_stats"
+        - "Standard user with explicit grants"
+        - "Restricted / Read-only user"
+    validations:
+      required: true
+
+  - type: textarea
+    id: failing_query
+    attributes:
+      label: Failing Collector or Query
+      description: |
+        Which subsystem is failing? (e.g. `wal`, `subscriptions`, `replication_slots`, `vacuum_progress`, `slru`, `statements`, `schema`).
+        Check `~/.local/state/pg_lens/error.log` for the exact server error and SQLSTATE code!
+      placeholder: "[subscriptions] error: subscriptions query failed: column s.subtwophase does not exist (42703)"
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected vs Actual Behavior
+      description: What was expected to happen, and what happened instead?
+    validations:
+      required: true

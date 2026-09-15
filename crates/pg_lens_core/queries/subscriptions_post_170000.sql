@@ -44,3 +44,4 @@ SELECT
  ) sync_summary ON sync_summary.srsubid = s.oid
 WHERE s.subdbid = (SELECT oid FROM pg_database WHERE datname = current_database())
 ORDER BY s.subname;
+

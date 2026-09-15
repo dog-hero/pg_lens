@@ -1,0 +1,117 @@
+name: Bug Report
+description: Report a bug, crash, incorrect metric, or rendering issue in pg_lens
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue with **pg_lens**! 🔬🐘
+        Please check if the issue has already been reported in existing [open or closed issues](https://github.com/dog-hero/pg_lens/issues).
+        
+        > [!CAUTION]
+        > **Security Notice**: Never paste sensitive database passwords, connection URIs with embedded credentials, or confidential business data in logs or queries.
+
+  - type: input
+    id: version
+    attributes:
+      label: pg_lens Version
+      description: Run `pg_lens --version` and paste the version here.
+      placeholder: "0.23.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: pg_version
+    attributes:
+      label: PostgreSQL Server Version
+      description: What version of PostgreSQL are you connecting to? (Output of `SELECT version();`)
+      options:
+        - "PostgreSQL 17"
+        - "PostgreSQL 16"
+        - "PostgreSQL 15"
+        - "PostgreSQL 14"
+        - "PostgreSQL 13"
+        - "Other / Managed (AWS RDS, Aurora, Cloud SQL, Neon, Supabase, etc.)"
+    validations:
+      required: true
+
+  - type: input
+    id: install_method
+    attributes:
+      label: Installation Method
+      description: How did you install pg_lens?
+      placeholder: "Homebrew (`brew install dog-hero/tap/pg_lens`), cargo-binstall, curl | sh installer, prebuilt binary, source build"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Operating System & Terminal Emulator
+      description: What OS and terminal emulator are you using?
+      placeholder: "macOS Sequoia (Ghostty / Alacritty / WezTerm / iTerm2) or Ubuntu 24.04 (tmux / kitty)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Running Mode
+      description: How are you running pg_lens?
+      options:
+        - "TUI (standard terminal mode: `pg_lens`)"
+        - "Web Dashboard (`pg_lens serve`)"
+        - "Replay / Flight Recorder (`pg_lens replay` / `pg_lens view`)"
+        - "Single-connection mode (`--single-connection`)"
+        - "Read-only mode (`--read-only`)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear and concise description of what happened.
+      placeholder: "When opening the Replication Lens on PostgreSQL 17, the status bar displays '⚠ error: subscriptions'..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Run `pg_lens postgresql://user@localhost:5432/mydb`
+        2. Switch to Tab 4 (Replication Lens)
+        3. See error banner / wrong metric
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error Logs (`error.log`)
+      description: |
+        Please check `~/.local/state/pg_lens/error.log` (or `$PG_LENS_STATE_DIR/error.log`) and paste any relevant error entries here.
+        Remember to redact sensitive credentials before pasting!
+      render: shell
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or Terminal Recording
+      description: If applicable, add screenshots or terminal recordings to help explain the problem.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have verified this is not a duplicate of an existing issue.
+          required: true
+        - label: I have redacted sensitive credentials and secrets from logs and connection strings.
+          required: true
+        - label: I am using a supported PostgreSQL version (PostgreSQL 13+).
+          required: true
