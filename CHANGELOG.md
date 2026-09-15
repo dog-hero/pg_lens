@@ -4,6 +4,16 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.23.1] — 2026-09-14 — "PostgreSQL 17 Subscriptions & WAL Stats Resilience Hotfix"
+
+### Fixed
+- **PostgreSQL 17 Logical Subscriptions Compatibility**: fixed `column s.subtwophase does not exist` on PostgreSQL 17 instances (`queries/subscriptions_post_170000.sql`). PostgreSQL 17 replaced the boolean `s.subtwophase` column with the character state enum `s.subtwophasestate` (`'d'` disabled, `'p'` pending, `'e'` enabled). Subscriptions now cleanly detect two-phase status across all versions.
+- **WAL Stats Resilience on PostgreSQL 14+**: wrapped all cumulative metrics in `COALESCE(..., 0)` and used safe `COALESCE(current_setting('track_wal_io_timing', true) = 'on', false)`. Deserialization in `db.rs` now safely defaults NULL fields to 0, ensuring `pg_stat_wal` never errors on restricted permissions, uninitialized stats, or disabled GUCs.
+- **Independent Per-Subsystem Error Throttling**: overhauled `crates/pg_lens_core/src/error_log.rs` with dedicated per-subsystem rate-limit state (`HashMap<String, SubsystemThrottler>`). Multiple failing subsystems no longer reset each other's 30-second deduplication windows, disk I/O occurs outside the mutex lock to prevent thread stalls, and file appends flush immediately.
+- **Rich PostgreSQL Error Formatting**: replaced generic `"db error"` Display string formatting with `db_error_message(context, &e)`, extracting full server error messages and SQLSTATE codes across all background collectors.
+- **Graceful Lack of Privilege (SQLSTATE 42501)**: queries encountering `insufficient_privilege` (e.g. non-superuser connecting to clusters with restricted `pg_subscription`) gracefully log to `error.log` without activating the status bar error badge on screen.
+- **Status Bar Error Clearance**: added recovery lifecycle hooks in dual-lane and single-connection polling loops so that resolved subsystem errors immediately clear `last_error` from the status bar.
+
 ## [0.23.0] — 2026-09-14 — "Universal Error Cataloging & PostgreSQL 17 Replication Fix"
 
 ### Added

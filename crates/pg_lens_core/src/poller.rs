@@ -1342,11 +1342,10 @@ async fn telemetry_loop(
                 shared.lock_capacity = t2.lock_capacity;
                 if t2.last_error.is_some() {
                     shared.last_error = t2.last_error;
-                } else if shared.replication_slots.is_some()
-                    && shared
-                        .last_error
-                        .as_ref()
-                        .is_some_and(|e| e.subsystem == "replication_slots")
+                } else if shared
+                    .last_error
+                    .as_ref()
+                    .is_some_and(|e| e.subsystem == "replication_slots" || e.subsystem == "replication" || e.subsystem == "wal_receiver")
                 {
                     shared.last_error = None;
                 }
@@ -1364,6 +1363,12 @@ async fn telemetry_loop(
                 shared.subscriptions = t3.subscriptions;
                 if t3.last_error.is_some() {
                     shared.last_error = t3.last_error;
+                } else if shared
+                    .last_error
+                    .as_ref()
+                    .is_some_and(|e| e.subsystem == "subscriptions" || e.subsystem == "publications" || e.subsystem == "databases")
+                {
+                    shared.last_error = None;
                 }
             }
             fast_wake.notify_one();
@@ -1373,7 +1378,18 @@ async fn telemetry_loop(
         if let Some(with_bloat) = schema.due(now) {
             schema.last_attempt = Some(now);
             match collect_schema(client, q, with_bloat, schema.table_stats_limit).await {
-                Ok(collection) => schema.store(collection),
+                Ok(collection) => {
+                    schema.store(collection);
+                    if let Ok(mut shared) = shared_telemetry.write() {
+                        if shared
+                            .last_error
+                            .as_ref()
+                            .is_some_and(|e| e.subsystem == "schema")
+                        {
+                            shared.last_error = None;
+                        }
+                    }
+                }
                 Err(msg) => {
                     let path = crate::error_log::log_error("schema", &msg);
                     if let Ok(mut shared) = shared_telemetry.write() {
@@ -1389,7 +1405,18 @@ async fn telemetry_loop(
             }
             match statements_available {
                 Ok(()) => match collect_statements(client, statements_sql).await {
-                    Ok(rows) => statements.store(rows),
+                    Ok(rows) => {
+                        statements.store(rows);
+                        if let Ok(mut shared) = shared_telemetry.write() {
+                            if shared
+                                .last_error
+                                .as_ref()
+                                .is_some_and(|e| e.subsystem == "statements")
+                            {
+                                shared.last_error = None;
+                            }
+                        }
+                    }
                     Err(msg) => {
                         let path = crate::error_log::log_error("statements", &msg);
                         if let Ok(mut shared) = shared_telemetry.write() {
@@ -1507,11 +1534,10 @@ async fn single_conn_poll_loop(
                 shared.lock_capacity = t2.lock_capacity;
                 if t2.last_error.is_some() {
                     shared.last_error = t2.last_error;
-                } else if shared.replication_slots.is_some()
-                    && shared
-                        .last_error
-                        .as_ref()
-                        .is_some_and(|e| e.subsystem == "replication_slots")
+                } else if shared
+                    .last_error
+                    .as_ref()
+                    .is_some_and(|e| e.subsystem == "replication_slots" || e.subsystem == "replication" || e.subsystem == "wal_receiver")
                 {
                     shared.last_error = None;
                 }
@@ -1527,6 +1553,12 @@ async fn single_conn_poll_loop(
                 shared.subscriptions = t3.subscriptions;
                 if t3.last_error.is_some() {
                     shared.last_error = t3.last_error;
+                } else if shared
+                    .last_error
+                    .as_ref()
+                    .is_some_and(|e| e.subsystem == "subscriptions" || e.subsystem == "publications" || e.subsystem == "databases")
+                {
+                    shared.last_error = None;
                 }
             }
         }
@@ -1534,7 +1566,18 @@ async fn single_conn_poll_loop(
         if let Some(with_bloat) = schema.due(now) {
             schema.last_attempt = Some(now);
             match collect_schema(client, q, with_bloat, schema.table_stats_limit).await {
-                Ok(collection) => schema.store(collection),
+                Ok(collection) => {
+                    schema.store(collection);
+                    if let Ok(mut shared) = shared_telemetry.write() {
+                        if shared
+                            .last_error
+                            .as_ref()
+                            .is_some_and(|e| e.subsystem == "schema")
+                        {
+                            shared.last_error = None;
+                        }
+                    }
+                }
                 Err(msg) => {
                     let path = crate::error_log::log_error("schema", &msg);
                     if let Ok(mut shared) = shared_telemetry.write() {
@@ -1550,7 +1593,18 @@ async fn single_conn_poll_loop(
             }
             match statements_available {
                 Ok(()) => match collect_statements(client, statements_sql).await {
-                    Ok(rows) => statements.store(rows),
+                    Ok(rows) => {
+                        statements.store(rows);
+                        if let Ok(mut shared) = shared_telemetry.write() {
+                            if shared
+                                .last_error
+                                .as_ref()
+                                .is_some_and(|e| e.subsystem == "statements")
+                            {
+                                shared.last_error = None;
+                            }
+                        }
+                    }
                     Err(msg) => {
                         let path = crate::error_log::log_error("statements", &msg);
                         if let Ok(mut shared) = shared_telemetry.write() {
@@ -2393,13 +2447,13 @@ async fn collect_io_stats(
     client: &mut Client,
     sql: &str,
 ) -> Result<Vec<db::IoStatRawRow>, String> {
-    let tx = begin_read(client).await.map_err(|e| e.to_string())?;
-    let rows = tx.query(sql, &[]).await.map_err(|e| e.to_string())?;
+    let tx = begin_read(client).await.map_err(|e| db_error_message("begin_read failed", &e))?;
+    let rows = tx.query(sql, &[]).await.map_err(|e| db_error_message("io_stats query failed", &e))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        out.push(db::io_stat_from_row(row).map_err(|e| e.to_string())?);
+        out.push(db::io_stat_from_row(row).map_err(|e| format!("io_stat parse error: {e}"))?);
     }
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| db_error_message("commit failed", &e))?;
     Ok(out)
 }
 
@@ -2568,7 +2622,8 @@ async fn collect_replication_tier2(
                     Some(ReplicationInfo::Standby { receiver })
                 }
                 Err(e) => {
-                    let _ = crate::error_log::log_error("wal_receiver", &e);
+                    let msg = db_error_message("wal_receiver query failed", &e);
+                    let _ = crate::error_log::log_error("wal_receiver", &msg);
                     None
                 }
             }
@@ -2582,7 +2637,8 @@ async fn collect_replication_tier2(
                     Some(ReplicationInfo::Primary { senders })
                 }
                 Err(e) => {
-                    let _ = crate::error_log::log_error("replication", &e);
+                    let msg = db_error_message("replication query failed", &e);
+                    let _ = crate::error_log::log_error("replication", &msg);
                     None
                 }
             }
@@ -2609,10 +2665,11 @@ async fn collect_replication_tier2(
                     }
                 }
                 if let Some(e) = parse_err {
-                    let path = crate::error_log::log_error("replication_slots", &e);
+                    let msg = format!("parse error: {e}");
+                    let path = crate::error_log::log_error("replication_slots", &msg);
                     last_err = Some(TelemetryError {
                         subsystem: "replication_slots".to_string(),
-                        message: format!("parse error: {e}"),
+                        message: msg,
                         log_path: path.to_string_lossy().to_string(),
                         timestamp_epoch_secs: crate::recording::epoch_secs_now(),
                     });
@@ -2622,13 +2679,17 @@ async fn collect_replication_tier2(
                 }
             }
             Err(e) => {
-                let path = crate::error_log::log_error("replication_slots", &e);
-                last_err = Some(TelemetryError {
-                    subsystem: "replication_slots".to_string(),
-                    message: e.to_string(),
-                    log_path: path.to_string_lossy().to_string(),
-                    timestamp_epoch_secs: crate::recording::epoch_secs_now(),
-                });
+                let is_perm_denied = e.as_db_error().is_some_and(|d| d.code().code() == "42501");
+                let err_msg = db_error_message("replication_slots query failed", &e);
+                let path = crate::error_log::log_error("replication_slots", &err_msg);
+                if !is_perm_denied {
+                    last_err = Some(TelemetryError {
+                        subsystem: "replication_slots".to_string(),
+                        message: err_msg,
+                        log_path: path.to_string_lossy().to_string(),
+                        timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                    });
+                }
                 None
             }
         };
@@ -2663,10 +2724,11 @@ async fn collect_logical_replication(
                     }
                 }
                 if let Some(e) = parse_err {
-                    let path = crate::error_log::log_error("publications", &e);
+                    let msg = format!("parse error: {e}");
+                    let path = crate::error_log::log_error("publications", &msg);
                     last_err = Some(TelemetryError {
                         subsystem: "publications".to_string(),
-                        message: format!("parse error: {e}"),
+                        message: msg,
                         log_path: path.to_string_lossy().to_string(),
                         timestamp_epoch_secs: crate::recording::epoch_secs_now(),
                     });
@@ -2676,13 +2738,17 @@ async fn collect_logical_replication(
                 }
             }
             Err(e) => {
-                let path = crate::error_log::log_error("publications", &e);
-                last_err = Some(TelemetryError {
-                    subsystem: "publications".to_string(),
-                    message: e.to_string(),
-                    log_path: path.to_string_lossy().to_string(),
-                    timestamp_epoch_secs: crate::recording::epoch_secs_now(),
-                });
+                let is_perm_denied = e.as_db_error().is_some_and(|d| d.code().code() == "42501");
+                let err_msg = db_error_message("publications query failed", &e);
+                let path = crate::error_log::log_error("publications", &err_msg);
+                if !is_perm_denied {
+                    last_err = Some(TelemetryError {
+                        subsystem: "publications".to_string(),
+                        message: err_msg,
+                        log_path: path.to_string_lossy().to_string(),
+                        timestamp_epoch_secs: crate::recording::epoch_secs_now(),
+                    });
+                }
                 None
             }
         };
@@ -2707,11 +2773,12 @@ async fn collect_logical_replication(
                     }
                 }
                 if let Some(e) = parse_err {
-                    let path = crate::error_log::log_error("subscriptions", &e);
+                    let msg = format!("parse error: {e}");
+                    let path = crate::error_log::log_error("subscriptions", &msg);
                     if last_err.is_none() {
                         last_err = Some(TelemetryError {
                             subsystem: "subscriptions".to_string(),
-                            message: format!("parse error: {e}"),
+                            message: msg,
                             log_path: path.to_string_lossy().to_string(),
                             timestamp_epoch_secs: crate::recording::epoch_secs_now(),
                         });
@@ -2722,11 +2789,13 @@ async fn collect_logical_replication(
                 }
             }
             Err(e) => {
-                let path = crate::error_log::log_error("subscriptions", &e);
-                if last_err.is_none() {
+                let is_perm_denied = e.as_db_error().is_some_and(|d| d.code().code() == "42501");
+                let err_msg = db_error_message("subscriptions query failed", &e);
+                let path = crate::error_log::log_error("subscriptions", &err_msg);
+                if !is_perm_denied && last_err.is_none() {
                     last_err = Some(TelemetryError {
                         subsystem: "subscriptions".to_string(),
-                        message: e.to_string(),
+                        message: err_msg,
                         log_path: path.to_string_lossy().to_string(),
                         timestamp_epoch_secs: crate::recording::epoch_secs_now(),
                     });
@@ -2829,7 +2898,8 @@ async fn collect_vacuum_progress(
     let rows = match tx.query(q.vacuum_progress, &[]).await {
         Ok(r) => r,
         Err(e) => {
-            crate::error_log::log_error("vacuum_progress", &e);
+            let msg = db_error_message("vacuum_progress query failed", &e);
+            crate::error_log::log_error("vacuum_progress", &msg);
             return None;
         }
     };
@@ -2838,7 +2908,8 @@ async fn collect_vacuum_progress(
         match db::vacuum_progress_from_row(row) {
             Ok(v) => out.push(v),
             Err(e) => {
-                crate::error_log::log_error("vacuum_progress", &e);
+                let msg = format!("vacuum_progress parse error: {e}");
+                crate::error_log::log_error("vacuum_progress", &msg);
                 return None;
             }
         }
@@ -2857,7 +2928,8 @@ async fn collect_databases(client: &mut Client, q: &queries::QuerySet) -> Option
     let rows = match tx.query(q.databases, &[]).await {
         Ok(r) => r,
         Err(e) => {
-            crate::error_log::log_error("databases", &e);
+            let msg = db_error_message("databases query failed", &e);
+            crate::error_log::log_error("databases", &msg);
             return None;
         }
     };
@@ -2866,7 +2938,8 @@ async fn collect_databases(client: &mut Client, q: &queries::QuerySet) -> Option
         match db::database_from_row(row) {
             Ok(d) => out.push(d),
             Err(e) => {
-                crate::error_log::log_error("databases", &e);
+                let msg = format!("databases parse error: {e}");
+                crate::error_log::log_error("databases", &msg);
                 return None;
             }
         }
@@ -2888,14 +2961,16 @@ async fn collect_wal_stats(client: &mut Client, sql: &str) -> Option<db::WalStat
         Ok(Some(r)) => r,
         Ok(None) => return None,
         Err(e) => {
-            crate::error_log::log_error("wal", &e);
+            let msg = db_error_message("wal query failed", &e);
+            crate::error_log::log_error("wal", &msg);
             return None;
         }
     };
     let raw = match db::wal_stats_from_row(&row) {
         Ok(r) => r,
         Err(e) => {
-            crate::error_log::log_error("wal", &e);
+            let msg = format!("wal parse failed: {e}");
+            crate::error_log::log_error("wal", &msg);
             return None;
         }
     };
@@ -2910,7 +2985,8 @@ async fn collect_slru_raw(client: &mut Client, sql: &str) -> Option<Vec<db::Slru
     let rows = match tx.query(sql, &[]).await {
         Ok(r) => r,
         Err(e) => {
-            crate::error_log::log_error("slru", &e);
+            let msg = db_error_message("slru query failed", &e);
+            crate::error_log::log_error("slru", &msg);
             return None;
         }
     };
@@ -2919,7 +2995,8 @@ async fn collect_slru_raw(client: &mut Client, sql: &str) -> Option<Vec<db::Slru
         match db::slru_from_row(row) {
             Ok(s) => out.push(s),
             Err(e) => {
-                crate::error_log::log_error("slru", &e);
+                let msg = format!("slru parse error: {e}");
+                crate::error_log::log_error("slru", &msg);
                 return None;
             }
         }
@@ -2935,14 +3012,16 @@ async fn collect_conflicts_raw(client: &mut Client, sql: &str) -> Option<db::Con
         Ok(Some(r)) => r,
         Ok(None) => return None,
         Err(e) => {
-            crate::error_log::log_error("conflicts", &e);
+            let msg = db_error_message("conflicts query failed", &e);
+            crate::error_log::log_error("conflicts", &msg);
             return None;
         }
     };
     let raw = match db::conflicts_from_row(&row) {
         Ok(r) => r,
         Err(e) => {
-            crate::error_log::log_error("conflicts", &e);
+            let msg = format!("conflicts parse failed: {e}");
+            crate::error_log::log_error("conflicts", &msg);
             return None;
         }
     };
@@ -2964,7 +3043,8 @@ async fn collect_prepared_xacts(
     let rows = match tx.query(q.prepared_xacts, &[]).await {
         Ok(r) => r,
         Err(e) => {
-            crate::error_log::log_error("prepared_xacts", &e);
+            let msg = db_error_message("prepared_xacts query failed", &e);
+            crate::error_log::log_error("prepared_xacts", &msg);
             return None;
         }
     };
@@ -2973,7 +3053,8 @@ async fn collect_prepared_xacts(
         match db::prepared_xact_from_row(row) {
             Ok(p) => out.push(p),
             Err(e) => {
-                crate::error_log::log_error("prepared_xacts", &e);
+                let msg = format!("prepared_xacts parse error: {e}");
+                crate::error_log::log_error("prepared_xacts", &msg);
                 return None;
             }
         }
@@ -2995,14 +3076,16 @@ async fn collect_lock_capacity(client: &mut Client, q: &queries::QuerySet) -> Op
     let row = match tx.query_one(q.lock_capacity, &[]).await {
         Ok(r) => r,
         Err(e) => {
-            crate::error_log::log_error("lock_capacity", &e);
+            let msg = db_error_message("lock_capacity query failed", &e);
+            crate::error_log::log_error("lock_capacity", &msg);
             return None;
         }
     };
     let raw = match db::lock_capacity_from_row(&row) {
         Ok(r) => r,
         Err(e) => {
-            crate::error_log::log_error("lock_capacity", &e);
+            let msg = format!("lock_capacity parse error: {e}");
+            crate::error_log::log_error("lock_capacity", &msg);
             return None;
         }
     };
@@ -3064,7 +3147,8 @@ async fn collect_idle_sessions(
     let rows = match tx.query(q.idle_sessions, &[]).await {
         Ok(r) => r,
         Err(e) => {
-            crate::error_log::log_error("idle_sessions", &e);
+            let msg = db_error_message("idle_sessions query failed", &e);
+            crate::error_log::log_error("idle_sessions", &msg);
             return None;
         }
     };
@@ -3073,7 +3157,8 @@ async fn collect_idle_sessions(
         match db::idle_session_from_row(row) {
             Ok(s) => out.push(s),
             Err(e) => {
-                crate::error_log::log_error("idle_sessions", &e);
+                let msg = format!("idle_sessions parse error: {e}");
+                crate::error_log::log_error("idle_sessions", &msg);
                 return None;
             }
         }
@@ -3093,7 +3178,8 @@ async fn collect_ddl_progress(
     let rows = match tx.query(q.progress_ddl, &[]).await {
         Ok(r) => r,
         Err(e) => {
-            crate::error_log::log_error("ddl_progress", &e);
+            let msg = db_error_message("ddl_progress query failed", &e);
+            crate::error_log::log_error("ddl_progress", &msg);
             return None;
         }
     };
@@ -3102,7 +3188,8 @@ async fn collect_ddl_progress(
         match db::ddl_progress_from_row(row) {
             Ok(p) => out.push(p),
             Err(e) => {
-                crate::error_log::log_error("ddl_progress", &e);
+                let msg = format!("ddl_progress parse error: {e}");
+                crate::error_log::log_error("ddl_progress", &msg);
                 return None;
             }
         }

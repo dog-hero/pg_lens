@@ -925,13 +925,13 @@ pub struct WalStatsRawRow {
 /// [`WalStatsRawRow`].
 pub fn wal_stats_from_row(row: &Row) -> Result<WalStatsRawRow, tokio_postgres::Error> {
     Ok(WalStatsRawRow {
-        wal_records: row.try_get("wal_records")?,
-        wal_fpi: row.try_get("wal_fpi")?,
-        wal_bytes: row.try_get("wal_bytes")?,
-        wal_buffers_full: row.try_get("wal_buffers_full")?,
-        wal_write_time_ms: row.try_get("wal_write_time_ms")?,
-        wal_sync_time_ms: row.try_get("wal_sync_time_ms")?,
-        track_wal_io_timing_on: row.try_get("track_wal_io_timing_on")?,
+        wal_records: row.try_get("wal_records").unwrap_or(0),
+        wal_fpi: row.try_get("wal_fpi").unwrap_or(0),
+        wal_bytes: row.try_get("wal_bytes").unwrap_or(0),
+        wal_buffers_full: row.try_get("wal_buffers_full").unwrap_or(0),
+        wal_write_time_ms: row.try_get("wal_write_time_ms").unwrap_or(0.0),
+        wal_sync_time_ms: row.try_get("wal_sync_time_ms").unwrap_or(0.0),
+        track_wal_io_timing_on: row.try_get("track_wal_io_timing_on").unwrap_or(false),
     })
 }
 

@@ -17,11 +17,11 @@
 -- that case instead of shipping a misleading zero, same convention as
 -- `io_post_160000.sql`'s `track_io_timing_on`.
 SELECT
-    wal_records::int8 AS wal_records,
-    wal_fpi::int8 AS wal_fpi,
-    wal_bytes::int8 AS wal_bytes,
-    wal_buffers_full::int8 AS wal_buffers_full,
-    wal_write_time::float8 AS wal_write_time_ms,
-    wal_sync_time::float8 AS wal_sync_time_ms,
-    (current_setting('track_wal_io_timing') = 'on') AS track_wal_io_timing_on
+    COALESCE(wal_records::int8, 0) AS wal_records,
+    COALESCE(wal_fpi::int8, 0) AS wal_fpi,
+    COALESCE(wal_bytes::int8, 0) AS wal_bytes,
+    COALESCE(wal_buffers_full::int8, 0) AS wal_buffers_full,
+    COALESCE(wal_write_time::float8, 0.0) AS wal_write_time_ms,
+    COALESCE(wal_sync_time::float8, 0.0) AS wal_sync_time_ms,
+    COALESCE(current_setting('track_wal_io_timing', true) = 'on', false) AS track_wal_io_timing_on
 FROM pg_catalog.pg_stat_wal;

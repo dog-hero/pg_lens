@@ -277,6 +277,7 @@ const REPLICATION_CONFLICTS: &str = include_str!("../queries/replication_conflic
 const PUBLICATIONS: &str = include_str!("../queries/publications.sql");
 const SUBSCRIPTIONS: &str = include_str!("../queries/subscriptions.sql");
 const SUBSCRIPTIONS_POST_150000: &str = include_str!("../queries/subscriptions_post_150000.sql");
+const SUBSCRIPTIONS_POST_170000: &str = include_str!("../queries/subscriptions_post_170000.sql");
 
 /// Picks the SQL variants for a server version (`server_version_num` format,
 /// e.g. `160003`). Below PG 13 there is no `leader_pid`, so pg_lens refuses.
@@ -296,7 +297,9 @@ pub fn for_version(server_version_num: i32) -> Result<QuerySet, String> {
     } else {
         REPLICATION_SLOTS
     };
-    let subscriptions = if server_version_num >= 150_000 {
+    let subscriptions = if server_version_num >= 170_000 {
+        SUBSCRIPTIONS_POST_170000
+    } else if server_version_num >= 150_000 {
         SUBSCRIPTIONS_POST_150000
     } else {
         SUBSCRIPTIONS

@@ -311,6 +311,12 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.23.1** — "PostgreSQL 17 Subscriptions & WAL Stats Resilience Hotfix":
+  - **PostgreSQL 17 Subscriptions Support**: resolved `s.subtwophase` catalog deprecation on PostgreSQL 17 by querying `s.subtwophasestate` (`(s.subtwophasestate != 'd') AS two_phase`).
+  - **WAL Stats Resilience**: hardened `pg_stat_wal` SQL query with `COALESCE` and safe `current_setting(..., true)` alongside NULL-tolerant deserialization in `db.rs`.
+  - **Per-Subsystem Throttling**: independent rate-limit state in `error_log.rs` preventing cross-subsystem deduplication interference and mutex stalls.
+  - **Rich Error Messages**: enriched error reporting formatting full PostgreSQL error messages and SQLSTATE codes across all background collectors.
+  - **Graceful Privilege Degradation**: suppressed error badges on `42501` insufficient privilege errors, and wired automatic status bar error clearance once subsystems recover.
 - **v0.23.0** — "Universal Error Cataloging & PostgreSQL 17 Replication Fix":
   - **Universal Error Cataloging Subsystem (`error.log`)**: structured persistent error logging to `~/.local/state/pg_lens/error.log` (or `$PG_LENS_STATE_DIR/error.log`) with 30-second in-memory deduplication and rate-limiting across all database telemetry collectors.
   - **On-Screen Error Notifications (TUI & Web)**: status bar alert badge (`⚠ error: <subsystem>`), contextual in-panel error cards with server error details and log file paths, and database error banner references.
