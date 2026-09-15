@@ -104,7 +104,7 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `cc` | `1.2.67` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/cc-rs](https://github.com/rust-lang/cc-rs) |
 | `cfg-if` | `1.0.4` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/cfg-if](https://github.com/rust-lang/cfg-if) |
 | `cfg_aliases` | `0.2.1` | `MIT` | [https://github.com/katharostech/cfg_aliases](https://github.com/katharostech/cfg_aliases) |
-| `chacha20` | `0.10.1` | `MIT OR Apache-2.0` | [https://github.com/RustCrypto/stream-ciphers](https://github.com/RustCrypto/stream-ciphers) |
+| `chacha20` | `0.10.2` | `MIT OR Apache-2.0` | [https://github.com/RustCrypto/stream-ciphers](https://github.com/RustCrypto/stream-ciphers) |
 | `clap` | `4.6.1` | `MIT OR Apache-2.0` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
 | `clap_builder` | `4.6.0` | `MIT OR Apache-2.0` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
 | `clap_complete` | `4.6.9` | `MIT OR Apache-2.0` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
@@ -273,9 +273,9 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `rustc-demangle` | `0.1.28` | `MIT/Apache-2.0` | [https://github.com/rust-lang/rustc-demangle](https://github.com/rust-lang/rustc-demangle) |
 | `rustc_version` | `0.4.1` | `MIT OR Apache-2.0` | [https://github.com/djc/rustc-version-rs](https://github.com/djc/rustc-version-rs) |
 | `rustix` | `1.1.4` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | [https://github.com/bytecodealliance/rustix](https://github.com/bytecodealliance/rustix) |
-| `rustls` | `0.23.42` | `Apache-2.0 OR ISC OR MIT` | [https://github.com/rustls/rustls](https://github.com/rustls/rustls) |
+| `rustls` | `0.23.45` | `Apache-2.0 OR ISC OR MIT` | [https://github.com/rustls/rustls](https://github.com/rustls/rustls) |
 | `rustls-pki-types` | `1.15.0` | `MIT OR Apache-2.0` | [https://github.com/rustls/pki-types](https://github.com/rustls/pki-types) |
-| `rustls-webpki` | `0.103.13` | `ISC` | [https://github.com/rustls/webpki](https://github.com/rustls/webpki) |
+| `rustls-webpki` | `0.103.15` | `ISC` | [https://github.com/rustls/webpki](https://github.com/rustls/webpki) |
 | `rustversion` | `1.0.23` | `MIT OR Apache-2.0` | [https://github.com/dtolnay/rustversion](https://github.com/dtolnay/rustversion) |
 | `ryu` | `1.0.23` | `Apache-2.0 OR BSL-1.0` | [https://github.com/dtolnay/ryu](https://github.com/dtolnay/ryu) |
 | `same-file` | `1.0.6` | `Unlicense/MIT` | [https://github.com/BurntSushi/same-file](https://github.com/BurntSushi/same-file) |

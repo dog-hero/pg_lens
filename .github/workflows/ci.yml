@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       # dist/ is not committed; pg_lens_web's build.rs requires it
       - uses: actions/setup-node@v4
@@ -24,6 +24,8 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: crates/pg_lens_web/frontend/package-lock.json
+      - name: Format check (rustfmt)
+        run: cargo fmt --all -- --check
       - name: Build frontend bundle
         run: npm ci && npm run build
         working-directory: crates/pg_lens_web/frontend
@@ -31,10 +33,10 @@ jobs:
         run: cargo test --workspace
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Check license compliance (cargo-deny)
+      - name: Security & license audit (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check licenses
+          command: check
       - name: Verify THIRD_PARTY_LICENSES.md is up to date
         run: |
           python3 scripts/generate_licenses.py
@@ -56,6 +58,8 @@ jobs:
           cache: npm
           cache-dependency-path: crates/pg_lens_web/frontend/package-lock.json
       - run: npm ci
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=high
       # SQL tokenizer unit tests (node:test + native TS type-stripping)
       - run: npm test
       # runs `tsc --noEmit && vite build`

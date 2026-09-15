@@ -43,11 +43,8 @@ pub fn flatten_tree<'a>(nodes: &'a [BlockTreeNode]) -> Vec<FlattenedNode<'a>> {
 }
 
 pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
-    let [tree_area, locks_area] = Layout::vertical([
-        Constraint::Percentage(55),
-        Constraint::Percentage(45),
-    ])
-    .areas(area);
+    let [tree_area, locks_area] =
+        Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(area);
 
     draw_tree(app, frame, tree_area);
     draw_locks(app, frame, locks_area);
@@ -80,8 +77,10 @@ fn draw_tree(app: &mut App, frame: &mut Frame, area: Rect) {
         .title(Span::styled(title, Style::new().bold()));
 
     if flattened.is_empty() {
-        let empty = Paragraph::new(Line::from("  No blocked sessions detected \u{2014} all queries running freely.").dim())
-            .block(block);
+        let empty = Paragraph::new(
+            Line::from("  No blocked sessions detected \u{2014} all queries running freely.").dim(),
+        )
+        .block(block);
         frame.render_widget(empty, area);
         return;
     }
@@ -103,14 +102,23 @@ fn draw_tree(app: &mut App, frame: &mut Frame, area: Rect) {
             }
 
             let pid_span = if n.is_deadlock {
-                Span::styled(format!("{prefix}[DEADLOCK] PID {}", n.pid), Style::new().fg(Color::Red).bold())
+                Span::styled(
+                    format!("{prefix}[DEADLOCK] PID {}", n.pid),
+                    Style::new().fg(Color::Red).bold(),
+                )
             } else if n.is_root {
                 Span::styled(
-                    format!("{prefix}[ROOT BLOCKER] PID {} ({} waiters)", n.pid, n.num_descendants),
+                    format!(
+                        "{prefix}[ROOT BLOCKER] PID {} ({} waiters)",
+                        n.pid, n.num_descendants
+                    ),
                     Style::new().fg(Color::Red).bold(),
                 )
             } else {
-                Span::styled(format!("{prefix}PID {}", n.pid), Style::new().fg(Color::Yellow))
+                Span::styled(
+                    format!("{prefix}PID {}", n.pid),
+                    Style::new().fg(Color::Yellow),
+                )
             };
 
             let user_app = format!("{}@{}", n.usename, n.application_name);
@@ -198,8 +206,10 @@ fn draw_locks(app: &mut App, frame: &mut Frame, area: Rect) {
         .title(Span::styled(title, Style::new().bold()));
 
     if locks.is_empty() {
-        let empty = Paragraph::new(Line::from("  No active relation or transaction locks in database.").dim())
-            .block(block);
+        let empty = Paragraph::new(
+            Line::from("  No active relation or transaction locks in database.").dim(),
+        )
+        .block(block);
         frame.render_widget(empty, area);
         return;
     }
@@ -268,14 +278,7 @@ fn draw_locks(app: &mut App, frame: &mut Frame, area: Rect) {
         .block(block)
         .header(
             Row::new(vec![
-                "PID",
-                "Type",
-                "Relation",
-                "Mode",
-                "Status",
-                "Age",
-                "User",
-                "Query",
+                "PID", "Type", "Relation", "Mode", "Status", "Age", "User", "Query",
             ])
             .style(Style::new().bold().dim()),
         )
@@ -315,7 +318,8 @@ fn draw_detail(app: &App, frame: &mut Frame, area: Rect) {
             let mut lines = Vec::new();
             if node.is_deadlock {
                 lines.push(
-                    Line::from("DEADLOCK DETECTED IN THIS CYCLE").style(Style::new().fg(Color::Red).bold()),
+                    Line::from("DEADLOCK DETECTED IN THIS CYCLE")
+                        .style(Style::new().fg(Color::Red).bold()),
                 );
             } else if node.is_root {
                 lines.push(

@@ -69,7 +69,10 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
         .border_style(Style::new().fg(Color::Cyan));
 
     let header = Row::new(vec![
-        Cell::from(Span::styled("STATUS/KIND", Style::new().bold().underlined())),
+        Cell::from(Span::styled(
+            "STATUS/KIND",
+            Style::new().bold().underlined(),
+        )),
         Cell::from(Span::styled("TARGET", Style::new().bold().underlined())),
         Cell::from(Span::styled("FILENAME", Style::new().bold().underlined())),
         Cell::from(Span::styled("SIZE", Style::new().bold().underlined())),
@@ -107,20 +110,14 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
                 .unwrap_or_else(|| "\u{2014}".to_string());
             let frames_cell = Cell::from(Span::styled(frames_str, Style::new().dim()));
 
-            let started_str = entry
-                .started_at
-                .as_deref()
-                .unwrap_or("\u{2014}");
-            let started_cell = Cell::from(Span::styled(started_str.to_string(), Style::new().dim()));
+            let started_str = entry.started_at.as_deref().unwrap_or("\u{2014}");
+            let started_cell =
+                Cell::from(Span::styled(started_str.to_string(), Style::new().dim()));
 
             let ended_str = if entry.is_active {
                 "recording...".to_string()
             } else {
-                entry
-                    .ended_at
-                    .as_deref()
-                    .unwrap_or("\u{2014}")
-                    .to_string()
+                entry.ended_at.as_deref().unwrap_or("\u{2014}").to_string()
             };
             let ended_cell = Cell::from(Span::styled(
                 ended_str,
@@ -202,7 +199,10 @@ fn draw_empty(app: &App, frame: &mut Frame, area: Rect) {
 
     if !app.records_filter.is_empty() {
         let msg = Line::from(vec![
-            Span::styled(" No recordings or bookmarks match filter \"", Style::new().dim()),
+            Span::styled(
+                " No recordings or bookmarks match filter \"",
+                Style::new().dim(),
+            ),
             Span::styled(app.records_filter.clone(), Style::new().fg(Color::Yellow)),
             Span::styled("\" (press \\ to clear)", Style::new().dim()),
         ]);
@@ -243,10 +243,7 @@ fn draw_empty(app: &App, frame: &mut Frame, area: Rect) {
         Line::from(vec![
             Span::styled("   \u{2022} Press ", Style::new().dim()),
             Span::styled("b/B", Style::new().fg(Color::Cyan).bold()),
-            Span::styled(
-                " to rescan disk for newly added files",
-                Style::new().dim(),
-            ),
+            Span::styled(" to rescan disk for newly added files", Style::new().dim()),
         ]),
         Line::default(),
         Line::from(Span::styled(
@@ -261,4 +258,3 @@ fn draw_empty(app: &App, frame: &mut Frame, area: Rect) {
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
-

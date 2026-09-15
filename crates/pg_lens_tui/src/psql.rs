@@ -187,17 +187,30 @@ mod tests {
         assert_eq!(
             inv.args,
             vec![
-                "--host", "db.internal", "--port", "5433", "--username", "ro", "--dbname", "shop",
+                "--host",
+                "db.internal",
+                "--port",
+                "5433",
+                "--username",
+                "ro",
+                "--dbname",
+                "shop",
             ]
         );
-        assert_eq!(inv.env, vec![("PGPASSWORD".to_string(), "s3cr3t".to_string())]);
+        assert_eq!(
+            inv.env,
+            vec![("PGPASSWORD".to_string(), "s3cr3t".to_string())]
+        );
     }
 
     #[test]
     fn missing_fields_are_simply_omitted_not_empty_flags() {
         let c = conn(None, None, None, None, None);
         let inv = build_psql_invocation(&c, false);
-        assert!(inv.args.is_empty(), "no libpq defaults should be overridden: {inv:?}");
+        assert!(
+            inv.args.is_empty(),
+            "no libpq defaults should be overridden: {inv:?}"
+        );
         assert!(inv.env.is_empty());
     }
 
@@ -230,20 +243,38 @@ mod tests {
         let c = conn(Some("localhost"), None, Some("ro"), None, Some("pw"));
         let inv = build_psql_invocation(&c, true);
         assert_eq!(inv.env.len(), 2, "{inv:?}");
-        assert!(inv.env.contains(&("PGPASSWORD".to_string(), "pw".to_string())));
-        assert!(inv.env.contains(&("PGOPTIONS".to_string(), READ_ONLY_PGOPTIONS.to_string())));
+        assert!(
+            inv.env
+                .contains(&("PGPASSWORD".to_string(), "pw".to_string()))
+        );
+        assert!(
+            inv.env
+                .contains(&("PGOPTIONS".to_string(), READ_ONLY_PGOPTIONS.to_string()))
+        );
     }
 
     #[test]
     fn args_never_contain_the_password() {
-        let c = conn(Some("h"), Some(1), Some("u"), Some("d"), Some("super-secret"));
+        let c = conn(
+            Some("h"),
+            Some(1),
+            Some("u"),
+            Some("d"),
+            Some("super-secret"),
+        );
         let inv = build_psql_invocation(&c, false);
         assert!(!inv.args.iter().any(|a| a.contains("super-secret")));
     }
 
     #[test]
     fn debug_output_never_prints_the_password() {
-        let c = conn(Some("h"), Some(1), Some("u"), Some("d"), Some("super-secret"));
+        let c = conn(
+            Some("h"),
+            Some(1),
+            Some("u"),
+            Some("d"),
+            Some("super-secret"),
+        );
         let inv = build_psql_invocation(&c, false);
         let rendered = format!("{c:?} {inv:?}");
         assert!(!rendered.contains("super-secret"), "leaked: {rendered}");
@@ -251,14 +282,18 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_password_falls_back_to_the_configs_static_password() {
-        let config: Config = "host=localhost user=ro password=static-pw".parse().expect("dsn");
+        let config: Config = "host=localhost user=ro password=static-pw"
+            .parse()
+            .expect("dsn");
         let resolved = resolve_password(&config, None).await;
         assert_eq!(resolved.as_deref(), Some("static-pw"));
     }
 
     #[tokio::test]
     async fn resolve_password_prefers_a_fresh_password_cmd_over_the_static_one() {
-        let config: Config = "host=localhost user=ro password=stale".parse().expect("dsn");
+        let config: Config = "host=localhost user=ro password=stale"
+            .parse()
+            .expect("dsn");
         let source = PasswordSource::Command("echo fresh-pw".to_string());
         let resolved = resolve_password(&config, Some(&source)).await;
         assert_eq!(resolved.as_deref(), Some("fresh-pw"));

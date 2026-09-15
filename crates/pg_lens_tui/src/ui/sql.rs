@@ -19,11 +19,52 @@ use ratatui::text::{Line, Span};
 
 /// Uppercase keyword set (word-boundary matched, case-insensitive).
 const KEYWORDS: &[&str] = &[
-    "SELECT", "INSERT", "UPDATE", "DELETE", "FROM", "WHERE", "JOIN", "LEFT", "RIGHT", "INNER",
-    "OUTER", "ON", "GROUP", "BY", "ORDER", "LIMIT", "OFFSET", "HAVING", "VALUES", "SET", "INTO",
-    "AS", "AND", "OR", "NOT", "NULL", "BEGIN", "COMMIT", "ROLLBACK", "VACUUM", "ANALYZE",
-    "CREATE", "TABLE", "INDEX", "DROP", "ALTER", "WITH", "UNION", "ALL", "DISTINCT", "CASE",
-    "WHEN", "THEN", "ELSE", "END", "RETURNING",
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "FROM",
+    "WHERE",
+    "JOIN",
+    "LEFT",
+    "RIGHT",
+    "INNER",
+    "OUTER",
+    "ON",
+    "GROUP",
+    "BY",
+    "ORDER",
+    "LIMIT",
+    "OFFSET",
+    "HAVING",
+    "VALUES",
+    "SET",
+    "INTO",
+    "AS",
+    "AND",
+    "OR",
+    "NOT",
+    "NULL",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "VACUUM",
+    "ANALYZE",
+    "CREATE",
+    "TABLE",
+    "INDEX",
+    "DROP",
+    "ALTER",
+    "WITH",
+    "UNION",
+    "ALL",
+    "DISTINCT",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "RETURNING",
 ];
 
 fn keyword_style() -> Style {
@@ -240,7 +281,11 @@ mod tests {
         let lines = highlight_lines("SELECT *\nFROM t\n-- done");
         assert_eq!(lines.len(), 3);
         assert_eq!(
-            lines[1].spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
+            lines[1]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>(),
             "FROM t"
         );
     }

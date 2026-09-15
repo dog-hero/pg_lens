@@ -453,7 +453,10 @@ mod tests {
                 q.table_stats.contains("LIMIT $1"),
                 "table_stats must take its row cap as a bind param"
             );
-            assert!(!q.table_stats.contains(&format!("LIMIT {TABLE_STATS_LIMIT}")));
+            assert!(
+                !q.table_stats
+                    .contains(&format!("LIMIT {TABLE_STATS_LIMIT}"))
+            );
             // Perf restructure: rank by the cheap catalog column first, only
             // then compute the expensive exact size for the survivors.
             assert!(q.table_stats.contains("relpages"));
@@ -515,7 +518,10 @@ mod tests {
             let q = for_version(version).expect("supported");
             assert!(q.cancel_backend.contains("pg_cancel_backend($1::int4)"));
             assert!(q.cancel_backend.contains("AS is_stopped"));
-            assert!(q.terminate_backend.contains("pg_terminate_backend($1::int4)"));
+            assert!(
+                q.terminate_backend
+                    .contains("pg_terminate_backend($1::int4)")
+            );
             assert!(q.terminate_backend.contains("AS is_stopped"));
             // Attribution to the pg_activity originals must survive edits.
             assert!(q.cancel_backend.contains("do_pg_cancel_backend.sql"));
@@ -556,7 +562,10 @@ mod tests {
                 "AS wal_bytes",
                 "AS track_io_timing_on",
             ] {
-                assert!(sql.contains(marker), "{marker} missing from a statements tier");
+                assert!(
+                    sql.contains(marker),
+                    "{marker} missing from a statements tier"
+                );
             }
         }
     }
@@ -699,7 +708,11 @@ mod tests {
             );
             // Never crosses idle-in-transaction sessions — those are the
             // v0.9 xact-age hunter's territory, not this census's.
-            assert!(!q.idle_sessions.to_lowercase().contains("idle in transaction"));
+            assert!(
+                !q.idle_sessions
+                    .to_lowercase()
+                    .contains("idle in transaction")
+            );
         }
     }
 
@@ -764,7 +777,10 @@ mod tests {
     fn replication_conflicts_query_serves_pg13_and_up() {
         for version in [130_011, 140_000, 160_003] {
             let q = for_version(version).expect("supported");
-            assert!(q.replication_conflicts.contains("pg_stat_database_conflicts"));
+            assert!(
+                q.replication_conflicts
+                    .contains("pg_stat_database_conflicts")
+            );
             assert!(q.replication_conflicts.contains("current_database()"));
             assert!(q.replication_conflicts.contains("confl_lock"));
             assert!(q.replication_conflicts.contains("confl_deadlock"));
@@ -790,16 +806,20 @@ mod tests {
 
         let q17 = for_version(170_000).expect("PG 17 supported");
         assert!(q17.replication_slots.contains("xmin_age"));
-        assert!(q17
-            .replication_slots
-            .contains("invalidation_reason::text AS invalidated"));
+        assert!(
+            q17.replication_slots
+                .contains("invalidation_reason::text AS invalidated")
+        );
     }
 
     #[test]
     fn subscriptions_error_stats_split_at_pg15() {
         let q14 = for_version(140_000).expect("PG 14 supported");
         assert!(q14.subscriptions.contains("pg_subscription"));
-        assert!(q14.subscriptions.contains("NULL::int8 AS apply_error_count"));
+        assert!(
+            q14.subscriptions
+                .contains("NULL::int8 AS apply_error_count")
+        );
 
         let q15 = for_version(150_000).expect("PG 15 supported");
         assert!(q15.subscriptions.contains("pg_subscription"));
@@ -817,4 +837,3 @@ mod tests {
         }
     }
 }
-

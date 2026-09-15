@@ -126,7 +126,11 @@ mod tests {
         // relationship (4 chars per 3 input bytes, rounded up) rather than
         // hand-writing a decoder just for the test.
         assert_eq!(encoded.len(), sql.len().div_ceil(3) * 4);
-        assert!(encoded.chars().all(|c| BASE64_ALPHABET.contains(&(c as u8)) || c == '='));
+        assert!(
+            encoded
+                .chars()
+                .all(|c| BASE64_ALPHABET.contains(&(c as u8)) || c == '=')
+        );
     }
 
     #[test]

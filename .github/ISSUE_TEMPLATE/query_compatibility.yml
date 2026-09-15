@@ -75,3 +75,4 @@ body:
       description: What was expected to happen, and what happened instead?
     validations:
       required: true
+

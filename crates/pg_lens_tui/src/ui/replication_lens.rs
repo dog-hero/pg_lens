@@ -19,11 +19,11 @@ use ratatui::{
 };
 
 use crate::app::{App, Tab};
-use crate::ui::{format, style};
 use crate::ui::replication::{
     publication_line, receiver_line, sender_line, slot_severity, subscription_line,
     wal_generation_line,
 };
+use crate::ui::{format, style};
 
 /// Fixed widths of columns on wide terminals (>= 135 cols) - all 12 columns:
 /// Type, Plugin, DB, Active, Retained, Lag, WAL Status, Safe Size, xmin Age, Invalidated.
@@ -61,7 +61,10 @@ fn role_lines(repl: Option<&ReplicationInfo>) -> Vec<Line<'static>> {
 fn conflicts_line(conflicts: &pg_lens_core::DatabaseConflicts) -> Line<'static> {
     let mut spans = vec![
         Span::styled("total: ", style::label_style()),
-        Span::styled(format::human_count(conflicts.confl_total), style::value_style()),
+        Span::styled(
+            format::human_count(conflicts.confl_total),
+            style::value_style(),
+        ),
     ];
     if let Some(rate) = conflicts.conflicts_per_sec {
         if rate > 0.0 {
@@ -70,7 +73,10 @@ fn conflicts_line(conflicts: &pg_lens_core::DatabaseConflicts) -> Line<'static> 
                 Style::new().fg(Color::Red).bold(),
             ));
         } else {
-            spans.push(Span::styled(format!(" ({rate:.1}/s)"), style::label_style()));
+            spans.push(Span::styled(
+                format!(" ({rate:.1}/s)"),
+                style::label_style(),
+            ));
         }
     }
     spans.push(Span::styled(" \u{b7} lock: ", style::label_style()));
@@ -135,17 +141,33 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     let pub_count = app.snapshot.publications.as_deref().map_or(0, <[_]>::len);
     let sub_count = app.snapshot.subscriptions.as_deref().map_or(0, <[_]>::len);
     let pub_height = if app.snapshot.publications.is_some() {
-        if pub_count == 0 { 3 } else { (pub_count as u16 + 2).clamp(3, 5) }
+        if pub_count == 0 {
+            3
+        } else {
+            (pub_count as u16 + 2).clamp(3, 5)
+        }
     } else {
         0
     };
     let sub_height = if app.snapshot.subscriptions.is_some() {
-        if sub_count == 0 { 3 } else { (sub_count as u16 + 2).clamp(3, 5) }
+        if sub_count == 0 {
+            3
+        } else {
+            (sub_count as u16 + 2).clamp(3, 5)
+        }
     } else {
         0
     };
 
-    let [wal_area, conflicts_area, role_area, pub_area, sub_area, table_area, footer_area] = Layout::vertical([
+    let [
+        wal_area,
+        conflicts_area,
+        role_area,
+        pub_area,
+        sub_area,
+        table_area,
+        footer_area,
+    ] = Layout::vertical([
         Constraint::Length(wal_height),
         Constraint::Length(conflicts_height),
         Constraint::Length(role_height),
@@ -157,15 +179,14 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
     .areas(area);
 
     if let Some(wal) = app.snapshot.wal.as_ref() {
-        let panel =
-            Paragraph::new(wal_generation_line(wal)).block(Block::bordered().title("WAL Generation"));
+        let panel = Paragraph::new(wal_generation_line(wal))
+            .block(Block::bordered().title("WAL Generation"));
         frame.render_widget(panel, wal_area);
     }
 
     if let Some(conflicts) = app.snapshot.conflicts.as_ref() {
         let panel = Paragraph::new(conflicts_line(conflicts)).block(
-            Block::bordered()
-                .title("Standby Recovery Conflicts (pg_stat_database_conflicts)"),
+            Block::bordered().title("Standby Recovery Conflicts (pg_stat_database_conflicts)"),
         );
         frame.render_widget(panel, conflicts_area);
     }
@@ -202,7 +223,8 @@ fn draw_publications(app: &App, frame: &mut Frame, area: Rect) {
     if lines.is_empty() {
         lines.push(Line::from("  no publications configured in this database").dim());
     }
-    let panel = Paragraph::new(lines).block(Block::bordered().title("Publications (pg_publication)"));
+    let panel =
+        Paragraph::new(lines).block(Block::bordered().title("Publications (pg_publication)"));
     frame.render_widget(panel, area);
 }
 
@@ -219,7 +241,8 @@ fn draw_subscriptions(app: &App, frame: &mut Frame, area: Rect) {
     if lines.is_empty() {
         lines.push(Line::from("  no subscriptions configured in this database").dim());
     }
-    let panel = Paragraph::new(lines).block(Block::bordered().title("Subscriptions (pg_subscription)"));
+    let panel =
+        Paragraph::new(lines).block(Block::bordered().title("Subscriptions (pg_subscription)"));
     frame.render_widget(panel, area);
 }
 
@@ -250,12 +273,18 @@ fn slot_table_row(
             sev.marker().to_string(),
             format::truncate_with_ellipsis(&slot.slot_name, slot_width),
             slot.slot_type.clone(),
-            slot.plugin.clone().unwrap_or_else(|| "\u{2014}".to_string()),
-            slot.database.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            slot.plugin
+                .clone()
+                .unwrap_or_else(|| "\u{2014}".to_string()),
+            slot.database
+                .clone()
+                .unwrap_or_else(|| "\u{2014}".to_string()),
             active.to_string(),
             retained,
             lag,
-            slot.wal_status.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            slot.wal_status
+                .clone()
+                .unwrap_or_else(|| "\u{2014}".to_string()),
             safe,
             xmin,
             inval.to_string(),
@@ -266,12 +295,18 @@ fn slot_table_row(
             sev.marker().to_string(),
             format::truncate_with_ellipsis(&slot.slot_name, slot_width),
             slot.slot_type.clone(),
-            slot.plugin.clone().unwrap_or_else(|| "\u{2014}".to_string()),
-            slot.database.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            slot.plugin
+                .clone()
+                .unwrap_or_else(|| "\u{2014}".to_string()),
+            slot.database
+                .clone()
+                .unwrap_or_else(|| "\u{2014}".to_string()),
             active.to_string(),
             retained,
             lag,
-            slot.wal_status.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            slot.wal_status
+                .clone()
+                .unwrap_or_else(|| "\u{2014}".to_string()),
             safe,
         ])
         .style(Style::new().fg(sev.color()))
@@ -283,7 +318,9 @@ fn slot_table_row(
             active.to_string(),
             retained,
             lag,
-            slot.wal_status.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            slot.wal_status
+                .clone()
+                .unwrap_or_else(|| "\u{2014}".to_string()),
         ])
         .style(Style::new().fg(sev.color()))
     }
@@ -315,9 +352,8 @@ fn draw_slots(app: &mut App, frame: &mut Frame, area: Rect) {
         return;
     };
     if slots.is_empty() {
-        let placeholder =
-            Paragraph::new(Line::from(" no replication slots on this server").dim())
-                .block(Block::bordered().title("Slots"));
+        let placeholder = Paragraph::new(Line::from(" no replication slots on this server").dim())
+            .block(Block::bordered().title("Slots"));
         frame.render_widget(placeholder, area);
         return;
     }
@@ -464,11 +500,20 @@ fn draw_slot_detail(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled("Type: ", style::label_style()),
             Span::styled(slot.slot_type.clone(), style::value_style()),
             Span::styled("  \u{2502}  Plugin: ", style::label_style()),
-            Span::styled(slot.plugin.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+            Span::styled(
+                slot.plugin.as_deref().unwrap_or("\u{2014}"),
+                style::value_style(),
+            ),
             Span::styled("  \u{2502}  Database: ", style::label_style()),
-            Span::styled(slot.database.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+            Span::styled(
+                slot.database.as_deref().unwrap_or("\u{2014}"),
+                style::value_style(),
+            ),
             Span::styled("  \u{2502}  Temporary: ", style::label_style()),
-            Span::styled(if slot.temporary { "yes" } else { "no" }, style::value_style()),
+            Span::styled(
+                if slot.temporary { "yes" } else { "no" },
+                style::value_style(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("State: ", style::label_style()),
@@ -482,21 +527,37 @@ fn draw_slot_detail(app: &App, frame: &mut Frame, area: Rect) {
             ),
             Span::styled("  \u{2502}  Active PID: ", style::label_style()),
             Span::styled(
-                slot.active_pid.map_or_else(|| "\u{2014}".to_string(), |p| p.to_string()),
+                slot.active_pid
+                    .map_or_else(|| "\u{2014}".to_string(), |p| p.to_string()),
                 style::value_style(),
             ),
             Span::styled("  \u{2502}  Client App: ", style::label_style()),
-            Span::styled(slot.application_name.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+            Span::styled(
+                slot.application_name.as_deref().unwrap_or("\u{2014}"),
+                style::value_style(),
+            ),
             Span::styled("  \u{2502}  Client IP: ", style::label_style()),
-            Span::styled(slot.client_addr.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+            Span::styled(
+                slot.client_addr.as_deref().unwrap_or("\u{2014}"),
+                style::value_style(),
+            ),
         ]),
         Line::default(),
-        Line::from(Span::styled("\u{2500}\u{2500} WAL & Replication Lag \u{2500}\u{2500}", style::label_style())),
+        Line::from(Span::styled(
+            "\u{2500}\u{2500} WAL & Replication Lag \u{2500}\u{2500}",
+            style::label_style(),
+        )),
         Line::from(vec![
             Span::styled("Restart LSN: ", style::label_style()),
-            Span::styled(slot.restart_lsn.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+            Span::styled(
+                slot.restart_lsn.as_deref().unwrap_or("\u{2014}"),
+                style::value_style(),
+            ),
             Span::styled("  \u{2502}  Confirmed Flush LSN: ", style::label_style()),
-            Span::styled(slot.confirmed_flush_lsn.as_deref().unwrap_or("\u{2014}"), style::value_style()),
+            Span::styled(
+                slot.confirmed_flush_lsn.as_deref().unwrap_or("\u{2014}"),
+                style::value_style(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Retained WAL on Disk: ", style::label_style()),
@@ -511,11 +572,15 @@ fn draw_slot_detail(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled(safe_str, style::value_style()),
         ]),
         Line::default(),
-        Line::from(Span::styled("\u{2500}\u{2500} Transaction Horizons & Bloat \u{2500}\u{2500}", style::label_style())),
+        Line::from(Span::styled(
+            "\u{2500}\u{2500} Transaction Horizons & Bloat \u{2500}\u{2500}",
+            style::label_style(),
+        )),
         Line::from(vec![
             Span::styled("xmin Age: ", style::label_style()),
             Span::styled(
-                slot.xmin_age.map_or_else(|| "\u{2014}".to_string(), format::human_count),
+                slot.xmin_age
+                    .map_or_else(|| "\u{2014}".to_string(), format::human_count),
                 if slot.xmin_age.unwrap_or(0) > 10_000_000 {
                     Style::new().fg(Color::Yellow).bold()
                 } else {
@@ -525,19 +590,29 @@ fn draw_slot_detail(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled(" (holds back autovacuum)", style::label_style()),
             Span::styled("  \u{2502}  catalog_xmin Age: ", style::label_style()),
             Span::styled(
-                slot.catalog_xmin_age.map_or_else(|| "\u{2014}".to_string(), format::human_count),
+                slot.catalog_xmin_age
+                    .map_or_else(|| "\u{2014}".to_string(), format::human_count),
                 style::value_style(),
             ),
             Span::styled(" (holds back catalog vacuum)", style::label_style()),
         ]),
         Line::default(),
-        Line::from(Span::styled("\u{2500}\u{2500} Advanced Flags \u{2500}\u{2500}", style::label_style())),
+        Line::from(Span::styled(
+            "\u{2500}\u{2500} Advanced Flags \u{2500}\u{2500}",
+            style::label_style(),
+        )),
         Line::from(vec![
             Span::styled("Two-Phase: ", style::label_style()),
-            Span::styled(slot.two_phase.map_or("\u{2014}", |b| if b { "yes" } else { "no" }), style::value_style()),
+            Span::styled(
+                slot.two_phase
+                    .map_or("\u{2014}", |b| if b { "yes" } else { "no" }),
+                style::value_style(),
+            ),
             Span::styled("  \u{2502}  Standby Conflict: ", style::label_style()),
             Span::styled(
-                slot.conflicting.map_or("\u{2014}", |b| if b { "YES (recovery conflict)" } else { "no" }),
+                slot.conflicting.map_or("\u{2014}", |b| {
+                    if b { "YES (recovery conflict)" } else { "no" }
+                }),
                 if slot.conflicting.unwrap_or(false) {
                     Style::new().fg(Color::Red).bold()
                 } else {
@@ -555,7 +630,10 @@ fn draw_slot_detail(app: &App, frame: &mut Frame, area: Rect) {
             ),
         ]),
         Line::default(),
-        Line::from(Span::styled("Enter / Esc: close detail", style::label_style().italic())),
+        Line::from(Span::styled(
+            "Enter / Esc: close detail",
+            style::label_style().italic(),
+        )),
     ];
 
     frame.render_widget(Paragraph::new(lines), inner);

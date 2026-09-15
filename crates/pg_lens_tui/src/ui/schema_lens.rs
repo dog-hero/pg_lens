@@ -173,7 +173,10 @@ fn draw_vacuum_footer(schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
                 style::label_style(),
             ));
         }
-        None => spans.push(Span::styled("  wraparound: collecting\u{2026}", Style::new().dim())),
+        None => spans.push(Span::styled(
+            "  wraparound: collecting\u{2026}",
+            Style::new().dim(),
+        )),
     }
     spans.push(Span::styled("   \u{b7}   ", style::label_style()));
     let [k, d] = style::hint("v", ": vacuum detail");
@@ -220,15 +223,20 @@ fn draw_vacuum_view(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, a
         .prepared_xacts
         .as_deref()
         .map_or(1, |rows| rows.len().clamp(1, 4)) as u16;
-    let [headline_area, table_area, progress_area, prepared_area, footer_area] =
-        Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(prepared_height),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+    let [
+        headline_area,
+        table_area,
+        progress_area,
+        prepared_area,
+        footer_area,
+    ] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(prepared_height),
+        Constraint::Length(1),
+    ])
+    .areas(area);
 
     draw_vacuum_headline(schema, frame, headline_area);
     draw_vacuum_table(app, schema, frame, table_area);
@@ -299,7 +307,12 @@ fn draw_vacuum_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, 
         let pct = dead_pct(table.n_dead_tup, table.n_live_tup);
         let last_av = find_table_for_vacuum_row(schema, table).map_or_else(
             || "\u{2014}".to_string(),
-            |t| format::human_ago(t.last_autovacuum_epoch_secs.or(t.last_vacuum_epoch_secs), now),
+            |t| {
+                format::human_ago(
+                    t.last_autovacuum_epoch_secs.or(t.last_vacuum_epoch_secs),
+                    now,
+                )
+            },
         );
         let style = match sev {
             vacuum::Severity::Ok => Style::new(),
@@ -575,7 +588,9 @@ fn schema_table_title(app: &App) -> Line<'static> {
         ));
         spans.push(Span::styled(
             "\u{2588}",
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK),
+            Style::new()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::SLOW_BLINK),
         ));
         spans.push(Span::styled(
             format!("  {shown}/{total}"),
@@ -619,7 +634,9 @@ fn draw_table_empty(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area:
     };
     let para = Paragraph::new(Line::from(Span::styled(
         msg,
-        Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::new()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )))
     .alignment(ratatui::layout::Alignment::Center);
     frame.render_widget(para, inner);
@@ -649,9 +666,9 @@ fn table_column_width(area_width: u16) -> usize {
 /// `schema.tables_total` (the true, uncapped count) and only claims
 /// completeness when the two actually match.
 fn draw_footer(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
-    let staleness_secs =
-        (pg_lens_core::history::epoch_ms_now().saturating_sub(schema.collected_at_epoch_ms))
-            / 1_000;
+    let staleness_secs = (pg_lens_core::history::epoch_ms_now()
+        .saturating_sub(schema.collected_at_epoch_ms))
+        / 1_000;
     // Bloat is on-demand (its queries are slow): the auto cadence refreshes
     // only the table stats, so the footer says how to get bloat, or that the
     // shown estimate is on-demand.
@@ -787,9 +804,11 @@ fn draw_detail(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
     ];
 
     let mut any_index = false;
-    for index in schema.index_bloat.iter().filter(|b| {
-        b.schema == table.schema && b.table.as_deref() == Some(table.name.as_str())
-    }) {
+    for index in schema
+        .index_bloat
+        .iter()
+        .filter(|b| b.schema == table.schema && b.table.as_deref() == Some(table.name.as_str()))
+    {
         any_index = true;
         lines.push(Line::from(format!(
             "  {} \u{2014} {} \u{b7} bloat {}",
@@ -889,9 +908,9 @@ fn draw_table_detail_sections(
         return;
     };
     if let Some(err) = &detail.error {
-        lines.push(Line::from(format!(" detail unavailable: {err}")).style(
-            Style::new().fg(Color::Yellow),
-        ));
+        lines.push(
+            Line::from(format!(" detail unavailable: {err}")).style(Style::new().fg(Color::Yellow)),
+        );
         return;
     }
 
@@ -919,7 +938,10 @@ fn draw_table_detail_sections(
         lines.push(Line::from("  (no constraints)").dim());
     }
     for c in own {
-        lines.push(Line::from(format!("  {} {}: {}", c.kind, c.name, c.definition)));
+        lines.push(Line::from(format!(
+            "  {} {}: {}",
+            c.kind, c.name, c.definition
+        )));
     }
     let referencing: Vec<_> = detail
         .constraints
@@ -1120,9 +1142,7 @@ mod tests {
         let idx = app
             .schema_row_order
             .iter()
-            .position(|&i| {
-                app.snapshot.schema.as_ref().unwrap().tables[i].name == "order_items"
-            })
+            .position(|&i| app.snapshot.schema.as_ref().unwrap().tables[i].name == "order_items")
             .expect("mock has order_items");
         app.schema_table_state.select(Some(idx));
         app.detail_open = true;
@@ -1215,11 +1235,7 @@ mod tests {
             " default 1"
         );
         assert_eq!(
-            column_default_text(&column(
-                None,
-                Some("generated always as identity"),
-                false
-            )),
+            column_default_text(&column(None, Some("generated always as identity"), false)),
             " generated always as identity"
         );
         assert_eq!(

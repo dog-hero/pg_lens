@@ -182,7 +182,11 @@ impl SnapshotHistory {
         if self.points.is_empty() {
             return None;
         }
-        let idx = self.points.len().saturating_sub(1).saturating_sub(lookback_ticks);
+        let idx = self
+            .points
+            .len()
+            .saturating_sub(1)
+            .saturating_sub(lookback_ticks);
         self.points.get(idx)
     }
 

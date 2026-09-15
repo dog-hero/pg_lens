@@ -87,7 +87,11 @@ mod tests {
         assert_eq!(severity(0.0), Severity::Ok);
         assert_eq!(severity(1_800.0), Severity::Ok, "boundary is not yet warn");
         assert_eq!(severity(1_800.1), Severity::Warn);
-        assert_eq!(severity(14_400.0), Severity::Warn, "boundary is not yet bad");
+        assert_eq!(
+            severity(14_400.0),
+            Severity::Warn,
+            "boundary is not yet bad"
+        );
         assert_eq!(severity(14_400.1), Severity::Bad);
         assert_eq!(severity(86_400.0), Severity::Bad);
     }

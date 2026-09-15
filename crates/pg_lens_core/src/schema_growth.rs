@@ -388,15 +388,24 @@ mod tests {
     fn growth_none_with_fewer_than_two_samples() {
         let mut ring = TableGrowthRing::default();
         assert!(growth(&ring, 0, GROWTH_LOOKBACK_MS).is_none());
-        ring.push(SizeSample { epoch_ms: 0, total_bytes: 1000 });
+        ring.push(SizeSample {
+            epoch_ms: 0,
+            total_bytes: 1000,
+        });
         assert!(growth(&ring, 0, GROWTH_LOOKBACK_MS).is_none());
     }
 
     #[test]
     fn growth_positive_delta_and_percentage() {
         let mut ring = TableGrowthRing::default();
-        ring.push(SizeSample { epoch_ms: 0, total_bytes: 100_000_000 });
-        ring.push(SizeSample { epoch_ms: GROWTH_LOOKBACK_MS / 2, total_bytes: 140_000_000 });
+        ring.push(SizeSample {
+            epoch_ms: 0,
+            total_bytes: 100_000_000,
+        });
+        ring.push(SizeSample {
+            epoch_ms: GROWTH_LOOKBACK_MS / 2,
+            total_bytes: 140_000_000,
+        });
         let d = growth(&ring, GROWTH_LOOKBACK_MS / 2, GROWTH_LOOKBACK_MS).expect("2 samples");
         assert_eq!(d.bytes, 40_000_000);
         assert!((d.pct.unwrap() - 40.0).abs() < 0.01);
@@ -405,8 +414,14 @@ mod tests {
     #[test]
     fn growth_negative_delta_is_reported_not_clamped() {
         let mut ring = TableGrowthRing::default();
-        ring.push(SizeSample { epoch_ms: 0, total_bytes: 100_000_000 });
-        ring.push(SizeSample { epoch_ms: 1000, total_bytes: 40_000_000 });
+        ring.push(SizeSample {
+            epoch_ms: 0,
+            total_bytes: 100_000_000,
+        });
+        ring.push(SizeSample {
+            epoch_ms: 1000,
+            total_bytes: 40_000_000,
+        });
         let d = growth(&ring, 1000, GROWTH_LOOKBACK_MS).expect("2 samples");
         assert_eq!(d.bytes, -60_000_000);
         assert!((d.pct.unwrap() + 60.0).abs() < 0.01);
@@ -415,9 +430,15 @@ mod tests {
     #[test]
     fn growth_deadband_flattens_tiny_noise() {
         let mut ring = TableGrowthRing::default();
-        ring.push(SizeSample { epoch_ms: 0, total_bytes: 100_000_000 });
+        ring.push(SizeSample {
+            epoch_ms: 0,
+            total_bytes: 100_000_000,
+        });
         // A 4 KiB wobble is well under GROWTH_DEADBAND_BYTES.
-        ring.push(SizeSample { epoch_ms: 1000, total_bytes: 100_004_096 });
+        ring.push(SizeSample {
+            epoch_ms: 1000,
+            total_bytes: 100_004_096,
+        });
         let d = growth(&ring, 1000, GROWTH_LOOKBACK_MS).expect("2 samples");
         assert_eq!(d.bytes, 0);
         assert_eq!(d.pct, Some(0.0));
@@ -428,7 +449,10 @@ mod tests {
         let mut ring = TableGrowthRing::default();
         // A very old sample (2 hours before "now") must not be picked as
         // the comparison baseline once a newer in-window sample exists.
-        ring.push(SizeSample { epoch_ms: 0, total_bytes: 1 });
+        ring.push(SizeSample {
+            epoch_ms: 0,
+            total_bytes: 1,
+        });
         ring.push(SizeSample {
             epoch_ms: 2 * GROWTH_LOOKBACK_MS + 100_000, // just inside the window
             total_bytes: 200_000_000,
@@ -445,8 +469,14 @@ mod tests {
     #[test]
     fn growth_undefined_percentage_when_oldest_is_zero_bytes() {
         let mut ring = TableGrowthRing::default();
-        ring.push(SizeSample { epoch_ms: 0, total_bytes: 0 });
-        ring.push(SizeSample { epoch_ms: 1000, total_bytes: 500_000 });
+        ring.push(SizeSample {
+            epoch_ms: 0,
+            total_bytes: 0,
+        });
+        ring.push(SizeSample {
+            epoch_ms: 1000,
+            total_bytes: 500_000,
+        });
         let d = growth(&ring, 1000, GROWTH_LOOKBACK_MS).expect("2 samples");
         assert_eq!(d.bytes, 500_000);
         assert_eq!(d.pct, None);
@@ -469,12 +499,23 @@ mod tests {
         // Two "schema refresh with inserts" collections, one leaf row
         // present too (untouched — its own ring is independent).
         tracker.update(&[parent(400_000_000), row(1, "leaf_a", 100_000_000)], 0);
-        tracker.update(&[parent(440_000_000), row(1, "leaf_a", 100_500_000)], 1_000_000);
+        tracker.update(
+            &[parent(440_000_000), row(1, "leaf_a", 100_500_000)],
+            1_000_000,
+        );
 
         let mut rows = vec![parent(440_000_000), row(1, "leaf_a", 100_500_000)];
         tracker.apply(&mut rows, 1_000_000, GROWTH_LOOKBACK_MS);
-        assert_eq!(rows[0].growth_1h_bytes, Some(40_000_000), "parent aggregate delta");
-        assert_eq!(rows[0].partition_count, Some(3), "field untouched by growth");
+        assert_eq!(
+            rows[0].growth_1h_bytes,
+            Some(40_000_000),
+            "parent aggregate delta"
+        );
+        assert_eq!(
+            rows[0].partition_count,
+            Some(3),
+            "field untouched by growth"
+        );
     }
 
     #[test]
@@ -495,14 +536,23 @@ mod tests {
         // 50% growth but the table is tiny: no severity.
         assert_eq!(severity(1024, Some(50.0)), None);
         // 50% growth on a table above the floor: bad.
-        assert_eq!(severity(SEVERITY_MIN_TABLE_BYTES, Some(50.0)), Some(Severity::Bad));
+        assert_eq!(
+            severity(SEVERITY_MIN_TABLE_BYTES, Some(50.0)),
+            Some(Severity::Bad)
+        );
         // 15% growth on a table above the floor: warn.
-        assert_eq!(severity(SEVERITY_MIN_TABLE_BYTES, Some(15.0)), Some(Severity::Warn));
+        assert_eq!(
+            severity(SEVERITY_MIN_TABLE_BYTES, Some(15.0)),
+            Some(Severity::Warn)
+        );
         // 5% growth: calm.
         assert_eq!(severity(SEVERITY_MIN_TABLE_BYTES, Some(5.0)), None);
         // Unknown growth: calm (never guess a severity).
         assert_eq!(severity(SEVERITY_MIN_TABLE_BYTES, None), None);
         // A large shrink is also severity-worthy (abs value).
-        assert_eq!(severity(SEVERITY_MIN_TABLE_BYTES, Some(-30.0)), Some(Severity::Bad));
+        assert_eq!(
+            severity(SEVERITY_MIN_TABLE_BYTES, Some(-30.0)),
+            Some(Severity::Bad)
+        );
     }
 }

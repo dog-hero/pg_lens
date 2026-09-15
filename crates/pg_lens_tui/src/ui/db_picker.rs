@@ -45,7 +45,8 @@ pub fn draw(app: &App, frame: &mut Frame) {
         .entries
         .iter()
         .map(|e| {
-            let current = usize::from(e.name == app.snapshot.vitals.database) * current_suffix.len();
+            let current =
+                usize::from(e.name == app.snapshot.vitals.database) * current_suffix.len();
             2 + name_width + 2 + size_width + current
         })
         .max()
@@ -62,8 +63,11 @@ pub fn draw(app: &App, frame: &mut Frame) {
     let rect = centered(area, width, height);
     frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::bordered().title(title).border_style(style::accent_style())),
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .title(title)
+                .border_style(style::accent_style()),
+        ),
         rect,
     );
 }
@@ -114,9 +118,13 @@ fn entry_lines(
 fn hint_line() -> Line<'static> {
     let sep = Span::styled(" \u{b7} ", style::label_style());
     let mut spans = Vec::new();
-    for (i, (key, desc)) in [("j/k", ": move"), ("Enter", ": connect"), ("Esc", ": close")]
-        .into_iter()
-        .enumerate()
+    for (i, (key, desc)) in [
+        ("j/k", ": move"),
+        ("Enter", ": connect"),
+        ("Esc", ": close"),
+    ]
+    .into_iter()
+    .enumerate()
     {
         if i > 0 {
             spans.push(sep.clone());

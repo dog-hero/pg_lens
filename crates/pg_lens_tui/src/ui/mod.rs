@@ -1,27 +1,27 @@
 //! View layer: pure, synchronous rendering functions. No I/O, ever.
 
-pub mod format;
+mod blocks_lens;
 mod confirm;
 mod db_picker;
-mod server_picker;
+pub mod format;
 mod help;
 mod index_lens;
 mod macro_lens;
 mod micro_lens;
 mod picker;
+mod progress_lens;
 mod query_lens;
+mod records_lens;
+mod replay_scrubber;
 mod replication;
 mod replication_lens;
 mod schema_lens;
+pub mod sequences_subview;
+mod server_picker;
 mod splash;
 mod sql;
 mod style;
 mod vacuum;
-mod blocks_lens;
-mod progress_lens;
-mod records_lens;
-mod replay_scrubber;
-pub mod sequences_subview;
 
 use pg_lens_core::PollerStatus;
 use ratatui::{
@@ -60,17 +60,24 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     // one-line row under the poller banner, collapsing to zero when absent.
     let feedback_height = u16::from(app.admin_feedback.is_some());
     let scrubber_height = u16::from(app.replay_state.is_some());
-    let [header_area, tabs_area, banner_area, feedback_area, body_area, scrubber_area, statusbar_area] =
-        Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(banner_height),
-            Constraint::Length(feedback_height),
-            Constraint::Min(0),
-            Constraint::Length(scrubber_height),
-            Constraint::Length(1),
-        ])
-        .areas(frame.area());
+    let [
+        header_area,
+        tabs_area,
+        banner_area,
+        feedback_area,
+        body_area,
+        scrubber_area,
+        statusbar_area,
+    ] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(banner_height),
+        Constraint::Length(feedback_height),
+        Constraint::Min(0),
+        Constraint::Length(scrubber_height),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
 
     draw_header(app, frame, header_area);
     draw_tabs(app, frame, tabs_area);
@@ -145,8 +152,10 @@ fn draw_status_banner(app: &App, frame: &mut Frame, area: Rect) {
             } else {
                 format!(" (see {})", pg_lens_core::error_log_path().display())
             };
-            Line::from(format!(" DB error: {msg} \u{2014} showing last known data{log_suffix}"))
-                .style(Style::new().fg(Color::White).bg(Color::Red).bold())
+            Line::from(format!(
+                " DB error: {msg} \u{2014} showing last known data{log_suffix}"
+            ))
+            .style(Style::new().fg(Color::White).bg(Color::Red).bold())
         }
     };
     frame.render_widget(Paragraph::new(line), area);
@@ -418,17 +427,7 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
         let sep = Span::styled(" \u{2502} ", style::label_style());
         let [ek, ed] = style::hint("Enter", ": apply");
         let [xk, xd] = style::hint("Esc", ": cancel");
-        let spans = vec![
-            Span::raw(" "),
-            k,
-            d,
-            sep.clone(),
-            ek,
-            ed,
-            sep,
-            xk,
-            xd,
-        ];
+        let spans = vec![Span::raw(" "), k, d, sep.clone(), ek, ed, sep, xk, xd];
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
@@ -695,8 +694,11 @@ fn draw_statusbar(app: &App, frame: &mut Frame, area: Rect) {
     // copy (mirrors `App::clipboard_text`'s own lens gate), lowest priority
     // of all (it hides first on a tight bar, same "where width allows"
     // discipline as `!` just above).
-    let clipboard_lens = matches!(app.active_tab, Tab::MicroLens | Tab::QueryLens | Tab::IndexLens)
-        || (app.active_tab == Tab::SchemaLens && app.schema_view == SchemaView::Tables);
+    let clipboard_lens = matches!(
+        app.active_tab,
+        Tab::MicroLens | Tab::QueryLens | Tab::IndexLens
+    ) || (app.active_tab == Tab::SchemaLens
+        && app.schema_view == SchemaView::Tables);
     if clipboard_lens {
         let [yk, yd] = style::hint("y", ": copy");
         let fits = Line::from(spans.clone()).width()
@@ -782,12 +784,18 @@ mod tests {
     fn tab_bar_shows_the_direct_jump_number_hints() {
         let mut app = App::new();
         let screen = render_wide(&mut app);
-        for (digit, title) in ["1", "2", "3", "4", "5", "6", "7", "8", "9"].into_iter().zip(Tab::TITLES) {
+        for (digit, title) in ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+            .into_iter()
+            .zip(Tab::TITLES)
+        {
             assert!(
                 title.starts_with(digit),
                 "Tab::TITLES entry {title:?} must start with {digit}"
             );
-            assert!(screen.contains(title), "missing numbered tab {title}: {screen}");
+            assert!(
+                screen.contains(title),
+                "missing numbered tab {title}: {screen}"
+            );
         }
     }
 
@@ -801,7 +809,10 @@ mod tests {
         let screen = render(&mut app);
         assert!(screen.contains("replica_1_slot"), "{screen}");
         assert!(screen.contains("analytics_cdc"), "{screen}");
-        assert!(screen.contains('!'), "warn marker must be visible: {screen}");
+        assert!(
+            screen.contains('!'),
+            "warn marker must be visible: {screen}"
+        );
     }
 
     /// U1: the Replication Lens shows ALL of the mock's slots (unlike the
@@ -819,7 +830,10 @@ mod tests {
         assert!(screen.contains("Replication Slots"), "{screen}");
         assert!(screen.contains("replica_1_slot"), "{screen}");
         assert!(screen.contains("analytics_cdc"), "{screen}");
-        assert!(screen.contains('!'), "warn marker must be visible: {screen}");
+        assert!(
+            screen.contains('!'),
+            "warn marker must be visible: {screen}"
+        );
     }
 
     #[test]
@@ -915,15 +929,23 @@ mod tests {
         app.active_tab = Tab::SchemaLens;
         let screen = render(&mut app);
         // Columns of the S0-decision-3 spec.
-        for header in ["Table", "Size", "Live", "Dead", "Bloat%", "Bloat", "Last AV", "Seq/Idx"] {
+        for header in [
+            "Table", "Size", "Live", "Dead", "Bloat%", "Bloat", "Last AV", "Seq/Idx",
+        ] {
             assert!(screen.contains(header), "missing column {header}: {screen}");
         }
         // v0.14: the Δ1h growth column.
-        assert!(screen.contains("\u{394}1h"), "missing growth column header: {screen}");
+        assert!(
+            screen.contains("\u{394}1h"),
+            "missing growth column header: {screen}"
+        );
         // Mock's big grower (order_items, +42.3%/1h, above the red floor).
         assert!(screen.contains("+62.0 MB"), "signed growth delta: {screen}");
         // Mock's shrinker (pgbench_branches) — negative delta, not clamped.
-        assert!(screen.contains("-3.1 MB"), "negative growth delta: {screen}");
+        assert!(
+            screen.contains("-3.1 MB"),
+            "negative growth delta: {screen}"
+        );
         // Mock rows, joined bloat, is_na marker, footer.
         assert!(screen.contains("public.order_items"));
         assert!(screen.contains("54.0%"), "red-tier bloat pct: {screen}");
@@ -934,7 +956,10 @@ mod tests {
         // and the on-demand re-estimate hint.
         eprintln!("{screen}");
         assert!(screen.contains("ESTIMATED"), "estimate label is mandatory");
-        assert!(screen.contains("B: refresh + bloat"), "schema B hint: {screen}");
+        assert!(
+            screen.contains("B: refresh + bloat"),
+            "schema B hint: {screen}"
+        );
     }
 
     /// v0.15's per-table lock indicator: the mock fixture ships one
@@ -1098,7 +1123,10 @@ mod tests {
         app.active_tab = Tab::SchemaLens;
         press(&mut app, crossterm::event::KeyCode::Char('v'));
         let screen = render(&mut app);
-        assert!(screen.contains("prepared: payment_batch_2026_07_14"), "{screen}");
+        assert!(
+            screen.contains("prepared: payment_batch_2026_07_14"),
+            "{screen}"
+        );
         assert!(screen.contains("owner app_rw"), "{screen}");
         assert!(screen.contains("db shop"), "{screen}");
         assert!(screen.contains("!!"), "red-tier marker: {screen}");
@@ -1108,13 +1136,19 @@ mod tests {
         snap.prepared_xacts = Some(Vec::new());
         crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
         let screen = render(&mut app);
-        assert!(screen.contains("no orphaned prepared transactions"), "{screen}");
+        assert!(
+            screen.contains("no orphaned prepared transactions"),
+            "{screen}"
+        );
 
         let mut snap = app.snapshot.as_ref().clone();
         snap.prepared_xacts = None;
         crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
         let screen = render(&mut app);
-        assert!(screen.contains("prepared transactions: unavailable"), "{screen}");
+        assert!(
+            screen.contains("prepared transactions: unavailable"),
+            "{screen}"
+        );
     }
 
     /// v0.9 regression: the Vacuum sub-view's lower sections (progress,
@@ -1229,7 +1263,10 @@ mod tests {
         let screen = render(&mut app);
         assert!(screen.contains("Table \u{2014} public.order_items"));
         assert!(screen.contains("mod since analyze"));
-        assert!(screen.contains("order_items_pkey"), "index bloat listed: {screen}");
+        assert!(
+            screen.contains("order_items_pkey"),
+            "index bloat listed: {screen}"
+        );
         assert!(screen.contains("35.0%"), "index bloat pct shown");
     }
 
@@ -1243,7 +1280,10 @@ mod tests {
         let screen = render(&mut app);
         assert!(screen.contains("events_by_month"), "{screen}");
         assert!(screen.contains("[parts: 3]"), "parent marker: {screen}");
-        assert!(!screen.contains("events_by_month_2026_06"), "leaf must stay hidden: {screen}");
+        assert!(
+            !screen.contains("events_by_month_2026_06"),
+            "leaf must stay hidden: {screen}"
+        );
         assert!(screen.contains("+3 parts (p)"), "footer hint: {screen}");
     }
 
@@ -1279,7 +1319,9 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(160, 60);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
-        terminal.draw(|frame| crate::ui::draw(&mut app, frame)).expect("draw");
+        terminal
+            .draw(|frame| crate::ui::draw(&mut app, frame))
+            .expect("draw");
         let screen: String = terminal
             .backend()
             .buffer()
@@ -1491,13 +1533,15 @@ mod tests {
             collected_at_epoch_ms: 1,
             statements: Vec::new(),
             status: pg_lens_core::StatementsStatus::Unavailable(
-                "the pg_stat_statements extension is not installed in this database."
-                    .to_string(),
+                "the pg_stat_statements extension is not installed in this database.".to_string(),
             ),
         }));
         crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
         let screen = render(&mut app);
-        assert!(screen.contains("pg_stat_statements not available"), "{screen}");
+        assert!(
+            screen.contains("pg_stat_statements not available"),
+            "{screen}"
+        );
         assert!(screen.contains("CREATE EXTENSION pg_stat_statements;"));
         assert!(screen.contains("shared_preload_libraries"));
         // Calm state: no table columns behind the explainer, no error text.
@@ -1513,8 +1557,7 @@ mod tests {
         app.active_tab = Tab::QueryLens;
         let mut snap = app.snapshot.as_ref().clone();
         let mut statements = snap.statements.as_deref().expect("mock statements").clone();
-        statements.status =
-            pg_lens_core::StatementsStatus::Error("permission denied".to_string());
+        statements.status = pg_lens_core::StatementsStatus::Error("permission denied".to_string());
         snap.statements = Some(Arc::new(statements));
         crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
         let screen = render(&mut app);
@@ -1589,7 +1632,9 @@ mod tests {
 
         let screen = render(&mut app);
         assert!(
-            screen.contains("Error collecting replication slots: column s.invalidated does not exist"),
+            screen.contains(
+                "Error collecting replication slots: column s.invalidated does not exist"
+            ),
             "{screen}"
         );
         assert!(
@@ -1638,7 +1683,10 @@ mod tests {
         assert!(screen.contains("connection error"));
         assert!(screen.contains("password_cmd failed"));
         // The tail survived the wrap (nothing overflowed off-screen).
-        assert!(screen.contains("in vault"), "wrapped tail visible: {screen}");
+        assert!(
+            screen.contains("in vault"),
+            "wrapped tail visible: {screen}"
+        );
         assert!(screen.contains("connection failed"));
         assert!(screen.contains("retrying automatically \u{b7} q/Esc: quit"));
         assert!(!screen.contains("Macro Lens"), "no dashboard underneath");
@@ -1830,7 +1878,10 @@ mod tests {
     fn read_only_shows_a_permanent_ro_marker_in_the_header() {
         let mut app = App::new();
         let screen = render(&mut app);
-        assert!(!screen.contains(" RO"), "no marker when not read-only: {screen}");
+        assert!(
+            !screen.contains(" RO"),
+            "no marker when not read-only: {screen}"
+        );
 
         app.read_only = true;
         let screen = render(&mut app);
@@ -1853,10 +1904,7 @@ mod tests {
         // Distinguishable new snapshot: one activity row dropped.
         let mut snap = app.snapshot.as_ref().clone();
         snap.activity.truncate(2);
-        crate::app::update(
-            &mut app,
-            crate::app::Action::Snapshot(Arc::new(snap)),
-        );
+        crate::app::update(&mut app, crate::app::Action::Snapshot(Arc::new(snap)));
         assert_eq!(render(&mut app), frozen, "display frozen while paused");
 
         // Resume: the parked snapshot applies (row counter now 6 → 2).
@@ -1884,7 +1932,10 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(screen.contains("\u{25ae}\u{25ae} PAUSED"), "indicator: {screen}");
+        assert!(
+            screen.contains("\u{25ae}\u{25ae} PAUSED"),
+            "indicator: {screen}"
+        );
         assert!(screen.contains("pg_lens v"), "header left intact");
         assert!(screen.contains("Connections"), "body intact");
         assert!(screen.contains("q/Esc: quit"), "statusbar intact");
@@ -1993,7 +2044,10 @@ mod tests {
         // v0.12: lens filters — the shared `/` binding's updated
         // description plus the new one-key clear-filter.
         assert!(screen.contains("Schema Tables/Query Lens"), "{screen}");
-        assert!(screen.contains("clear the active lens's filter"), "{screen}");
+        assert!(
+            screen.contains("clear the active lens's filter"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -2061,14 +2115,22 @@ mod tests {
     #[test]
     fn recording_header_indicator_renders() {
         let mut app = App::new();
-        let test_dir = std::env::current_dir().unwrap().join("target/test_state_ui_rec");
+        let test_dir = std::env::current_dir()
+            .unwrap()
+            .join("target/test_state_ui_rec");
         app.state_dir = Some(test_dir);
         app.toggle_recording();
         assert!(app.recording.is_some());
 
         let screen = render(&mut app);
-        assert!(screen.contains("REC"), "header has recording indicator: {screen}");
-        assert!(screen.contains("frames"), "header reports frame count: {screen}");
+        assert!(
+            screen.contains("REC"),
+            "header has recording indicator: {screen}"
+        );
+        assert!(
+            screen.contains("frames"),
+            "header reports frame count: {screen}"
+        );
     }
 
     #[test]
@@ -2087,11 +2149,26 @@ mod tests {
         });
 
         let screen = render(&mut app);
-        assert!(screen.contains("REPLAY: incident.jsonl"), "header shows replay source: {screen}");
-        assert!(screen.contains("PLAY"), "header shows playback status: {screen}");
-        assert!(screen.contains("Frame 1/2"), "scrubber shows frame count: {screen}");
-        assert!(screen.contains("step"), "statusbar shows stepping hint: {screen}");
-        assert!(screen.contains("export"), "statusbar shows export hint: {screen}");
+        assert!(
+            screen.contains("REPLAY: incident.jsonl"),
+            "header shows replay source: {screen}"
+        );
+        assert!(
+            screen.contains("PLAY"),
+            "header shows playback status: {screen}"
+        );
+        assert!(
+            screen.contains("Frame 1/2"),
+            "scrubber shows frame count: {screen}"
+        );
+        assert!(
+            screen.contains("step"),
+            "statusbar shows stepping hint: {screen}"
+        );
+        assert!(
+            screen.contains("export"),
+            "statusbar shows export hint: {screen}"
+        );
     }
 
     #[test]
@@ -2138,4 +2215,3 @@ mod tests {
         assert!(screen.contains("cache hit:"), "{screen}");
     }
 }
-

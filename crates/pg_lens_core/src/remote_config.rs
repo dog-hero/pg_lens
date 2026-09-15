@@ -311,16 +311,27 @@ mod tests {
 
     #[test]
     fn github_shorthand_missing_parts_is_an_error() {
-        for bad in ["github:", "github:owner", "github:owner/repo", "github:/repo/path"] {
+        for bad in [
+            "github:",
+            "github:owner",
+            "github:owner/repo",
+            "github:/repo/path",
+        ] {
             let err = parse_config_url(bad).expect_err(&format!("{bad:?} must be rejected"));
-            assert!(matches!(err, SettingsError::RemoteConfigUrl { .. }), "{bad}");
+            assert!(
+                matches!(err, SettingsError::RemoteConfigUrl { .. }),
+                "{bad}"
+            );
         }
     }
 
     #[test]
     fn plain_https_and_http_urls_pass_through() {
         let url = parse_config_url("https://example.com/services.toml").expect("https url");
-        assert_eq!(url, ConfigUrl::Http("https://example.com/services.toml".to_string()));
+        assert_eq!(
+            url,
+            ConfigUrl::Http("https://example.com/services.toml".to_string())
+        );
         assert_eq!(url.fetch_url(), "https://example.com/services.toml");
 
         let url = parse_config_url("http://internal.example/services.toml").expect("http url");
@@ -350,7 +361,10 @@ mod tests {
             .expect_err("http + token must be refused");
         let msg = err.to_string();
         assert!(msg.contains("https"), "got: {msg}");
-        assert!(!msg.contains("secret"), "token must never appear in the error: {msg}");
+        assert!(
+            !msg.contains("secret"),
+            "token must never appear in the error: {msg}"
+        );
     }
 
     #[test]
@@ -386,8 +400,14 @@ mod tests {
         .expect("must succeed");
         assert!(warnings.is_empty(), "got: {warnings:?}");
         assert!(merged.get("remote_only").is_ok());
-        assert!(merged.get("local_only").is_ok(), "local entries survive the merge");
-        assert!(merged.get("cached_only").is_err(), "stale cache must not apply on a fresh fetch");
+        assert!(
+            merged.get("local_only").is_ok(),
+            "local entries survive the merge"
+        );
+        assert!(
+            merged.get("cached_only").is_err(),
+            "stale cache must not apply on a fresh fetch"
+        );
     }
 
     #[test]
@@ -399,7 +419,10 @@ mod tests {
         )
         .expect("must succeed via cache");
         assert_eq!(warnings.len(), 1, "got: {warnings:?}");
-        assert!(warnings[0].contains("connection refused"), "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("connection refused"),
+            "got: {warnings:?}"
+        );
         assert!(merged.get("cached_only").is_ok());
         assert!(merged.get("local_only").is_ok());
     }
@@ -441,6 +464,9 @@ mod tests {
             Some(ServicesFile::from_remote_bytes(local_toml.as_bytes()).unwrap()),
         )
         .expect("must succeed");
-        assert_eq!(merged.get("shared").unwrap().host.as_deref(), Some("remote-host"));
+        assert_eq!(
+            merged.get("shared").unwrap().host.as_deref(),
+            Some("remote-host")
+        );
     }
 }

@@ -368,10 +368,16 @@ pub fn slot_severity_rank(slot: &pg_lens_core::ReplicationSlotRow) -> u8 {
     if slot.invalidated.is_some() {
         return 0;
     }
-    if matches!(slot.wal_status.as_deref(), Some("unreserved") | Some("lost")) {
+    if matches!(
+        slot.wal_status.as_deref(),
+        Some("unreserved") | Some("lost")
+    ) {
         return 0;
     }
-    let max_xmin_age = slot.xmin_age.unwrap_or(0).max(slot.catalog_xmin_age.unwrap_or(0));
+    let max_xmin_age = slot
+        .xmin_age
+        .unwrap_or(0)
+        .max(slot.catalog_xmin_age.unwrap_or(0));
     if max_xmin_age > 50_000_000 {
         return 0;
     }
@@ -583,14 +589,19 @@ pub enum Action {
     /// though the actual suspend/spawn/restore happened in `main.rs` (see
     /// its module doc for why that dance cannot live in `update()` or
     /// `ui/`).
-    PsqlResult { text: String, error: bool },
+    PsqlResult {
+        text: String,
+        error: bool,
+    },
     /// v0.16 (`y`): `main.rs` emitted the OSC 52 copy escape sequence (the
     /// only place allowed to touch stdout directly — see `clipboard.rs`'s
     /// module doc) and reports the exact toast text back — same
     /// `AdminFeedback` mechanism `c`/`K`/`!` already use. `update()` stays
     /// the sole mutation point even though the actual terminal write
     /// happened in `main.rs`, mirroring `PsqlResult`'s same reasoning.
-    ClipboardCopied { text: String },
+    ClipboardCopied {
+        text: String,
+    },
     Tick,
     Quit,
 }
@@ -1030,7 +1041,11 @@ impl App {
     pub fn selected_block_node(&self) -> Option<&pg_lens_core::BlockTreeNode> {
         let tree = self.snapshot.blocking_tree.as_deref()?;
         let idx = self.blocks_tree_state.selected()?;
-        fn find<'a>(nodes: &'a [pg_lens_core::BlockTreeNode], curr: &mut usize, target: usize) -> Option<&'a pg_lens_core::BlockTreeNode> {
+        fn find<'a>(
+            nodes: &'a [pg_lens_core::BlockTreeNode],
+            curr: &mut usize,
+            target: usize,
+        ) -> Option<&'a pg_lens_core::BlockTreeNode> {
             for node in nodes {
                 if *curr == target {
                     return Some(node);
@@ -1119,7 +1134,8 @@ impl App {
             .or_else(pg_lens_core::recording::exports_dir)
             .unwrap_or_else(|| std::env::temp_dir().join("pg_lens").join("exports"));
         let active_path = self.recording.as_ref().map(|r| r.writer.path());
-        self.records = pg_lens_core::recording::list_recordings(&recordings_dir, &exports_dir, active_path);
+        self.records =
+            pg_lens_core::recording::list_recordings(&recordings_dir, &exports_dir, active_path);
         resort_records(self);
         clamp_selection(self);
     }
@@ -1198,7 +1214,11 @@ impl App {
     /// Exports current snapshot bookmark to pretty JSON in state directory.
     pub fn export_snapshot(&mut self) {
         let export_res = if let Some(ref dir) = self.state_dir {
-            pg_lens_core::recording::export_snapshot_to(&self.snapshot, &self.host, &dir.join("exports"))
+            pg_lens_core::recording::export_snapshot_to(
+                &self.snapshot,
+                &self.host,
+                &dir.join("exports"),
+            )
         } else {
             pg_lens_core::recording::export_snapshot(&self.snapshot, &self.host)
         };
@@ -1275,7 +1295,9 @@ pub fn clipboard_text(app: &App) -> Option<String> {
                 Some(format!("{} on {}", row.command, row.relation))
             }
         }
-        Tab::RecordsLens => app.selected_recording().map(|r| r.path.display().to_string()),
+        Tab::RecordsLens => app
+            .selected_recording()
+            .map(|r| r.path.display().to_string()),
         _ => None,
     }
 }
@@ -1347,7 +1369,9 @@ pub fn update(app: &mut App, action: Action) {
         }
         Action::ClipboardCopied { text } => {
             let message = if let Some(existing) = app.admin_feedback.take() {
-                if existing.text.contains("Exported snapshot") || existing.text.contains("Recording saved") {
+                if existing.text.contains("Exported snapshot")
+                    || existing.text.contains("Recording saved")
+                {
                     format!("{} ({})", existing.text, text)
                 } else {
                     text
@@ -1679,9 +1703,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 || (app.active_tab == Tab::IndexLens && app.selected_index().is_some())
                 || (app.active_tab == Tab::QueryLens && app.selected_statement().is_some())
                 || (app.active_tab == Tab::BlocksLens
-                    && (app.selected_block_node().is_some() || app.selected_active_lock().is_some()))
+                    && (app.selected_block_node().is_some()
+                        || app.selected_active_lock().is_some()))
                 || (app.active_tab == Tab::ProgressLens && app.selected_progress_row().is_some())
-                || (app.active_tab == Tab::ReplicationLens && app.selected_replication_slot().is_some())
+                || (app.active_tab == Tab::ReplicationLens
+                    && app.selected_replication_slot().is_some())
             {
                 app.detail_open = true;
                 // v0.15: fires the on-demand `\d` request (Schema Lens Tables
@@ -1763,7 +1789,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('/')
             if app.active_tab == Tab::SchemaLens
-                && (app.schema_view == SchemaView::Tables || app.schema_view == SchemaView::Sequences) =>
+                && (app.schema_view == SchemaView::Tables
+                    || app.schema_view == SchemaView::Sequences) =>
         {
             app.schema_filter_saved = app.schema_filter.clone();
             app.schema_filter_editing = true;
@@ -1794,15 +1821,14 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // (`c`/`d`/`s`/`v`/`w`/`I`/`R`/`K`/`!`/`?`). `\` is unused anywhere
         // in `handle_key` and reads naturally as "cancel/undo the slash".
         KeyCode::Char('\\') => match app.active_tab {
-            Tab::MicroLens
-                if app.micro_view == MicroView::Activity && !app.filter.is_empty() =>
-            {
+            Tab::MicroLens if app.micro_view == MicroView::Activity && !app.filter.is_empty() => {
                 app.filter.clear();
                 resort(app);
                 clamp_selection(app);
             }
             Tab::SchemaLens
-                if (app.schema_view == SchemaView::Tables || app.schema_view == SchemaView::Sequences)
+                if (app.schema_view == SchemaView::Tables
+                    || app.schema_view == SchemaView::Sequences)
                     && !app.schema_filter.is_empty() =>
             {
                 app.schema_filter.clear();
@@ -1965,7 +1991,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             if let Some(entry) = app.selected_recording() {
                 if entry.is_active {
                     app.admin_feedback = Some(AdminFeedback {
-                        text: "Cannot delete active in-flight recording (stop recording first)".to_string(),
+                        text: "Cannot delete active in-flight recording (stop recording first)"
+                            .to_string(),
                         error: true,
                         expires_at_tick: app.tick_count + ADMIN_FEEDBACK_TICKS,
                     });
@@ -2190,7 +2217,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('l') | KeyCode::Char('L') => {
             if let Some(ref mut replay) = app.replay_state {
                 replay.loop_playback = !replay.loop_playback;
-                let status = if replay.loop_playback { "enabled" } else { "disabled" };
+                let status = if replay.loop_playback {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
                 app.admin_feedback = Some(AdminFeedback {
                     text: format!("Replay loop {status}"),
                     error: false,
@@ -2245,30 +2276,47 @@ fn open_confirm(app: &mut App, terminate: bool) {
     if app.replay_state.is_some() {
         return;
     }
-    let (pid, username, database) = if app.active_tab == Tab::MicroLens && app.micro_view == MicroView::Activity {
-        let Some(row) = app.selected_row() else { return; };
-        (row.pid, row.username.clone(), row.database.clone())
-    } else if app.active_tab == Tab::BlocksLens {
-        if app.blocks_active_pane == BlocksPane::Tree {
-            let Some(node) = app.selected_block_node() else { return; };
-            (node.pid, node.usename.clone(), app.snapshot.vitals.database.clone())
+    let (pid, username, database) =
+        if app.active_tab == Tab::MicroLens && app.micro_view == MicroView::Activity {
+            let Some(row) = app.selected_row() else {
+                return;
+            };
+            (row.pid, row.username.clone(), row.database.clone())
+        } else if app.active_tab == Tab::BlocksLens {
+            if app.blocks_active_pane == BlocksPane::Tree {
+                let Some(node) = app.selected_block_node() else {
+                    return;
+                };
+                (
+                    node.pid,
+                    node.usename.clone(),
+                    app.snapshot.vitals.database.clone(),
+                )
+            } else {
+                let Some(lock) = app.selected_active_lock() else {
+                    return;
+                };
+                (
+                    lock.pid,
+                    lock.usename.clone(),
+                    app.snapshot.vitals.database.clone(),
+                )
+            }
+        } else if app.active_tab == Tab::ProgressLens {
+            let Some(progress) = app.selected_progress_row() else {
+                return;
+            };
+            let (username, database) = app
+                .snapshot
+                .activity
+                .iter()
+                .find(|a| a.pid == progress.pid)
+                .map(|a| (a.username.clone(), a.database.clone()))
+                .unwrap_or_else(|| ("postgres".to_string(), app.snapshot.vitals.database.clone()));
+            (progress.pid, username, database)
         } else {
-            let Some(lock) = app.selected_active_lock() else { return; };
-            (lock.pid, lock.usename.clone(), app.snapshot.vitals.database.clone())
-        }
-    } else if app.active_tab == Tab::ProgressLens {
-        let Some(progress) = app.selected_progress_row() else { return; };
-        let (username, database) = app
-            .snapshot
-            .activity
-            .iter()
-            .find(|a| a.pid == progress.pid)
-            .map(|a| (a.username.clone(), a.database.clone()))
-            .unwrap_or_else(|| ("postgres".to_string(), app.snapshot.vitals.database.clone()));
-        (progress.pid, username, database)
-    } else {
-        return;
-    };
+            return;
+        };
 
     if app.read_only {
         app.admin_feedback = Some(AdminFeedback {
@@ -2493,7 +2541,6 @@ fn handle_server_picker_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-
 /// Keymap of the keyboard help overlay (`?`): `Esc` or `?` again closes it
 /// WITHOUT arming the top-level quit barrier — the same overlay-dismissal
 /// rule the detail panel and other overlays follow. `Ctrl+C` still quits
@@ -2717,7 +2764,9 @@ fn move_selection(app: &mut App, delta: i64) {
 /// "follows" the cursor — see `App::detail_open`'s doc comment). A no-op on
 /// every other lens/overlay state.
 fn sync_table_detail_request(app: &mut App) {
-    if !app.detail_open || app.active_tab != Tab::SchemaLens || app.schema_view != SchemaView::Tables
+    if !app.detail_open
+        || app.active_tab != Tab::SchemaLens
+        || app.schema_view != SchemaView::Tables
     {
         return;
     }
@@ -2798,14 +2847,8 @@ fn selection_target(app: &mut App) -> (&mut TableState, usize) {
             &mut app.statements_table_state,
             app.statements_row_order.len(),
         ),
-        Tab::ProgressLens => (
-            &mut app.progress_table_state,
-            app.progress_row_order.len(),
-        ),
-        Tab::RecordsLens => (
-            &mut app.records_table_state,
-            app.records_row_order.len(),
-        ),
+        Tab::ProgressLens => (&mut app.progress_table_state, app.progress_row_order.len()),
+        Tab::RecordsLens => (&mut app.records_table_state, app.records_row_order.len()),
         // v0.11: the idle census keeps its own cursor over its own row set.
         Tab::MicroLens if app.micro_view == MicroView::Idle => (
             &mut app.idle_table_state,
@@ -3116,7 +3159,11 @@ fn resort_schema(app: &mut App) {
                     .and_then(|b| b.bloat_pct)
                     .unwrap_or(-1.0)
             };
-            order.sort_by(|&a, &b| pct(b).total_cmp(&pct(a)).then_with(|| by_size_then_name(a, b)));
+            order.sort_by(|&a, &b| {
+                pct(b)
+                    .total_cmp(&pct(a))
+                    .then_with(|| by_size_then_name(a, b))
+            });
         }
         SchemaSortMode::SeqScans => order.sort_by(|&a, &b| {
             rows[b]
@@ -3197,8 +3244,11 @@ fn resort_indexes(app: &mut App) {
             .cmp(&index_finding_rank(&rows[b].finding))
             .then_with(|| rows[b].index_bytes.cmp(&rows[a].index_bytes))
             .then_with(|| {
-                (&rows[a].schema, &rows[a].table, &rows[a].name)
-                    .cmp(&(&rows[b].schema, &rows[b].table, &rows[b].name))
+                (&rows[a].schema, &rows[a].table, &rows[a].name).cmp(&(
+                    &rows[b].schema,
+                    &rows[b].table,
+                    &rows[b].name,
+                ))
             })
     });
     app.index_row_order = order;
@@ -3278,12 +3328,9 @@ fn resort_statements(app: &mut App) {
                 .total_cmp(&rows[a].mean_exec_ms)
                 .then_with(|| tiebreak(a, b))
         }),
-        StatementsSortMode::Rows => order.sort_by(|&a, &b| {
-            rows[b]
-                .rows
-                .cmp(&rows[a].rows)
-                .then_with(|| tiebreak(a, b))
-        }),
+        StatementsSortMode::Rows => {
+            order.sort_by(|&a, &b| rows[b].rows.cmp(&rows[a].rows).then_with(|| tiebreak(a, b)))
+        }
         StatementsSortMode::Temp => order.sort_by(|&a, &b| {
             rows[b]
                 .temp_blks_written
@@ -3357,9 +3404,7 @@ pub fn resort_records(app: &mut App) {
                 .cmp(&rows[a].size_bytes)
                 .then_with(|| rows[a].filename.cmp(&rows[b].filename))
         }),
-        RecordsSortMode::NameAsc => order.sort_by(|&a, &b| {
-            rows[a].filename.cmp(&rows[b].filename)
-        }),
+        RecordsSortMode::NameAsc => order.sort_by(|&a, &b| rows[a].filename.cmp(&rows[b].filename)),
     }
 
     app.records_row_order = order;
@@ -3373,7 +3418,10 @@ mod tests {
         Action::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn displayed<'a, T>(app: &'a App, field: impl Fn(&'a pg_lens_core::ActivityRow) -> T) -> Vec<T> {
+    fn displayed<'a, T>(
+        app: &'a App,
+        field: impl Fn(&'a pg_lens_core::ActivityRow) -> T,
+    ) -> Vec<T> {
         app.row_order
             .iter()
             .map(|&i| field(&app.snapshot.activity[i]))
@@ -3804,7 +3852,11 @@ mod tests {
         update(&mut app, press(KeyCode::Char('I')));
         assert_eq!(app.micro_view, MicroView::Idle);
         update(&mut app, press(KeyCode::Esc));
-        assert_eq!(app.micro_view, MicroView::Activity, "Esc returns to Activity");
+        assert_eq!(
+            app.micro_view,
+            MicroView::Activity,
+            "Esc returns to Activity"
+        );
         assert!(!app.should_quit);
         assert!(
             app.esc_quit_armed_until.is_none(),
@@ -3966,7 +4018,11 @@ mod tests {
         update(&mut app, press(KeyCode::Char('/')));
         assert!(app.filter_editing);
         update(&mut app, press(KeyCode::Char('4')));
-        assert_eq!(app.active_tab, Tab::MicroLens, "digit must stay in the filter text");
+        assert_eq!(
+            app.active_tab,
+            Tab::MicroLens,
+            "digit must stay in the filter text"
+        );
         assert_eq!(app.filter, "4");
     }
 
@@ -4019,14 +4075,12 @@ mod tests {
         assert_eq!(app.statements_table_state.selected(), Some(0));
         // The title rendering (v0.12) makes the seeded filter visible; the
         // filter machinery itself narrows the row order to matches.
-        assert!(
-            app.statements_row_order
-                .iter()
-                .all(|&i| app.snapshot.statements.as_ref().unwrap().statements[i]
-                    .query
-                    .to_lowercase()
-                    .contains(&table_name.to_lowercase()))
-        );
+        assert!(app.statements_row_order.iter().all(|&i| {
+            app.snapshot.statements.as_ref().unwrap().statements[i]
+                .query
+                .to_lowercase()
+                .contains(&table_name.to_lowercase())
+        }));
     }
 
     #[test]
@@ -4357,7 +4411,10 @@ mod tests {
         // pressed), so the cleared filter's row order is every table
         // EXCEPT the mock's 3 hidden leaves, not the raw table count.
         let hidden_leaves = schema.tables.iter().filter(|t| t.is_partition).count();
-        assert_eq!(app.schema_row_order.len(), schema.tables.len() - hidden_leaves);
+        assert_eq!(
+            app.schema_row_order.len(),
+            schema.tables.len() - hidden_leaves
+        );
 
         // Query Lens.
         let mut app = App::new();
@@ -4479,7 +4536,10 @@ mod tests {
         let last = app.row_order.len() - 1;
 
         update(&mut app, press(KeyCode::PageDown));
-        assert_eq!(app.table_state.selected(), Some((PAGE_SIZE as usize).min(last)));
+        assert_eq!(
+            app.table_state.selected(),
+            Some((PAGE_SIZE as usize).min(last))
+        );
 
         // From the top, PageUp clamps at 0 rather than underflowing.
         let mut app = App::new();
@@ -4669,7 +4729,11 @@ mod tests {
         assert_eq!(app.schema_sort_mode, SchemaSortMode::Growth);
         let names = schema_displayed(&app, |t| t.name.clone());
         assert_eq!(names[0], "order_items", "largest |growth| first");
-        assert_eq!(names[names.len() - 1], "raw_events", "unknown growth sorts last");
+        assert_eq!(
+            names[names.len() - 1],
+            "raw_events",
+            "unknown growth sorts last"
+        );
 
         // s → back to size; the Micro Lens sort was never touched.
         update(&mut app, press(KeyCode::Char('s')));
@@ -4718,7 +4782,9 @@ mod tests {
         assert_eq!(visible_leaves(&app), 0);
         // The parent itself IS visible (it is not a leaf).
         assert!(
-            app.schema_row_order.iter().any(|&i| schema.tables[i].oid == parent_oid),
+            app.schema_row_order
+                .iter()
+                .any(|&i| schema.tables[i].oid == parent_oid),
             "the parent's aggregate row must stay visible while collapsed"
         );
 
@@ -4745,7 +4811,10 @@ mod tests {
         update(&mut app, press(KeyCode::Char('v')));
         assert_eq!(app.schema_view, SchemaView::Vacuum);
         update(&mut app, press(KeyCode::Char('p')));
-        assert!(!app.schema_show_partitions, "Vacuum sub-view has no partitions toggle");
+        assert!(
+            !app.schema_show_partitions,
+            "Vacuum sub-view has no partitions toggle"
+        );
     }
 
     /// v0.15: filtering by name matches the parent AND, once expanded, its
@@ -4762,7 +4831,10 @@ mod tests {
         // Collapsed: only the parent row matches (leaves are filtered out
         // regardless of whether their name matches).
         assert_eq!(app.schema_row_order.len(), 1);
-        assert_eq!(schema.tables[app.schema_row_order[0]].partition_count, Some(3));
+        assert_eq!(
+            schema.tables[app.schema_row_order[0]].partition_count,
+            Some(3)
+        );
 
         // Expand: every leaf whose name matches the same needle joins the
         // parent in the display order.
@@ -4772,7 +4844,10 @@ mod tests {
             .iter()
             .filter(|&&i| schema.tables[i].is_partition)
             .count();
-        assert!(matched_leaves > 0, "expanded view must surface matching leaves too");
+        assert!(
+            matched_leaves > 0,
+            "expanded view must surface matching leaves too"
+        );
     }
 
     #[test]
@@ -4787,7 +4862,11 @@ mod tests {
         assert_eq!(app.schema_table_state.selected(), Some(0));
         update(&mut app, press(KeyCode::Char('j')));
         assert_eq!(app.schema_table_state.selected(), Some(1));
-        assert_eq!(app.table_state.selected(), Some(0), "micro cursor untouched");
+        assert_eq!(
+            app.table_state.selected(),
+            Some(0),
+            "micro cursor untouched"
+        );
 
         // Enter opens the table detail; Enter closes it.
         let selected = app.selected_table().expect("selection").name.clone();
@@ -4826,7 +4905,9 @@ mod tests {
     #[test]
     fn shift_r_and_ctrl_r_toggle_recording() {
         let mut app = App::new();
-        let test_dir = std::env::current_dir().unwrap().join("target/test_state_rec");
+        let test_dir = std::env::current_dir()
+            .unwrap()
+            .join("target/test_state_rec");
         app.state_dir = Some(test_dir);
         assert!(app.recording.is_none());
 
@@ -4859,7 +4940,9 @@ mod tests {
     #[test]
     fn e_exports_snapshot_bookmark() {
         let mut app = App::new();
-        let test_dir = std::env::current_dir().unwrap().join("target/test_state_exp");
+        let test_dir = std::env::current_dir()
+            .unwrap()
+            .join("target/test_state_exp");
         app.state_dir = Some(test_dir);
         assert!(app.clipboard_request.is_none());
 
@@ -5101,7 +5184,11 @@ mod tests {
         assert_eq!(app.statements_table_state.selected(), Some(0));
         update(&mut app, press(KeyCode::Char('j')));
         assert_eq!(app.statements_table_state.selected(), Some(1));
-        assert_eq!(app.table_state.selected(), Some(0), "micro cursor untouched");
+        assert_eq!(
+            app.table_state.selected(),
+            Some(0),
+            "micro cursor untouched"
+        );
         assert_eq!(
             app.schema_table_state.selected(),
             Some(0),
@@ -5109,11 +5196,7 @@ mod tests {
         );
 
         // Enter opens the statement detail; Enter closes it.
-        let selected = app
-            .selected_statement()
-            .expect("selection")
-            .query
-            .clone();
+        let selected = app.selected_statement().expect("selection").query.clone();
         update(&mut app, press(KeyCode::Enter));
         assert!(app.detail_open);
         assert_eq!(app.selected_statement().expect("selection").query, selected);
@@ -5258,7 +5341,10 @@ mod tests {
         let mut app = App::new();
         update(&mut app, press(KeyCode::Char('d')));
         let picker = app.db_picker.as_ref().expect("picker opened");
-        assert!(picker.entries.iter().any(|e| e.name == "shop"), "mock entries");
+        assert!(
+            picker.entries.iter().any(|e| e.name == "shop"),
+            "mock entries"
+        );
         let current = &picker.entries[picker.selected];
         assert_eq!(current.name, app.snapshot.vitals.database);
     }
@@ -5272,7 +5358,10 @@ mod tests {
                 update(&mut app, press(KeyCode::Tab));
             }
             update(&mut app, press(KeyCode::Char('d')));
-            assert!(app.db_picker.is_some(), "tab {tab_presses}: picker must open");
+            assert!(
+                app.db_picker.is_some(),
+                "tab {tab_presses}: picker must open"
+            );
         }
     }
 
@@ -5341,7 +5430,10 @@ mod tests {
             [app.db_picker.as_ref().unwrap().selected]
             .name
             .clone();
-        assert_ne!(target, app.snapshot.vitals.database, "test needs a different pick");
+        assert_ne!(
+            target, app.snapshot.vitals.database,
+            "test needs a different pick"
+        );
         update(&mut app, press(KeyCode::Enter));
         assert!(app.db_picker.is_none(), "overlay closes on Enter");
         assert_eq!(app.pending_db_switch, Some(target));
@@ -5370,7 +5462,10 @@ mod tests {
         update(&mut app, press(KeyCode::Char('d')));
         update(&mut app, press(KeyCode::Char('j')));
         update(&mut app, press(KeyCode::Enter));
-        assert!(app.pending_db_switch.is_none(), "mock never queues a real switch");
+        assert!(
+            app.pending_db_switch.is_none(),
+            "mock never queues a real switch"
+        );
         let feedback = app.admin_feedback.as_ref().expect("toast shown");
         assert!(feedback.text.contains("mock mode"), "{}", feedback.text);
         assert!(!feedback.error);
@@ -5537,7 +5632,10 @@ mod tests {
         app.read_only = true;
 
         update(&mut app, press(KeyCode::Char('c')));
-        assert!(app.confirm.is_none(), "read-only must not open the cancel modal");
+        assert!(
+            app.confirm.is_none(),
+            "read-only must not open the cancel modal"
+        );
         assert!(app.pending_admin.is_empty(), "no AdminCommand queued");
         let feedback = app.admin_feedback.as_ref().expect("refusal feedback");
         assert!(feedback.text.contains("read-only"), "{}", feedback.text);
@@ -5548,7 +5646,10 @@ mod tests {
             &mut app,
             Action::Key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT)),
         );
-        assert!(app.confirm.is_none(), "read-only must not open the terminate modal");
+        assert!(
+            app.confirm.is_none(),
+            "read-only must not open the terminate modal"
+        );
         assert!(app.pending_admin.is_empty(), "no AdminCommand queued");
         assert!(app.admin_feedback.is_some());
     }
@@ -5976,7 +6077,11 @@ mod tests {
     fn y_queues_the_full_query_lens_statement_text() {
         let mut app = App::new();
         app.active_tab = Tab::QueryLens;
-        let expected = app.selected_statement().expect("mock has statements").query.clone();
+        let expected = app
+            .selected_statement()
+            .expect("mock has statements")
+            .query
+            .clone();
         update(&mut app, press(KeyCode::Char('y')));
         assert_eq!(app.clipboard_request, Some(expected));
     }
@@ -5985,7 +6090,11 @@ mod tests {
     fn y_queues_the_index_definition_on_the_index_lens() {
         let mut app = App::new();
         app.active_tab = Tab::IndexLens;
-        let expected = app.selected_index().expect("mock has indexes").indexdef.clone();
+        let expected = app
+            .selected_index()
+            .expect("mock has indexes")
+            .indexdef
+            .clone();
         update(&mut app, press(KeyCode::Char('y')));
         assert_eq!(app.clipboard_request, Some(expected));
     }
@@ -6028,7 +6137,11 @@ mod tests {
         update(&mut app, press(KeyCode::Char('y')));
         assert!(app.clipboard_request.is_none());
         let feedback = app.admin_feedback.as_ref().expect("toast shown");
-        assert!(feedback.text.contains("nothing to copy"), "{}", feedback.text);
+        assert!(
+            feedback.text.contains("nothing to copy"),
+            "{}",
+            feedback.text
+        );
         assert!(!feedback.error);
     }
 
@@ -6043,7 +6156,10 @@ mod tests {
         assert!(app.confirm.is_some(), "modal open");
         update(&mut app, press(KeyCode::Char('y')));
         assert!(app.confirm.is_none(), "confirmed and closed");
-        assert!(!app.pending_admin.is_empty(), "the cancel command was queued");
+        assert!(
+            !app.pending_admin.is_empty(),
+            "the cancel command was queued"
+        );
         assert!(app.clipboard_request.is_none(), "not a copy request");
     }
 

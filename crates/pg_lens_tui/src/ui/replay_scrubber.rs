@@ -4,11 +4,11 @@
 //! displaying a graphical track (`[████░░░] 42%`), frame counters, elapsed time,
 //! playback speed, pause/play state, loop indicator, and keyboard scrubbing hints.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use crate::app::App;
 use crate::ui::style;
@@ -37,23 +37,33 @@ pub fn build_scrubber_line(replay: &crate::app::ReplayState, width: u16) -> Line
     };
 
     // Elapsed delta from frame 0
-    let elapsed_str = if let (Some(first), Some(curr)) = (replay.frames.first(), replay.frames.get(current)) {
-        let delta_secs = curr.vitals.uptime_secs.saturating_sub(first.vitals.uptime_secs);
-        let mm = delta_secs / 60;
-        let ss = delta_secs % 60;
-        if mm > 0 {
-            format!("+{mm:02}:{ss:02}")
+    let elapsed_str =
+        if let (Some(first), Some(curr)) = (replay.frames.first(), replay.frames.get(current)) {
+            let delta_secs = curr
+                .vitals
+                .uptime_secs
+                .saturating_sub(first.vitals.uptime_secs);
+            let mm = delta_secs / 60;
+            let ss = delta_secs % 60;
+            if mm > 0 {
+                format!("+{mm:02}:{ss:02}")
+            } else {
+                format!("+{ss}s")
+            }
         } else {
-            format!("+{ss}s")
-        }
-    } else {
-        "+0s".to_string()
-    };
+            "+0s".to_string()
+        };
 
     let state_badge = if replay.is_paused {
-        Span::styled(" PAUSED ", Style::new().fg(Color::Black).bg(Color::Yellow).bold())
+        Span::styled(
+            " PAUSED ",
+            Style::new().fg(Color::Black).bg(Color::Yellow).bold(),
+        )
     } else {
-        Span::styled(" PLAY ", Style::new().fg(Color::Black).bg(Color::Green).bold())
+        Span::styled(
+            " PLAY ",
+            Style::new().fg(Color::Black).bg(Color::Green).bold(),
+        )
     };
 
     let speed_badge = Span::styled(
@@ -84,7 +94,10 @@ pub fn build_scrubber_line(replay: &crate::app::ReplayState, width: u16) -> Line
 
     let mut spans = vec![
         Span::raw(" "),
-        Span::styled("REPLAY", Style::new().fg(Color::Black).bg(Color::Cyan).bold()),
+        Span::styled(
+            "REPLAY",
+            Style::new().fg(Color::Black).bg(Color::Cyan).bold(),
+        ),
         Span::raw(" "),
         state_badge,
         Span::raw(" "),
@@ -93,10 +106,16 @@ pub fn build_scrubber_line(replay: &crate::app::ReplayState, width: u16) -> Line
     ];
 
     if replay.loop_playback {
-        spans.push(Span::styled("LOOP ", Style::new().fg(Color::Magenta).bold()));
+        spans.push(Span::styled(
+            "LOOP ",
+            Style::new().fg(Color::Magenta).bold(),
+        ));
     }
 
-    spans.push(Span::styled(progress_bar, Style::new().fg(Color::White).bold()));
+    spans.push(Span::styled(
+        progress_bar,
+        Style::new().fg(Color::White).bold(),
+    ));
     spans.push(sep.clone());
     spans.push(Span::styled(
         format!("Frame {}/{} ({})", current + 1, total, elapsed_str),
@@ -194,4 +213,3 @@ mod tests {
         assert!(!rendered.contains("Space: play"));
     }
 }
-

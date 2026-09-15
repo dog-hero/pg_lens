@@ -41,7 +41,12 @@ pub fn state_base_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(dir).join("pg_lens"));
     }
     if let Some(home) = std::env::var_os("HOME") {
-        return Some(PathBuf::from(home).join(".local").join("state").join("pg_lens"));
+        return Some(
+            PathBuf::from(home)
+                .join(".local")
+                .join("state")
+                .join("pg_lens"),
+        );
     }
     Some(std::env::temp_dir().join("pg_lens"))
 }
@@ -53,7 +58,13 @@ pub const DEFAULT_MAX_RECORD_BYTES: usize = 100 * 1024 * 1024;
 pub fn sanitize_target_name(target: &str) -> String {
     let sanitized: String = target
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if sanitized.is_empty() {
         "postgres".to_string()
@@ -113,7 +124,12 @@ pub fn format_duration_secs(secs: u64) -> String {
     } else if secs < 3600 {
         format!("{}m {:02}s", secs / 60, secs % 60)
     } else {
-        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+        format!(
+            "{}h {:02}m {:02}s",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
     }
 }
 
@@ -173,9 +189,8 @@ pub fn export_snapshot_to(
     let filename = format!("snapshot-{clean_target}-{ts}.json");
     let path = dir.join(filename);
 
-    let json = serde_json::to_string_pretty(snapshot).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    })?;
+    let json = serde_json::to_string_pretty(snapshot)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
     let mut file = File::create(&path)?;
     file.write_all(json.as_bytes())?;
@@ -226,7 +241,9 @@ pub struct RecordingEntry {
 }
 
 /// Parses metadata from a recording or snapshot filename.
-pub fn parse_recording_filename(filename: &str) -> (String, RecordingKind, Option<u64>, Option<u64>) {
+pub fn parse_recording_filename(
+    filename: &str,
+) -> (String, RecordingKind, Option<u64>, Option<u64>) {
     let name = filename.strip_suffix(".gz").unwrap_or(filename);
     if name.starts_with("snapshot-") && name.ends_with(".json") {
         let stem = &name["snapshot-".len()..name.len() - ".json".len()];
@@ -243,9 +260,19 @@ pub fn parse_recording_filename(filename: &str) -> (String, RecordingKind, Optio
             let end_ts = parse_epoch_timestamp(end_str);
             if let Some((target, start_str)) = before_to.rsplit_once('-') {
                 let start_ts = parse_epoch_timestamp(start_str);
-                return (target.to_string(), RecordingKind::Recording, start_ts, end_ts);
+                return (
+                    target.to_string(),
+                    RecordingKind::Recording,
+                    start_ts,
+                    end_ts,
+                );
             }
-            return (before_to.to_string(), RecordingKind::Recording, None, end_ts);
+            return (
+                before_to.to_string(),
+                RecordingKind::Recording,
+                None,
+                end_ts,
+            );
         }
 
         if let Some((target, start_str)) = stem.rsplit_once('-') {
@@ -400,10 +427,8 @@ pub fn prune_recordings(
     let now_secs = epoch_secs_now();
 
     // Filter out active recording
-    let mut candidates: Vec<RecordingEntry> = entries
-        .into_iter()
-        .filter(|e| !e.is_active)
-        .collect();
+    let mut candidates: Vec<RecordingEntry> =
+        entries.into_iter().filter(|e| !e.is_active).collect();
 
     // Sort oldest first (started_at_secs ascending)
     candidates.sort_by_key(|e| e.started_at_secs.unwrap_or(0));
@@ -523,7 +548,10 @@ impl RecordingWriter {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
         if compress {
-            Ok(RecordSink::Gz(GzEncoder::new(writer, Compression::default())))
+            Ok(RecordSink::Gz(GzEncoder::new(
+                writer,
+                Compression::default(),
+            )))
         } else {
             Ok(RecordSink::Plain(writer))
         }
@@ -563,7 +591,11 @@ impl RecordingWriter {
     }
 
     /// Creates a new recording session for `target_label` in `dir` with a custom size limit.
-    pub fn create_in_with_limit(target_label: &str, dir: &Path, max_bytes: usize) -> std::io::Result<Self> {
+    pub fn create_in_with_limit(
+        target_label: &str,
+        dir: &Path,
+        max_bytes: usize,
+    ) -> std::io::Result<Self> {
         Self::create_in_full(target_label, dir, max_bytes, false)
     }
 
@@ -584,7 +616,8 @@ impl RecordingWriter {
 
     /// Creates a new recording session for `target_label` with `max_bytes` and optional compression in recordings directory.
     pub fn new_full(target_label: &str, max_bytes: usize, compress: bool) -> std::io::Result<Self> {
-        let dir = recordings_dir().unwrap_or_else(|| std::env::temp_dir().join("pg_lens").join("recordings"));
+        let dir = recordings_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("pg_lens").join("recordings"));
         match Self::create_in_full(target_label, &dir, max_bytes, compress) {
             Ok(writer) => Ok(writer),
             Err(e) if is_permission_denied(&e) => {
@@ -600,7 +633,10 @@ impl RecordingWriter {
         if let Some(parent) = path.parent() {
             create_dir_all(parent)?;
         }
-        let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        let dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
         let compress = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -627,12 +663,14 @@ impl RecordingWriter {
     ///
     /// Returns `Ok(Some(new_path))` if a rotation occurred, or `Ok(None)` if written to current file.
     pub fn append(&mut self, snapshot: &DbSnapshot) -> std::io::Result<Option<PathBuf>> {
-        let line = serde_json::to_string(snapshot).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        let line = serde_json::to_string(snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         let mut rotated_path = None;
-        if self.max_bytes > 0 && self.bytes_written > 0 && self.bytes_written + line.len() + 1 > self.max_bytes {
+        if self.max_bytes > 0
+            && self.bytes_written > 0
+            && self.bytes_written + line.len() + 1 > self.max_bytes
+        {
             let new_path = self.rotate()?;
             rotated_path = Some(new_path);
         }
@@ -721,14 +759,19 @@ impl RecordingWriter {
         let ext = Self::file_extension(self.compress);
 
         if !self.is_custom_path && now_secs >= self.current_file_start_secs {
-            let final_filename = format!("rec-{}-{}-to-{}.{ext}", self.target, start_slug, end_slug);
+            let final_filename =
+                format!("rec-{}-{}-to-{}.{ext}", self.target, start_slug, end_slug);
             let final_path = self.dir.join(final_filename);
             if std::fs::rename(&self.path, &final_path).is_ok() {
                 self.path = final_path;
             }
         }
 
-        Ok((self.path.clone(), self.total_session_frames, self.total_session_bytes))
+        Ok((
+            self.path.clone(),
+            self.total_session_frames,
+            self.total_session_bytes,
+        ))
     }
 }
 
@@ -839,7 +882,10 @@ mod tests {
 
     #[test]
     fn sanitize_target_name_strips_unsafe_characters() {
-        assert_eq!(sanitize_target_name("prod:5432/shop?ssl=true"), "prod_5432_shop_ssl_true");
+        assert_eq!(
+            sanitize_target_name("prod:5432/shop?ssl=true"),
+            "prod_5432_shop_ssl_true"
+        );
         assert_eq!(sanitize_target_name("simple-db_1"), "simple-db_1");
         assert_eq!(sanitize_target_name(""), "postgres");
     }
@@ -909,11 +955,17 @@ mod tests {
 
         let list = list_recordings(&rec_dir, &exp_dir, Some(&f1));
         assert_eq!(list.len(), 2);
-        let rec_entry = list.iter().find(|e| e.kind == RecordingKind::Recording).expect("rec");
+        let rec_entry = list
+            .iter()
+            .find(|e| e.kind == RecordingKind::Recording)
+            .expect("rec");
         assert!(rec_entry.is_active);
         assert_eq!(rec_entry.target, "shop");
 
-        let bookmark_entry = list.iter().find(|e| e.kind == RecordingKind::Bookmark).expect("bookmark");
+        let bookmark_entry = list
+            .iter()
+            .find(|e| e.kind == RecordingKind::Bookmark)
+            .expect("bookmark");
         assert_eq!(bookmark_entry.frame_count, Some(1));
 
         delete_recording(&f2).expect("delete");
@@ -923,8 +975,9 @@ mod tests {
     #[test]
     fn compressed_recording_roundtrip() {
         let dir = tempdir().expect("tempdir");
-        let mut writer = RecordingWriter::create_in_full("shop", dir.path(), DEFAULT_MAX_RECORD_BYTES, true)
-            .expect("writer create");
+        let mut writer =
+            RecordingWriter::create_in_full("shop", dir.path(), DEFAULT_MAX_RECORD_BYTES, true)
+                .expect("writer create");
 
         let snap = DbSnapshot::mock();
         writer.append(&snap).expect("append snap");

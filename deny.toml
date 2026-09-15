@@ -41,3 +41,8 @@ wildcards = "allow"
 unknown-registry = "warn"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+unmaintained = "all"
+yanked = "warn"
+ignore = []

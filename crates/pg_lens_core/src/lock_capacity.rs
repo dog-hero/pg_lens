@@ -51,8 +51,7 @@ pub fn severity(used_fraction: f64) -> Severity {
 /// yields `used_fraction = 0.0` rather than a division-by-zero `NaN`/`inf` —
 /// the gauge renders empty instead of panicking or lying.
 pub fn compute(raw: LockCapacityRow) -> LockCapacity {
-    let capacity_slots =
-        raw.max_locks_per_xact * (raw.max_connections + raw.max_prepared_xacts);
+    let capacity_slots = raw.max_locks_per_xact * (raw.max_connections + raw.max_prepared_xacts);
     let used_fraction = if capacity_slots > 0 {
         raw.locks_held as f64 / capacity_slots as f64
     } else {
@@ -72,7 +71,12 @@ pub fn compute(raw: LockCapacityRow) -> LockCapacity {
 mod tests {
     use super::*;
 
-    fn raw(locks_held: i64, max_locks_per_xact: i64, max_connections: i64, max_prepared_xacts: i64) -> LockCapacityRow {
+    fn raw(
+        locks_held: i64,
+        max_locks_per_xact: i64,
+        max_connections: i64,
+        max_prepared_xacts: i64,
+    ) -> LockCapacityRow {
         LockCapacityRow {
             locks_held,
             max_locks_per_xact,

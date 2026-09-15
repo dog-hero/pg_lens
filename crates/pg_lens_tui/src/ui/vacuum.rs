@@ -62,10 +62,18 @@ mod tests {
     fn severity_tiers_match_the_spec_thresholds() {
         assert_eq!(age_severity(0), Severity::Ok);
         assert_eq!(age_severity(199_999_999), Severity::Ok);
-        assert_eq!(age_severity(200_000_000), Severity::Ok, "boundary is not yet warn");
+        assert_eq!(
+            age_severity(200_000_000),
+            Severity::Ok,
+            "boundary is not yet warn"
+        );
         assert_eq!(age_severity(200_000_001), Severity::Warn);
         assert_eq!(age_severity(499_999_999), Severity::Warn);
-        assert_eq!(age_severity(500_000_000), Severity::Warn, "boundary is not yet bad");
+        assert_eq!(
+            age_severity(500_000_000),
+            Severity::Warn,
+            "boundary is not yet bad"
+        );
         assert_eq!(age_severity(500_000_001), Severity::Bad);
         assert_eq!(age_severity(2_100_000_000), Severity::Bad);
     }

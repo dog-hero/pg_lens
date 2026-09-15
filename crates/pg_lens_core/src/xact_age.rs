@@ -104,9 +104,17 @@ mod tests {
     #[test]
     fn severity_tiers_for_a_normal_transaction() {
         assert_eq!(xact_age_severity(0.0, "active"), Severity::Ok);
-        assert_eq!(xact_age_severity(300.0, "active"), Severity::Ok, "boundary is not yet warn");
+        assert_eq!(
+            xact_age_severity(300.0, "active"),
+            Severity::Ok,
+            "boundary is not yet warn"
+        );
         assert_eq!(xact_age_severity(300.1, "active"), Severity::Warn);
-        assert_eq!(xact_age_severity(1_800.0, "active"), Severity::Warn, "boundary is not yet bad");
+        assert_eq!(
+            xact_age_severity(1_800.0, "active"),
+            Severity::Warn,
+            "boundary is not yet bad"
+        );
         assert_eq!(xact_age_severity(1_800.1, "active"), Severity::Bad);
     }
 

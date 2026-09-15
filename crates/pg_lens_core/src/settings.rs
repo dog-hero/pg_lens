@@ -134,7 +134,10 @@ impl fmt::Display for SettingsError {
             }
             SettingsError::UnknownService { name, available } => {
                 if available.is_empty() {
-                    write!(f, "unknown service {name:?}: the services file defines none")
+                    write!(
+                        f,
+                        "unknown service {name:?}: the services file defines none"
+                    )
                 } else {
                     write!(
                         f,
@@ -372,7 +375,11 @@ pub fn services_file_path(spec: &ConnSpec) -> Option<(PathBuf, bool)> {
     if let Some(path) = &spec.services_file {
         return Some((path.clone(), true));
     }
-    if let Some(path) = spec.env.get("PG_LENS_SERVICES_FILE").filter(|v| !v.is_empty()) {
+    if let Some(path) = spec
+        .env
+        .get("PG_LENS_SERVICES_FILE")
+        .filter(|v| !v.is_empty())
+    {
         return Some((PathBuf::from(path), true));
     }
     let config_dir = xdg_config_dir(spec)?;
@@ -431,7 +438,11 @@ pub struct AppConfig {
 /// `<xdg-config>/pg_lens/config.toml`. `None` when no config dir can be
 /// derived and no override is set.
 fn config_file_path(spec: &ConnSpec) -> Option<PathBuf> {
-    if let Some(path) = spec.env.get("PG_LENS_CONFIG_FILE").filter(|v| !v.is_empty()) {
+    if let Some(path) = spec
+        .env
+        .get("PG_LENS_CONFIG_FILE")
+        .filter(|v| !v.is_empty())
+    {
         return Some(PathBuf::from(path));
     }
     Some(xdg_config_dir(spec)?.join("pg_lens").join("config.toml"))
@@ -453,9 +464,7 @@ pub fn load_app_config(spec: &ConnSpec) -> (AppConfig, Vec<String>) {
                 vec![format!("ignoring {}: {e}", path.display())],
             ),
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            (AppConfig::default(), Vec::new())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (AppConfig::default(), Vec::new()),
         Err(e) => (
             AppConfig::default(),
             vec![format!("cannot read {}: {e}", path.display())],
@@ -752,7 +761,10 @@ mod tests {
         };
         let (cfg, warnings) = load_app_config(&spec);
         assert!(cfg.interval.is_none() && cfg.schema_interval.is_none() && cfg.listen.is_none());
-        assert!(warnings.is_empty(), "missing file must be silent: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "missing file must be silent: {warnings:?}"
+        );
     }
 
     #[test]
@@ -1040,7 +1052,7 @@ mod tests {
             service: Some("prod".to_string()),
             services_file: Some(file.to_path_buf()),
             env: env(&[("PGPASSWORD", "env-pw")]),
-       
+
             services_override: None,
         })
         .expect("resolution must succeed");
@@ -1063,14 +1075,11 @@ mod tests {
             service: Some("prod".to_string()),
             services_file: Some(file.to_path_buf()),
             env: HashMap::new(),
-       
+
             services_override: None,
         })
         .expect("resolution must succeed");
-        assert_eq!(
-            resolved.config.get_password(),
-            Some(b"from-dsn".as_slice())
-        );
+        assert_eq!(resolved.config.get_password(), Some(b"from-dsn".as_slice()));
         assert!(
             resolved.password_source.is_none(),
             "no command should run when the DSN already provides the password"
@@ -1091,14 +1100,11 @@ mod tests {
             service: Some("legacy".to_string()),
             services_file: Some(file.to_path_buf()),
             env: HashMap::new(),
-       
+
             services_override: None,
         })
         .expect("resolution must succeed");
-        assert_eq!(
-            resolved.config.get_password(),
-            Some(b"plain-pw".as_slice())
-        );
+        assert_eq!(resolved.config.get_password(), Some(b"plain-pw".as_slice()));
         assert!(resolved.password_source.is_none());
         assert!(!resolved.label.to_string().contains("plain-pw"));
     }
@@ -1117,7 +1123,7 @@ mod tests {
             service: Some("slow".to_string()),
             services_file: Some(file.to_path_buf()),
             env: env(&[("PGCONNECT_TIMEOUT", "5")]),
-       
+
             services_override: None,
         })
         .expect("resolution must succeed");
@@ -1138,7 +1144,7 @@ mod tests {
             service: None,
             services_file: None,
             env: env(&[("PGSERVICE", "prod"), ("PG_LENS_SERVICES_FILE", &path)]),
-       
+
             services_override: None,
         })
         .expect("resolution must succeed");
@@ -1169,7 +1175,7 @@ mod tests {
             service: Some("prdo".to_string()),
             services_file: Some(file.to_path_buf()),
             env: HashMap::new(),
-       
+
             services_override: None,
         })
         .expect_err("typo'd service must fail");
@@ -1185,7 +1191,7 @@ mod tests {
             service: Some("prod".to_string()),
             services_file: Some(PathBuf::from("/nonexistent/services.toml")),
             env: HashMap::new(),
-       
+
             services_override: None,
         })
         .expect_err("--service with a missing file must fail");
@@ -1273,10 +1279,9 @@ mod tests {
 
     #[test]
     fn list_services_reflects_the_override_not_disk() {
-        let override_file = ServicesFile::from_remote_bytes(
-            b"[services.remote_a]\nhost = \"ha\"\nuser = \"ua\"\n",
-        )
-        .expect("override parses");
+        let override_file =
+            ServicesFile::from_remote_bytes(b"[services.remote_a]\nhost = \"ha\"\nuser = \"ua\"\n")
+                .expect("override parses");
         let (summaries, warnings) = list_services(&ConnSpec {
             services_file: Some(PathBuf::from("/nonexistent/services.toml")),
             services_override: Some(override_file),
@@ -1313,7 +1318,12 @@ mod tests {
         assert_eq!(summaries[1].name, "b");
         // ServiceSummary simply has no secret-bearing fields — nothing to
         // assert beyond the type, but keep a canary on the rendered form.
-        assert!(!format!("{}:{:?}:{:?}", summaries[1].name, summaries[1].host, summaries[1].user)
-            .contains("hidden-cmd"));
+        assert!(
+            !format!(
+                "{}:{:?}:{:?}",
+                summaries[1].name, summaries[1].host, summaries[1].user
+            )
+            .contains("hidden-cmd")
+        );
     }
 }
