@@ -15,7 +15,7 @@
     "uplot": "^1.6.32"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.5.1",
     "typescript": "~5.9.3",
     "vite": "^8.1.4"
   }
