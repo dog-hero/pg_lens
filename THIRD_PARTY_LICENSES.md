@@ -11,7 +11,7 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 
 | License Type | Number of Packages | Notes |
 | :--- | :--- | :--- |
-| `MIT OR Apache-2.0` | 172 | Dual-licensed (Permissive) |
+| `MIT OR Apache-2.0` | 173 | Dual-licensed (Permissive) |
 | `MIT` | 79 | Permissive |
 | `MIT/Apache-2.0` | 17 | Dual-licensed (Permissive) |
 | `Apache-2.0 OR MIT` | 15 | Dual-licensed (Permissive) |
@@ -20,6 +20,8 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `Zlib OR Apache-2.0 OR MIT` | 4 | Dual-licensed (Permissive) |
 | `Apache-2.0` | 2 | Permissive |
 | `Apache-2.0/MIT` | 2 | Dual-licensed (Permissive) |
+| `Zlib` | 2 | Permissive |
+| `MIT OR Zlib OR Apache-2.0` | 2 | Dual-licensed (Permissive) |
 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | 2 | Dual-licensed (Permissive) |
 | `ISC` | 2 | Permissive |
 | `Unlicense/MIT` | 2 | Public Domain / Permissive |
@@ -28,9 +30,7 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `MIT OR Apache-2.0 OR CC0-1.0` | 1 | Dual-licensed (Permissive) |
 | `(MIT OR Apache-2.0) AND Unicode-DFS-2016` | 1 | Dual-licensed (Permissive) |
 | `Apache-2.0 / MIT` | 1 | Dual-licensed (Permissive) |
-| `Zlib` | 1 | Permissive |
 | `MIT AND BSD-3-Clause` | 1 | Permissive |
-| `MIT OR Zlib OR Apache-2.0` | 1 | Dual-licensed (Permissive) |
 | `Apache-2.0 AND ISC` | 1 | Permissive |
 | `Apache-2.0 OR ISC OR MIT` | 1 | Dual-licensed (Permissive) |
 | `Apache-2.0 OR BSL-1.0` | 1 | Permissive |
@@ -89,6 +89,7 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `axum-core` | `0.5.6` | `MIT` | [https://github.com/tokio-rs/axum](https://github.com/tokio-rs/axum) |
 | `backtrace` | `0.3.76` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/backtrace-rs](https://github.com/rust-lang/backtrace-rs) |
 | `base64` | `0.22.1` | `MIT OR Apache-2.0` | [https://github.com/marshallpierce/rust-base64](https://github.com/marshallpierce/rust-base64) |
+| `base64` | `0.23.1` | `MIT OR Apache-2.0` | [https://github.com/marshallpierce/rust-base64](https://github.com/marshallpierce/rust-base64) |
 | `bit-set` | `0.5.3` | `MIT/Apache-2.0` | [https://github.com/contain-rs/bit-set](https://github.com/contain-rs/bit-set) |
 | `bit-vec` | `0.6.3` | `MIT/Apache-2.0` | [https://github.com/contain-rs/bit-vec](https://github.com/contain-rs/bit-vec) |
 | `bitflags` | `1.3.2` | `MIT/Apache-2.0` | [https://github.com/bitflags/bitflags](https://github.com/bitflags/bitflags) |
@@ -150,14 +151,14 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `find-msvc-tools` | `0.1.9` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/cc-rs](https://github.com/rust-lang/cc-rs) |
 | `finl_unicode` | `1.4.0` | `(MIT OR Apache-2.0) AND Unicode-DFS-2016` | [https://github.com/dahosek/finl_unicode](https://github.com/dahosek/finl_unicode) |
 | `fixedbitset` | `0.4.2` | `MIT/Apache-2.0` | [https://github.com/petgraph/fixedbitset](https://github.com/petgraph/fixedbitset) |
-| `flate2` | `1.1.9` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/flate2-rs](https://github.com/rust-lang/flate2-rs) |
+| `flate2` | `1.1.10` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/flate2-rs](https://github.com/rust-lang/flate2-rs) |
 | `fnv` | `1.0.7` | `Apache-2.0 / MIT` | [https://github.com/servo/rust-fnv](https://github.com/servo/rust-fnv) |
 | `foldhash` | `0.2.0` | `Zlib` | [https://github.com/orlp/foldhash](https://github.com/orlp/foldhash) |
 | `form_urlencoded` | `1.2.2` | `MIT OR Apache-2.0` | [https://github.com/servo/rust-url](https://github.com/servo/rust-url) |
-| `futures` | `0.3.32` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
+| `futures` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
 | `futures-channel` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
 | `futures-core` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
-| `futures-executor` | `0.3.32` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
+| `futures-executor` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
 | `futures-io` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
 | `futures-macro` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
 | `futures-sink` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
@@ -212,6 +213,7 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `mime_guess` | `2.0.5` | `MIT` | [https://github.com/abonander/mime_guess](https://github.com/abonander/mime_guess) |
 | `minimal-lexical` | `0.2.1` | `MIT/Apache-2.0` | [https://github.com/Alexhuszagh/minimal-lexical](https://github.com/Alexhuszagh/minimal-lexical) |
 | `miniz_oxide` | `0.8.9` | `MIT OR Zlib OR Apache-2.0` | [https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide](https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide) |
+| `miniz_oxide` | `0.9.1` | `MIT OR Zlib OR Apache-2.0` | [https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide](https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide) |
 | `mio` | `1.2.2` | `MIT` | [https://github.com/tokio-rs/mio](https://github.com/tokio-rs/mio) |
 | `nix` | `0.29.0` | `MIT` | [https://github.com/nix-rust/nix](https://github.com/nix-rust/nix) |
 | `nom` | `7.1.3` | `MIT` | [https://github.com/Geal/nom](https://github.com/Geal/nom) |
@@ -281,9 +283,9 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `same-file` | `1.0.6` | `Unlicense/MIT` | [https://github.com/BurntSushi/same-file](https://github.com/BurntSushi/same-file) |
 | `scopeguard` | `1.2.0` | `MIT OR Apache-2.0` | [https://github.com/bluss/scopeguard](https://github.com/bluss/scopeguard) |
 | `semver` | `1.0.28` | `MIT OR Apache-2.0` | [https://github.com/dtolnay/semver](https://github.com/dtolnay/semver) |
-| `serde` | `1.0.228` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/serde](https://github.com/serde-rs/serde) |
-| `serde_core` | `1.0.228` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/serde](https://github.com/serde-rs/serde) |
-| `serde_derive` | `1.0.228` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/serde](https://github.com/serde-rs/serde) |
+| `serde` | `1.0.229` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/serde](https://github.com/serde-rs/serde) |
+| `serde_core` | `1.0.229` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/serde](https://github.com/serde-rs/serde) |
+| `serde_derive` | `1.0.229` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/serde](https://github.com/serde-rs/serde) |
 | `serde_json` | `1.0.151` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/json](https://github.com/serde-rs/json) |
 | `serde_path_to_error` | `0.1.20` | `MIT OR Apache-2.0` | [https://github.com/dtolnay/path-to-error](https://github.com/dtolnay/path-to-error) |
 | `serde_spanned` | `1.1.1` | `MIT OR Apache-2.0` | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
@@ -350,8 +352,8 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `unicode-truncate` | `2.0.1` | `MIT OR Apache-2.0` | [https://github.com/Aetf/unicode-truncate](https://github.com/Aetf/unicode-truncate) |
 | `unicode-width` | `0.2.2` | `MIT OR Apache-2.0` | [https://github.com/unicode-rs/unicode-width](https://github.com/unicode-rs/unicode-width) |
 | `untrusted` | `0.9.0` | `ISC` | [https://github.com/briansmith/untrusted](https://github.com/briansmith/untrusted) |
-| `ureq` | `3.3.0` | `MIT OR Apache-2.0` | [https://github.com/algesten/ureq](https://github.com/algesten/ureq) |
-| `ureq-proto` | `0.6.0` | `MIT OR Apache-2.0` | [https://github.com/algesten/ureq-proto](https://github.com/algesten/ureq-proto) |
+| `ureq` | `3.4.2` | `MIT OR Apache-2.0` | [https://github.com/algesten/ureq](https://github.com/algesten/ureq) |
+| `ureq-proto` | `0.6.3` | `MIT OR Apache-2.0` | [https://github.com/algesten/ureq-proto](https://github.com/algesten/ureq-proto) |
 | `utf8-zero` | `0.8.1` | `MIT OR Apache-2.0` | [https://github.com/algesten/utf8-zero](https://github.com/algesten/utf8-zero) |
 | `utf8parse` | `0.2.2` | `Apache-2.0 OR MIT` | [https://github.com/alacritty/vte](https://github.com/alacritty/vte) |
 | `uuid` | `1.23.5` | `Apache-2.0 OR MIT` | [https://github.com/uuid-rs/uuid](https://github.com/uuid-rs/uuid) |
@@ -395,6 +397,7 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `winnow` | `1.0.4` | `MIT` | [https://github.com/winnow-rs/winnow](https://github.com/winnow-rs/winnow) |
 | `wit-bindgen` | `0.57.1` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | [https://github.com/bytecodealliance/wit-bindgen](https://github.com/bytecodealliance/wit-bindgen) |
 | `zeroize` | `1.9.0` | `Apache-2.0 OR MIT` | [https://github.com/RustCrypto/utils](https://github.com/RustCrypto/utils) |
+| `zlib-rs` | `0.6.8` | `Zlib` | [https://github.com/trifectatechfoundation/zlib-rs](https://github.com/trifectatechfoundation/zlib-rs) |
 | `zmij` | `1.0.23` | `MIT` | [https://github.com/dtolnay/zmij](https://github.com/dtolnay/zmij) |
 
 ---
