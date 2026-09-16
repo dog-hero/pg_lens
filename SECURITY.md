@@ -64,3 +64,4 @@ When monitoring PostgreSQL clusters with `pg_lens`:
 2. **Read-Only Mode**: In production environments where administrative actions (`c` cancel backend, `K` terminate backend) should never be executed, pass `--read-only` or set `PG_LENS_READ_ONLY=true`.
 3. **Safe Credential Handling**: Use `services.toml` with `password_cmd` or standard PostgreSQL environment variables (`PGPASSWORD`, `PGPASSFILE`) rather than embedding credentials in plaintext CLI arguments or command history.
 4. **Local State Directory**: Diagnostic logs are stored in `~/.local/state/pg_lens/error.log` (or `$PG_LENS_STATE_DIR/error.log`). Restrict file system permissions on this directory if running in shared multi-user environments.
+

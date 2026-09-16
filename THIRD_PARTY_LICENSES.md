@@ -11,7 +11,7 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 
 | License Type | Number of Packages | Notes |
 | :--- | :--- | :--- |
-| `MIT OR Apache-2.0` | 171 | Dual-licensed (Permissive) |
+| `MIT OR Apache-2.0` | 172 | Dual-licensed (Permissive) |
 | `MIT` | 79 | Permissive |
 | `MIT/Apache-2.0` | 17 | Dual-licensed (Permissive) |
 | `Apache-2.0 OR MIT` | 15 | Dual-licensed (Permissive) |
@@ -105,10 +105,10 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `cfg-if` | `1.0.4` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/cfg-if](https://github.com/rust-lang/cfg-if) |
 | `cfg_aliases` | `0.2.1` | `MIT` | [https://github.com/katharostech/cfg_aliases](https://github.com/katharostech/cfg_aliases) |
 | `chacha20` | `0.10.2` | `MIT OR Apache-2.0` | [https://github.com/RustCrypto/stream-ciphers](https://github.com/RustCrypto/stream-ciphers) |
-| `clap` | `4.6.1` | `MIT OR Apache-2.0` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
-| `clap_builder` | `4.6.0` | `MIT OR Apache-2.0` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
+| `clap` | `4.6.7` | `MIT OR Apache-2.0` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
+| `clap_builder` | `4.6.7` | `MIT OR Apache-2.0` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
 | `clap_complete` | `4.6.9` | `MIT OR Apache-2.0` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
-| `clap_derive` | `4.6.1` | `MIT OR Apache-2.0` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
+| `clap_derive` | `4.6.7` | `MIT OR Apache-2.0` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
 | `clap_lex` | `1.1.0` | `MIT OR Apache-2.0` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
 | `cmov` | `0.5.4` | `Apache-2.0 OR MIT` | [https://github.com/RustCrypto/utils](https://github.com/RustCrypto/utils) |
 | `color-eyre` | `0.6.5` | `MIT OR Apache-2.0` | [https://github.com/eyre-rs/eyre](https://github.com/eyre-rs/eyre) |
@@ -155,14 +155,14 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `foldhash` | `0.2.0` | `Zlib` | [https://github.com/orlp/foldhash](https://github.com/orlp/foldhash) |
 | `form_urlencoded` | `1.2.2` | `MIT OR Apache-2.0` | [https://github.com/servo/rust-url](https://github.com/servo/rust-url) |
 | `futures` | `0.3.32` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
-| `futures-channel` | `0.3.32` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
-| `futures-core` | `0.3.32` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
+| `futures-channel` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
+| `futures-core` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
 | `futures-executor` | `0.3.32` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
-| `futures-io` | `0.3.32` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
-| `futures-macro` | `0.3.32` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
-| `futures-sink` | `0.3.32` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
-| `futures-task` | `0.3.32` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
-| `futures-util` | `0.3.32` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
+| `futures-io` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
+| `futures-macro` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
+| `futures-sink` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
+| `futures-task` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
+| `futures-util` | `0.3.34` | `MIT OR Apache-2.0` | [https://github.com/rust-lang/futures-rs](https://github.com/rust-lang/futures-rs) |
 | `generic-array` | `0.14.7` | `MIT` | [https://github.com/fizyk20/generic-array.git](https://github.com/fizyk20/generic-array.git) |
 | `getrandom` | `0.2.17` | `MIT OR Apache-2.0` | [https://github.com/rust-random/getrandom](https://github.com/rust-random/getrandom) |
 | `getrandom` | `0.3.4` | `MIT OR Apache-2.0` | [https://github.com/rust-random/getrandom](https://github.com/rust-random/getrandom) |
@@ -175,7 +175,7 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `hmac` | `0.13.0` | `MIT OR Apache-2.0` | [https://github.com/RustCrypto/MACs](https://github.com/RustCrypto/MACs) |
 | `http` | `1.4.2` | `MIT OR Apache-2.0` | [https://github.com/hyperium/http](https://github.com/hyperium/http) |
 | `http-body` | `1.1.0` | `MIT` | [https://github.com/hyperium/http-body](https://github.com/hyperium/http-body) |
-| `http-body-util` | `0.1.4` | `MIT` | [https://github.com/hyperium/http-body](https://github.com/hyperium/http-body) |
+| `http-body-util` | `0.1.5` | `MIT` | [https://github.com/hyperium/http-body](https://github.com/hyperium/http-body) |
 | `httparse` | `1.10.1` | `MIT OR Apache-2.0` | [https://github.com/seanmonstar/httparse](https://github.com/seanmonstar/httparse) |
 | `httpdate` | `1.0.3` | `MIT OR Apache-2.0` | [https://github.com/pyfisch/httpdate](https://github.com/pyfisch/httpdate) |
 | `hybrid-array` | `0.4.13` | `MIT OR Apache-2.0` | [https://github.com/RustCrypto/hybrid-array](https://github.com/RustCrypto/hybrid-array) |
@@ -284,7 +284,7 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `serde` | `1.0.228` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/serde](https://github.com/serde-rs/serde) |
 | `serde_core` | `1.0.228` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/serde](https://github.com/serde-rs/serde) |
 | `serde_derive` | `1.0.228` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/serde](https://github.com/serde-rs/serde) |
-| `serde_json` | `1.0.150` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/json](https://github.com/serde-rs/json) |
+| `serde_json` | `1.0.151` | `MIT OR Apache-2.0` | [https://github.com/serde-rs/json](https://github.com/serde-rs/json) |
 | `serde_path_to_error` | `0.1.20` | `MIT OR Apache-2.0` | [https://github.com/dtolnay/path-to-error](https://github.com/dtolnay/path-to-error) |
 | `serde_spanned` | `1.1.1` | `MIT OR Apache-2.0` | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
 | `serde_urlencoded` | `0.7.1` | `MIT/Apache-2.0` | [https://github.com/nox/serde_urlencoded](https://github.com/nox/serde_urlencoded) |
@@ -308,6 +308,7 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `subtle` | `2.6.1` | `BSD-3-Clause` | [https://github.com/dalek-cryptography/subtle](https://github.com/dalek-cryptography/subtle) |
 | `syn` | `1.0.109` | `MIT OR Apache-2.0` | [https://github.com/dtolnay/syn](https://github.com/dtolnay/syn) |
 | `syn` | `2.0.118` | `MIT OR Apache-2.0` | [https://github.com/dtolnay/syn](https://github.com/dtolnay/syn) |
+| `syn` | `3.0.5` | `MIT OR Apache-2.0` | [https://github.com/dtolnay/syn](https://github.com/dtolnay/syn) |
 | `sync_wrapper` | `1.0.2` | `Apache-2.0` | [https://github.com/Actyx/sync_wrapper](https://github.com/Actyx/sync_wrapper) |
 | `tempfile` | `3.27.0` | `MIT OR Apache-2.0` | [https://github.com/Stebalien/tempfile](https://github.com/Stebalien/tempfile) |
 | `termina` | `0.3.3` | `MIT OR MPL-2.0` | [https://github.com/helix-editor/termina](https://github.com/helix-editor/termina) |
@@ -323,7 +324,7 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `time-core` | `0.1.9` | `MIT OR Apache-2.0` | [https://github.com/time-rs/time](https://github.com/time-rs/time) |
 | `tinyvec` | `1.12.0` | `Zlib OR Apache-2.0 OR MIT` | [https://github.com/Lokathor/tinyvec](https://github.com/Lokathor/tinyvec) |
 | `tinyvec_macros` | `0.1.1` | `MIT OR Apache-2.0 OR Zlib` | [https://github.com/Soveu/tinyvec_macros](https://github.com/Soveu/tinyvec_macros) |
-| `tokio` | `1.52.3` | `MIT` | [https://github.com/tokio-rs/tokio](https://github.com/tokio-rs/tokio) |
+| `tokio` | `1.53.1` | `MIT` | [https://github.com/tokio-rs/tokio](https://github.com/tokio-rs/tokio) |
 | `tokio-macros` | `2.7.0` | `MIT` | [https://github.com/tokio-rs/tokio](https://github.com/tokio-rs/tokio) |
 | `tokio-postgres` | `0.7.18` | `MIT OR Apache-2.0` | [https://github.com/rust-postgres/rust-postgres](https://github.com/rust-postgres/rust-postgres) |
 | `tokio-util` | `0.7.18` | `MIT` | [https://github.com/tokio-rs/tokio](https://github.com/tokio-rs/tokio) |

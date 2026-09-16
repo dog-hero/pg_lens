@@ -175,9 +175,9 @@ function sortValue(
     case "name":
       return `${table.schema}.${table.name}`;
     case "bloat_pct":
-      return (bloat?.is_na ? null : (bloat?.bloat_pct ?? null)) ?? -1;
+      return bloat && !bloat.is_na && bloat.bloat_pct !== null ? bloat.bloat_pct : -1;
     case "bloat_bytes":
-      return (bloat?.is_na ? null : (bloat?.bloat_bytes ?? null)) ?? -1;
+      return bloat && !bloat.is_na && bloat.bloat_bytes !== null ? bloat.bloat_bytes : -1;
     case "last_av":
       return lastAv(table) ?? -1;
     default:
