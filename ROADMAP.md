@@ -311,6 +311,12 @@ Dedicated locks inspection lens plus adjacent connection security and maintenanc
 
 ## Shipped
 
+- **v0.24.0** — "Security, Supply-Chain Hardening & Modern Dependency Suite":
+  - **Security & Disclosure Policy (`SECURITY.md`)**: formal private vulnerability reporting policy via GitHub Private Vulnerability Reporting and database operational security best practices.
+  - **Automated CodeQL SAST Analysis**: continuous static application security testing covering Rust, JavaScript/TypeScript, and GitHub Actions workflows.
+  - **Automated Dependabot Lifecycle**: weekly vulnerability scanning and auto-categorized PRs across Cargo crates, npm packages, and GitHub Actions.
+  - **Dependency & Supply-Chain Modernization**: upgraded core runtime crates (`tokio 1.53.1`, `serde 1.0.229`, `clap 4.6.7`, `ureq 3.4.2`, `flate2 1.1.10`, `futures 0.3.34`, `toml 1.1.6`), frontend stack (`TypeScript 7.0.2`, `Vite 8.3.0`), and GitHub Actions runners (`checkout@v7`, `setup-node@v7`, `upload-artifact@v7`, `download-artifact@v8`, `codeql-action@v4`, `action-gh-release@v3`).
+  - **Vulnerability Remediation**: resolved RUSTSEC-2026-0285 (`rustls 0.23.45`), yanked `chacha20`, and npm advisories in `nanoid` and `postcss`.
 - **v0.23.1** — "PostgreSQL 17 Subscriptions & WAL Stats Resilience Hotfix":
   - **PostgreSQL 17 Subscriptions Support**: resolved `s.subtwophase` catalog deprecation on PostgreSQL 17 by querying `s.subtwophasestate` (`(s.subtwophasestate != 'd') AS two_phase`).
   - **WAL Stats Resilience**: hardened `pg_stat_wal` SQL query with `COALESCE` and safe `current_setting(..., true)` alongside NULL-tolerant deserialization in `db.rs`.

@@ -4,6 +4,34 @@ All notable changes to pg_lens. Format inspired by
 [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org). Dates are release dates.
 
+## [0.24.0] — 2026-09-15 — "Security & Supply-Chain Hardening"
+
+### Added
+- **Formal Security Policy (`SECURITY.md`)**: establishes responsible vulnerability disclosure guidelines via GitHub Private Vulnerability Reporting, outlines version support windows, and provides operational security recommendations (least privilege, read-only mode, SSL/TLS enforcement, and bearer token protection).
+- **Automated CodeQL SAST Analysis (`.github/workflows/codeql.yml`)**: added GitHub CodeQL static analysis scanning covering the Rust backend, TypeScript frontend, and GitHub Actions workflow files across pull requests, pushes to main, and scheduled cron triggers.
+- **Automated Dependabot Dependency Tracking (`.github/dependabot.yml`)**: configured weekly automated vulnerability and dependency pull requests for Cargo workspace crates, frontend npm packages, and GitHub Actions, with automated categorization labels (`dependencies`, `actions`, `rust`, `javascript`).
+- **Standardized GitHub Issue Forms (`.github/ISSUE_TEMPLATE/`)**: introduced interactive issue templates for bug reports, feature requests, and database/catalog compatibility diagnostics.
+
+### Changed
+- **Modernized Dependency Suite**: upgraded core runtime and CLI libraries across the workspace:
+  - `tokio` to `1.53.1`
+  - `serde` to `1.0.229` & `serde_json` to `1.0.151`
+  - `clap` to `4.6.7`
+  - `ureq` to `3.4.2`
+  - `flate2` to `1.1.10`
+  - `futures` & `futures-util` to `0.3.34`
+  - `http-body-util` to `0.1.5`
+  - `toml` to `1.1.6`
+- **Frontend Modernization**: upgraded web dashboard stack to TypeScript 7 (`v7.0.2`), Vite 8 (`v8.3.0`), and `@types/node` (`v26.5.1`) with full strict-mode compliance and build verification.
+- **CI Runner & Action Modernization**: bumped all GitHub Actions to their latest major runner versions (`actions/checkout@v7`, `actions/setup-node@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, `github/codeql-action@v4`, `actions/deploy-pages@v5`, `actions/upload-pages-artifact@v5`).
+- **Modernized Security Audits (`deny.toml`)**: updated `cargo-deny` configuration for version 0.20+ advisory scanning, sources, and bans.
+
+### Fixed
+- **RustSec Advisory RUSTSEC-2026-0285**: upgraded `rustls` to `0.23.45` and `rustls-webpki` to `0.103.15`, eliminating vulnerability GHSA-2mjx-qc3c-rqvc.
+- **Yanked Crate Version**: bumped `chacha20` to `0.10.2` to replace yanked version.
+- **Frontend Security Advisories**: remediated npm vulnerabilities in `nanoid` and `postcss`.
+- **TypeScript 7 Type Narrowing**: resolved nullish-expression warnings in Schema Lens bloat sorting (`src/schema.ts`) and configured explicit Node/Vite declaration types in `tsconfig.json`.
+
 ## [0.23.1] — 2026-09-14 — "PostgreSQL 17 Subscriptions & WAL Stats Resilience Hotfix"
 
 ### Fixed
