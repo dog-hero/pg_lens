@@ -143,7 +143,7 @@ jobs:
       NFPM_VER: 2.47.0 # pinned; https://github.com/goreleaser/nfpm/releases
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           # Only the Linux tarballs — the macOS jobs may still be running.
           pattern: pg_lens-*-linux-musl
@@ -205,7 +205,7 @@ jobs:
     needs: [build-linux, build-macos, packages]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -236,7 +236,7 @@ jobs:
         if: steps.token.outputs.available == 'true'
       # The .sha256 files were uploaded as workflow artifacts by the build
       # jobs (and published to the release) — read them from the artifacts.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: steps.token.outputs.available == 'true'
         with:
           path: dist
