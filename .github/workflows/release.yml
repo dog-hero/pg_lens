@@ -20,7 +20,7 @@ jobs:
       matrix:
         target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -62,7 +62,7 @@ jobs:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -105,7 +105,7 @@ jobs:
     if: false
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # arm64 layers are built under emulation (rustc via QEMU is slow but
       # correct); buildx drives the multi-platform build.
       - uses: docker/setup-qemu-action@v4
@@ -142,7 +142,7 @@ jobs:
     env:
       NFPM_VER: 2.47.0 # pinned; https://github.com/goreleaser/nfpm/releases
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           # Only the Linux tarballs — the macOS jobs may still be running.
@@ -232,7 +232,7 @@ jobs:
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.token.outputs.available == 'true'
       # The .sha256 files were uploaded as workflow artifacts by the build
       # jobs (and published to the release) — read them from the artifacts.
@@ -296,7 +296,7 @@ jobs:
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.token.outputs.available == 'true'
       - uses: dtolnay/rust-toolchain@stable
         if: steps.token.outputs.available == 'true'
