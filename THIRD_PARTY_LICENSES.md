@@ -330,9 +330,9 @@ pg_lens itself is licensed under the **Functional Source License, Version 1.1, M
 | `tokio-macros` | `2.7.0` | `MIT` | [https://github.com/tokio-rs/tokio](https://github.com/tokio-rs/tokio) |
 | `tokio-postgres` | `0.7.18` | `MIT OR Apache-2.0` | [https://github.com/rust-postgres/rust-postgres](https://github.com/rust-postgres/rust-postgres) |
 | `tokio-util` | `0.7.18` | `MIT` | [https://github.com/tokio-rs/tokio](https://github.com/tokio-rs/tokio) |
-| `toml` | `1.1.2+spec-1.1.0` | `MIT OR Apache-2.0` | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
+| `toml` | `1.1.6+spec-1.1.0` | `MIT OR Apache-2.0` | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
 | `toml_datetime` | `1.1.1+spec-1.1.0` | `MIT OR Apache-2.0` | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
-| `toml_parser` | `1.1.2+spec-1.1.0` | `MIT OR Apache-2.0` | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
+| `toml_parser` | `1.1.3+spec-1.1.0` | `MIT OR Apache-2.0` | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
 | `toml_writer` | `1.1.2+spec-1.1.0` | `MIT OR Apache-2.0` | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
 | `tower` | `0.5.3` | `MIT` | [https://github.com/tower-rs/tower](https://github.com/tower-rs/tower) |
 | `tower-layer` | `0.3.3` | `MIT` | [https://github.com/tower-rs/tower](https://github.com/tower-rs/tower) |
