@@ -130,7 +130,10 @@ fn draw_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: R
     ];
 
     let title = if !app.index_filter.is_empty() {
-        format!("Indexes [filter: \"{}\" \u{2014} \\ to clear]", app.index_filter)
+        format!(
+            "Indexes [filter: \"{}\" \u{2014} \\ to clear]",
+            app.index_filter
+        )
     } else {
         "Indexes".to_string()
     };
@@ -157,9 +160,9 @@ fn index_column_width(area_width: u16) -> usize {
 /// and the stats-reset age: an `idx_scan = 0` UNUSED claim means nothing if
 /// counters were zeroed five minutes ago (PRD pillar 6).
 fn draw_footer(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
-    let staleness_secs =
-        (pg_lens_core::history::epoch_ms_now().saturating_sub(schema.collected_at_epoch_ms))
-            / 1_000;
+    let staleness_secs = (pg_lens_core::history::epoch_ms_now()
+        .saturating_sub(schema.collected_at_epoch_ms))
+        / 1_000;
     let now = now_epoch_secs();
     let reset_age = match schema.stats_reset_epoch_secs {
         Some(_) => format!(
@@ -226,9 +229,11 @@ fn draw_detail(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
     ];
     lines.push(index_finding_line(&idx.finding));
     lines.push(
-        Line::from("  signal, not verdict \u{2014} verify against the real workload before \
-                     dropping anything")
-            .dim(),
+        Line::from(
+            "  signal, not verdict \u{2014} verify against the real workload before \
+                     dropping anything",
+        )
+        .dim(),
     );
 
     let panel = Paragraph::new(lines)

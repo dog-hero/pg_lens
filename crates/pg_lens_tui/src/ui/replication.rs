@@ -99,9 +99,18 @@ pub(crate) fn sender_line(s: &WalSenderRow) -> Line<'static> {
     ];
 
     if s.sent_lag_bytes.is_some() || s.write_lag_bytes.is_some() || s.flush_lag_bytes.is_some() {
-        let sent_b = s.sent_lag_bytes.map(format::human_bytes).unwrap_or_else(|| "0 B".to_string());
-        let write_b = s.write_lag_bytes.map(format::human_bytes).unwrap_or_else(|| "0 B".to_string());
-        let flush_b = s.flush_lag_bytes.map(format::human_bytes).unwrap_or_else(|| "0 B".to_string());
+        let sent_b = s
+            .sent_lag_bytes
+            .map(format::human_bytes)
+            .unwrap_or_else(|| "0 B".to_string());
+        let write_b = s
+            .write_lag_bytes
+            .map(format::human_bytes)
+            .unwrap_or_else(|| "0 B".to_string());
+        let flush_b = s
+            .flush_lag_bytes
+            .map(format::human_bytes)
+            .unwrap_or_else(|| "0 B".to_string());
         spans.push(Span::styled(
             format!("  [sent: {sent_b} \u{b7} write: {write_b} \u{b7} flush: {flush_b}]"),
             style::label_style(),
@@ -188,7 +197,13 @@ pub(crate) fn slot_line(slot: &ReplicationSlotRow) -> Line<'static> {
         if xmin_age > 10_000_000 {
             spans.push(Span::styled(
                 format!("  [xmin age: {}]", format::human_count(xmin_age)),
-                Style::new().fg(if xmin_age > 50_000_000 { Color::Red } else { Color::Yellow }).bold(),
+                Style::new()
+                    .fg(if xmin_age > 50_000_000 {
+                        Color::Red
+                    } else {
+                        Color::Yellow
+                    })
+                    .bold(),
             ));
         }
     }
@@ -197,16 +212,32 @@ pub(crate) fn slot_line(slot: &ReplicationSlotRow) -> Line<'static> {
 
 pub(crate) fn publication_line(p: &pg_lens_core::PublicationRow) -> Line<'static> {
     let mut ops = Vec::new();
-    if p.pubinsert { ops.push("ins"); }
-    if p.pubupdate { ops.push("upd"); }
-    if p.pubdelete { ops.push("del"); }
-    if p.pubtruncate { ops.push("trunc"); }
-    let ops_str = if ops.is_empty() { "none".to_string() } else { ops.join(",") };
+    if p.pubinsert {
+        ops.push("ins");
+    }
+    if p.pubupdate {
+        ops.push("upd");
+    }
+    if p.pubdelete {
+        ops.push("del");
+    }
+    if p.pubtruncate {
+        ops.push("trunc");
+    }
+    let ops_str = if ops.is_empty() {
+        "none".to_string()
+    } else {
+        ops.join(",")
+    };
 
     let tables_str = if p.all_tables {
         "all tables".to_string()
     } else {
-        format!("{} table{}", p.table_count, if p.table_count == 1 { "" } else { "s" })
+        format!(
+            "{} table{}",
+            p.table_count,
+            if p.table_count == 1 { "" } else { "s" }
+        )
     };
 
     let mut spans = vec![
@@ -228,7 +259,10 @@ pub(crate) fn publication_line(p: &pg_lens_core::PublicationRow) -> Line<'static
         } else {
             sample
         };
-        spans.push(Span::styled(format!("  [{truncated}]"), style::label_style()));
+        spans.push(Span::styled(
+            format!("  [{truncated}]"),
+            style::label_style(),
+        ));
     }
     Line::from(spans)
 }
@@ -257,23 +291,36 @@ pub(crate) fn subscription_line(s: &pg_lens_core::SubscriptionRow) -> Line<'stat
         Span::styled(format!(" ({})", s.owner), style::label_style()),
         Span::styled(
             format!("  {status_str}  "),
-            if s.enabled { style::value_style() } else { Style::new().fg(Color::Yellow) },
+            if s.enabled {
+                style::value_style()
+            } else {
+                Style::new().fg(Color::Yellow)
+            },
         ),
     ];
 
     if let (Some(host), Some(db)) = (&s.publisher_host, &s.publisher_dbname) {
-        spans.push(Span::styled(format!("from {host}/{db}  "), style::label_style()));
+        spans.push(Span::styled(
+            format!("from {host}/{db}  "),
+            style::label_style(),
+        ));
     }
 
     if let Some(sync_commit) = &s.sync_commit {
-        spans.push(Span::styled(format!("sync_commit: {sync_commit}  "), style::label_style()));
+        spans.push(Span::styled(
+            format!("sync_commit: {sync_commit}  "),
+            style::label_style(),
+        ));
     }
 
     spans.extend([
         Span::styled(format!("{worker_str}  "), style::label_style()),
         Span::styled(format!("pubs: [{pubs_str}]  "), style::label_style()),
         Span::styled(format!("recv: {lsn_str}  "), style::value_style()),
-        Span::styled(format!("tables: {}/{} ready", s.ready_tables, s.total_tables), style::value_style()),
+        Span::styled(
+            format!("tables: {}/{} ready", s.ready_tables, s.total_tables),
+            style::value_style(),
+        ),
     ]);
 
     if s.sync_tables > 0 {
@@ -344,7 +391,10 @@ pub(crate) fn wal_generation_line(wal: &WalStats) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{} ", sev.marker()), Style::new().fg(sev.color())),
         Span::styled("WAL generation: ", style::label_style()),
-        Span::styled(format!("{bytes_rate} \u{b7} {records_rate}  "), style::value_style()),
+        Span::styled(
+            format!("{bytes_rate} \u{b7} {records_rate}  "),
+            style::value_style(),
+        ),
         Span::styled("buffers_full: ", style::label_style()),
         Span::styled(buffers_full, Style::new().fg(sev.color())),
     ])

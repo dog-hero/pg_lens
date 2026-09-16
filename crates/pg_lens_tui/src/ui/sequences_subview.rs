@@ -33,12 +33,7 @@ fn format_progress_bar(pct: f64, bar_width: usize) -> String {
     )
 }
 
-pub fn draw_sequences_view(
-    app: &mut App,
-    schema: &SchemaSnapshot,
-    frame: &mut Frame,
-    area: Rect,
-) {
+pub fn draw_sequences_view(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
     let [table_area, summary_area, footer_area] = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(1),
@@ -51,19 +46,26 @@ pub fn draw_sequences_view(
     draw_footer(app, schema, frame, footer_area);
 }
 
-fn draw_sequences_table(
-    app: &mut App,
-    schema: &SchemaSnapshot,
-    frame: &mut Frame,
-    area: Rect,
-) {
+fn draw_sequences_table(app: &mut App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
     let header = Row::new([
-        "!", "Schema", "Sequence", "Table", "Column", "Type", "Last Value", "Max Value", "Used %", "Remaining",
+        "!",
+        "Schema",
+        "Sequence",
+        "Table",
+        "Column",
+        "Type",
+        "Last Value",
+        "Max Value",
+        "Used %",
+        "Remaining",
     ])
     .style(Style::new().bold());
 
     let title = if !app.schema_filter.is_empty() {
-        format!("Sequences — Headroom Exhaustion Watch [filter: \"{}\" \u{2014} \\ to clear]", app.schema_filter)
+        format!(
+            "Sequences — Headroom Exhaustion Watch [filter: \"{}\" \u{2014} \\ to clear]",
+            app.schema_filter
+        )
     } else {
         "Sequences — Headroom Exhaustion Watch (S/Esc: return to Tables)".to_string()
     };
@@ -171,9 +173,9 @@ fn draw_summary(schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
 }
 
 fn draw_footer(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect) {
-    let staleness_secs =
-        (pg_lens_core::history::epoch_ms_now().saturating_sub(schema.collected_at_epoch_ms))
-            / 1_000;
+    let staleness_secs = (pg_lens_core::history::epoch_ms_now()
+        .saturating_sub(schema.collected_at_epoch_ms))
+        / 1_000;
     let line = Line::from(format!(
         " db: {db} \u{b7} collected {staleness_secs}s ago \u{b7} S/Esc: return to Tables \u{b7} /: filter \u{b7} y: copy sequence",
         db = app.snapshot.vitals.database,
@@ -181,4 +183,3 @@ fn draw_footer(app: &App, schema: &SchemaSnapshot, frame: &mut Frame, area: Rect
     .dim();
     frame.render_widget(Paragraph::new(line), area);
 }
-

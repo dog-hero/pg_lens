@@ -174,7 +174,10 @@ mod tests {
         assert_eq!(human_bytes(0), "0 B");
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
-        assert_eq!(human_bytes((1.2 * 1024.0 * 1024.0 * 1024.0) as i64), "1.2 GB");
+        assert_eq!(
+            human_bytes((1.2 * 1024.0 * 1024.0 * 1024.0) as i64),
+            "1.2 GB"
+        );
         assert_eq!(human_bytes(-7), "0 B");
     }
 
@@ -182,7 +185,10 @@ mod tests {
     fn signed_bytes_keep_the_sign() {
         assert_eq!(human_bytes_signed(0), "+0 B");
         assert_eq!(human_bytes_signed(3 * 1024 * 1024 + 400 * 1024), "+3.4 MB");
-        assert_eq!(human_bytes_signed(-(3 * 1024 * 1024 + 400 * 1024)), "-3.4 MB");
+        assert_eq!(
+            human_bytes_signed(-(3 * 1024 * 1024 + 400 * 1024)),
+            "-3.4 MB"
+        );
         assert!(human_bytes_signed(i64::MIN).starts_with('-'));
     }
 
@@ -223,9 +229,15 @@ mod tests {
     #[test]
     fn truncation_is_explicit_and_char_safe() {
         assert_eq!(truncate_with_ellipsis("SELECT 1", 20), "SELECT 1");
-        assert_eq!(truncate_with_ellipsis("SELECT pg_sleep(60)", 10), "SELECT pg\u{2026}");
+        assert_eq!(
+            truncate_with_ellipsis("SELECT pg_sleep(60)", 10),
+            "SELECT pg\u{2026}"
+        );
         assert_eq!(truncate_with_ellipsis("exact", 5), "exact");
-        assert_eq!(truncate_with_ellipsis("caf\u{e9} au lait", 5), "caf\u{e9}\u{2026}");
+        assert_eq!(
+            truncate_with_ellipsis("caf\u{e9} au lait", 5),
+            "caf\u{e9}\u{2026}"
+        );
         assert_eq!(truncate_with_ellipsis("anything", 0), "");
         assert_eq!(truncate_with_ellipsis("anything", 1), "\u{2026}");
     }

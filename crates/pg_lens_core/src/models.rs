@@ -339,7 +339,6 @@ pub struct DatabaseConflicts {
     pub deadlock_conflicts_per_sec: Option<f64>,
 }
 
-
 /// One row of the Schema Lens table-stats query
 /// (`queries/table_stats_post_130000.sql`): `pg_stat_user_tables` counters
 /// plus on-disk sizes, for one user table of the *connected database*.
@@ -1256,8 +1255,13 @@ impl SchemaSnapshot {
         // so `--mock` exercises the real detection code, not a hand-typed
         // `finding` field that could drift from it.
         use crate::index_advisor::{IndexCatalogRow, build_index_rows};
-        let catalog_index = |table: &str, name: &str, idx_scan: i64, is_unique: bool,
-                              is_primary: bool, indkey: &str, indexdef: &str| {
+        let catalog_index = |table: &str,
+                             name: &str,
+                             idx_scan: i64,
+                             is_unique: bool,
+                             is_primary: bool,
+                             indkey: &str,
+                             indexdef: &str| {
             IndexCatalogRow {
                 schema: "public".to_string(),
                 table: table.to_string(),
@@ -1274,8 +1278,16 @@ impl SchemaSnapshot {
                 is_constraint: is_unique || is_primary,
                 indexdef: indexdef.to_string(),
                 indkey: indkey.to_string(),
-                indclass: indkey.split_whitespace().map(|_| "1978").collect::<Vec<_>>().join(" "),
-                indcollation: indkey.split_whitespace().map(|_| "0").collect::<Vec<_>>().join(" "),
+                indclass: indkey
+                    .split_whitespace()
+                    .map(|_| "1978")
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                indcollation: indkey
+                    .split_whitespace()
+                    .map(|_| "0")
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 indpred: String::new(),
             }
         };
@@ -1384,13 +1396,8 @@ impl SchemaSnapshot {
         let indexes = build_index_rows(index_catalog);
         let sequences = vec![
             {
-                let (pct, rem, sev) = calculate_sequence_exhaustion(
-                    1,
-                    1,
-                    2_147_483_647,
-                    1,
-                    Some(2_010_000_000),
-                );
+                let (pct, rem, sev) =
+                    calculate_sequence_exhaustion(1, 1, 2_147_483_647, 1, Some(2_010_000_000));
                 SequenceRow {
                     schema: "public".to_string(),
                     sequence_name: "order_items_id_seq".to_string(),
@@ -1409,13 +1416,7 @@ impl SchemaSnapshot {
                 }
             },
             {
-                let (pct, rem, sev) = calculate_sequence_exhaustion(
-                    1,
-                    1,
-                    32_767,
-                    1,
-                    Some(25_500),
-                );
+                let (pct, rem, sev) = calculate_sequence_exhaustion(1, 1, 32_767, 1, Some(25_500));
                 SequenceRow {
                     schema: "public".to_string(),
                     sequence_name: "user_actions_id_seq".to_string(),
@@ -1434,13 +1435,8 @@ impl SchemaSnapshot {
                 }
             },
             {
-                let (pct, rem, sev) = calculate_sequence_exhaustion(
-                    1000,
-                    1000,
-                    999_999,
-                    1,
-                    Some(450_000),
-                );
+                let (pct, rem, sev) =
+                    calculate_sequence_exhaustion(1000, 1000, 999_999, 1, Some(450_000));
                 SequenceRow {
                     schema: "billing".to_string(),
                     sequence_name: "invoice_num_seq".to_string(),
@@ -1459,13 +1455,8 @@ impl SchemaSnapshot {
                 }
             },
             {
-                let (pct, rem, sev) = calculate_sequence_exhaustion(
-                    1,
-                    1,
-                    i64::MAX,
-                    1,
-                    Some(12_500_000),
-                );
+                let (pct, rem, sev) =
+                    calculate_sequence_exhaustion(1, 1, i64::MAX, 1, Some(12_500_000));
                 SequenceRow {
                     schema: "public".to_string(),
                     sequence_name: "pgbench_history_id_seq".to_string(),
@@ -2015,7 +2006,11 @@ impl TableDetail {
 /// table's catalog info does not linger in every snapshot forever.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TableDetailRequest {
-    Fetch { oid: i64, schema: String, name: String },
+    Fetch {
+        oid: i64,
+        schema: String,
+        name: String,
+    },
     Clear,
 }
 
@@ -2713,7 +2708,8 @@ impl DbSnapshot {
                 duration_secs: 2_450.0 + age,
                 usename: "leonardo".to_string(),
                 application_name: "psql".to_string(),
-                query: "UPDATE products SET price = price * 1.1 WHERE category = 'books'".to_string(),
+                query: "UPDATE products SET price = price * 1.1 WHERE category = 'books'"
+                    .to_string(),
             },
             ActiveLockRow {
                 pid: 4977,
@@ -2726,7 +2722,8 @@ impl DbSnapshot {
                 duration_secs: 12.7 + age,
                 usename: "bench".to_string(),
                 application_name: "checkout-worker".to_string(),
-                query: "UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2".to_string(),
+                query: "UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2"
+                    .to_string(),
             },
             ActiveLockRow {
                 pid: 5104,
@@ -2739,7 +2736,8 @@ impl DbSnapshot {
                 duration_secs: 6.1 + age,
                 usename: "bench".to_string(),
                 application_name: "checkout-worker".to_string(),
-                query: "UPDATE pgbench_branches SET bbalance = bbalance - $1 WHERE bid = $2".to_string(),
+                query: "UPDATE pgbench_branches SET bbalance = bbalance - $1 WHERE bid = $2"
+                    .to_string(),
             },
             ActiveLockRow {
                 pid: 4821,
@@ -3329,7 +3327,11 @@ mod tests {
     fn mock_snapshot_carries_unified_progress() {
         let snapshot = DbSnapshot::mock();
         let progress = snapshot.unified_progress();
-        assert_eq!(progress.len(), 2, "mock should contain vacuum and ddl progress");
+        assert_eq!(
+            progress.len(),
+            2,
+            "mock should contain vacuum and ddl progress"
+        );
         // Sorted by PID: 4650 (VACUUM) and 4821 (CREATE INDEX CONCURRENTLY)
         assert_eq!(progress[0].pid, 4650);
         assert_eq!(progress[0].command, "VACUUM");
@@ -3442,7 +3444,10 @@ mod tests {
     #[test]
     fn mock_snapshot_carries_databases_including_the_current_one() {
         let snapshot = DbSnapshot::mock();
-        let databases = snapshot.databases.as_ref().expect("mock must carry databases");
+        let databases = snapshot
+            .databases
+            .as_ref()
+            .expect("mock must carry databases");
         assert!(databases.len() >= 2);
         assert!(
             databases.iter().any(|d| d.name == snapshot.vitals.database),
@@ -3494,7 +3499,8 @@ mod tests {
             );
         }
         assert!(
-            rows.iter().any(|r| r.idle_age_secs > crate::idle_sessions::BAD_AGE_SECS),
+            rows.iter()
+                .any(|r| r.idle_age_secs > crate::idle_sessions::BAD_AGE_SECS),
             "mock must carry at least one row in the red tier"
         );
     }
@@ -3551,10 +3557,7 @@ mod tests {
             b.bloat_pct.is_some_and(|p| p > pct) && b.bloat_bytes.is_some_and(|by| by > bytes)
         };
         assert!(
-            schema
-                .table_bloat
-                .iter()
-                .any(|b| tier(&b, 50.0, 10 << 20)),
+            schema.table_bloat.iter().any(|b| tier(&b, 50.0, 10 << 20)),
             "one red-tier table bloat row"
         );
         assert!(
@@ -3565,10 +3568,7 @@ mod tests {
             "one yellow-tier table bloat row"
         );
         assert!(
-            schema
-                .index_bloat
-                .iter()
-                .any(|b| tier(&b, 30.0, 1 << 20)),
+            schema.index_bloat.iter().any(|b| tier(&b, 30.0, 1 << 20)),
             "one flagged index bloat row"
         );
     }
@@ -3610,7 +3610,10 @@ mod tests {
         // A mix of SELECT/UPDATE/INSERT is present.
         for verb in ["SELECT", "UPDATE", "INSERT"] {
             assert!(
-                statements.statements.iter().any(|s| s.query.starts_with(verb)),
+                statements
+                    .statements
+                    .iter()
+                    .any(|s| s.query.starts_with(verb)),
                 "mock must carry a {verb} statement"
             );
         }
@@ -3699,7 +3702,10 @@ mod tests {
         assert_eq!(action["kind"], serde_json::json!("Cancel"));
         assert_eq!(action["pid"], serde_json::json!(4977));
         assert_eq!(action["outcome"]["Signalled"], serde_json::json!(true));
-        assert_eq!(action["at_epoch_ms"], serde_json::json!(1_752_000_000_000u64));
+        assert_eq!(
+            action["at_epoch_ms"],
+            serde_json::json!(1_752_000_000_000u64)
+        );
 
         let err = AdminActionResult {
             kind: AdminKind::Terminate,
@@ -3708,7 +3714,10 @@ mod tests {
             at_epoch_ms: 1,
         };
         let json = serde_json::to_value(&err).expect("serialize");
-        assert_eq!(json["outcome"]["Error"], serde_json::json!("permission denied"));
+        assert_eq!(
+            json["outcome"]["Error"],
+            serde_json::json!("permission denied")
+        );
     }
 
     #[test]
@@ -3716,7 +3725,10 @@ mod tests {
         assert_eq!(AdminCommand::CancelBackend(42).pid(), 42);
         assert_eq!(AdminCommand::TerminateBackend(43).pid(), 43);
         assert_eq!(AdminCommand::CancelBackend(1).kind(), AdminKind::Cancel);
-        assert_eq!(AdminCommand::TerminateBackend(1).kind(), AdminKind::Terminate);
+        assert_eq!(
+            AdminCommand::TerminateBackend(1).kind(),
+            AdminKind::Terminate
+        );
     }
 
     #[test]
@@ -3754,7 +3766,8 @@ mod tests {
         assert_eq!(sev, SequenceSeverity::Critical);
 
         // Int4 max test
-        let (pct, rem, sev) = calculate_sequence_exhaustion(1, 1, 2_147_483_647, 1, Some(2_000_000_000));
+        let (pct, rem, sev) =
+            calculate_sequence_exhaustion(1, 1, 2_147_483_647, 1, Some(2_000_000_000));
         assert!(pct > 90.0);
         assert_eq!(sev, SequenceSeverity::Critical);
         assert_eq!(rem, 147_483_647);
@@ -3844,4 +3857,3 @@ mod tests {
         assert_eq!(slots[1].catalog_xmin_age, Some(2_100_000));
     }
 }
-

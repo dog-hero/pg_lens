@@ -66,30 +66,15 @@ fn progress_gauge_spans(pct: Option<f64>, bar_width: usize) -> Vec<Span<'static>
 fn command_badge(command: &str) -> Span<'static> {
     let cmd_upper = command.to_uppercase();
     if cmd_upper.starts_with("VACUUM") {
-        Span::styled(
-            command.to_string(),
-            Style::new().fg(Color::Green).bold(),
-        )
+        Span::styled(command.to_string(), Style::new().fg(Color::Green).bold())
     } else if cmd_upper.starts_with("CREATE INDEX") || cmd_upper.starts_with("REINDEX") {
-        Span::styled(
-            command.to_string(),
-            Style::new().fg(Color::Cyan).bold(),
-        )
+        Span::styled(command.to_string(), Style::new().fg(Color::Cyan).bold())
     } else if cmd_upper.starts_with("CLUSTER") {
-        Span::styled(
-            command.to_string(),
-            Style::new().fg(Color::Magenta).bold(),
-        )
+        Span::styled(command.to_string(), Style::new().fg(Color::Magenta).bold())
     } else if cmd_upper.starts_with("ANALYZE") {
-        Span::styled(
-            command.to_string(),
-            Style::new().fg(Color::Blue).bold(),
-        )
+        Span::styled(command.to_string(), Style::new().fg(Color::Blue).bold())
     } else {
-        Span::styled(
-            command.to_string(),
-            Style::new().fg(Color::Yellow).bold(),
-        )
+        Span::styled(command.to_string(), Style::new().fg(Color::Yellow).bold())
     }
 }
 
@@ -122,7 +107,10 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
         Cell::from(Span::styled("RELATION", Style::new().bold().underlined())),
         Cell::from(Span::styled("PHASE", Style::new().bold().underlined())),
         Cell::from(Span::styled("PROGRESS", Style::new().bold().underlined())),
-        Cell::from(Span::styled("PROCESSED / TOTAL", Style::new().bold().underlined())),
+        Cell::from(Span::styled(
+            "PROCESSED / TOTAL",
+            Style::new().bold().underlined(),
+        )),
         Cell::from(Span::styled("ELAPSED", Style::new().bold().underlined())),
         Cell::from(Span::styled("DETAILS", Style::new().bold().underlined())),
     ])
@@ -365,8 +353,11 @@ fn draw_detail(app: &App, frame: &mut Frame, area: Rect) {
         Span::styled(": close", Style::new().dim()),
     ]));
 
-    let panel = Paragraph::new(lines)
-        .block(Block::bordered().title(title).border_style(Style::new().fg(Color::Yellow)));
+    let panel = Paragraph::new(lines).block(
+        Block::bordered()
+            .title(title)
+            .border_style(Style::new().fg(Color::Yellow)),
+    );
 
     frame.render_widget(Clear, panel_area);
     frame.render_widget(panel, panel_area);

@@ -7,8 +7,8 @@
 //! Pure in-memory computation over `DbSnapshot.locks`, `DbSnapshot.activity`,
 //! and `DbSnapshot.idle_sessions`.
 
-use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 use crate::models::{ActivityRow, IdleSessionRow, LockRow};
 
@@ -163,13 +163,11 @@ pub fn build_blocking_tree(
 
     // Sort trees: most impacted first (descendants count desc, then duration desc)
     trees.sort_by(|a, b| {
-        b.num_descendants
-            .cmp(&a.num_descendants)
-            .then_with(|| {
-                b.max_descendant_duration
-                    .partial_cmp(&a.max_descendant_duration)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        b.num_descendants.cmp(&a.num_descendants).then_with(|| {
+            b.max_descendant_duration
+                .partial_cmp(&a.max_descendant_duration)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
 
     trees
@@ -214,9 +212,13 @@ fn build_node(
     let application_name = session
         .map(|s| s.application_name.clone())
         .unwrap_or_default();
-    let state = session
-        .map(|s| s.state.clone())
-        .unwrap_or_else(|| if lock_row.is_some() { "active".to_string() } else { "unknown".to_string() });
+    let state = session.map(|s| s.state.clone()).unwrap_or_else(|| {
+        if lock_row.is_some() {
+            "active".to_string()
+        } else {
+            "unknown".to_string()
+        }
+    });
     let query = session
         .map(|s| s.query.clone())
         .or_else(|| lock_row.map(|lr| lr.query.clone()))
@@ -326,7 +328,12 @@ mod tests {
             mock_lock(102, &[100], "users"),
         ];
         let activity = vec![
-            mock_activity(100, "idle in transaction", "UPDATE users SET active = true", 25.0),
+            mock_activity(
+                100,
+                "idle in transaction",
+                "UPDATE users SET active = true",
+                25.0,
+            ),
             mock_activity(101, "active", "UPDATE users SET email = 'a'", 15.0),
             mock_activity(102, "active", "ALTER TABLE users ADD COLUMN age int", 10.0),
         ];

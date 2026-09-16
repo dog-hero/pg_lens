@@ -183,20 +183,11 @@ struct ConnArgs {
 
     /// Incident recording max file size in megabytes before automatic rotation
     /// to a new file (minimum 1 MB). [default: 100, or config.toml]
-    #[arg(
-        long,
-        value_name = "MB",
-        env = "PG_LENS_RECORD_MAX_MB",
-        global = true
-    )]
+    #[arg(long, value_name = "MB", env = "PG_LENS_RECORD_MAX_MB", global = true)]
     record_max_mb: Option<u64>,
 
     /// Incident recording compression using gzip (.jsonl.gz). [default: false, or config.toml]
-    #[arg(
-        long,
-        env = "PG_LENS_RECORD_COMPRESS",
-        global = true
-    )]
+    #[arg(long, env = "PG_LENS_RECORD_COMPRESS", global = true)]
     record_compress: bool,
 
     /// Incident recording max total storage limit across all files in MB before auto-pruning.
@@ -361,7 +352,10 @@ impl ConnArgs {
     /// `--schema-interval`, then env, then `config.toml`, then the 60s
     /// default — floored at the core's sanity minimum (5s).
     fn schema_interval(&self, config: &settings::AppConfig) -> Duration {
-        let secs = self.schema_interval.or(config.schema_interval).unwrap_or(60);
+        let secs = self
+            .schema_interval
+            .or(config.schema_interval)
+            .unwrap_or(60);
         Duration::from_secs(secs).max(pg_lens_core::poller::SCHEMA_INTERVAL_MIN)
     }
 
@@ -391,7 +385,11 @@ impl ConnArgs {
     /// `--record-max-mb`, then env, then `config.toml`, then 100 MB default —
     /// floored at 1 MB. Returns max bytes.
     fn record_max_bytes(&self, config: &settings::AppConfig) -> usize {
-        let mb = self.record_max_mb.or(config.record_max_mb).unwrap_or(100).max(1);
+        let mb = self
+            .record_max_mb
+            .or(config.record_max_mb)
+            .unwrap_or(100)
+            .max(1);
         (mb as usize) * 1024 * 1024
     }
 
@@ -558,9 +556,12 @@ fn write_remote_cache(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Pure precedence resolution for read-only mode: the flag and the env var
 /// are OR'd in (either alone is enough to arm the mode; neither can turn it
 /// back off once the other says yes), then `config.toml`, then `false`.
-fn resolve_read_only(flag: bool, env: &HashMap<String, String>, config_value: Option<bool>) -> bool {
-    flag
-        || env.get("PG_LENS_READ_ONLY").is_some_and(|v| is_truthy(v))
+fn resolve_read_only(
+    flag: bool,
+    env: &HashMap<String, String>,
+    config_value: Option<bool>,
+) -> bool {
+    flag || env.get("PG_LENS_READ_ONLY").is_some_and(|v| is_truthy(v))
         || config_value.unwrap_or(false)
 }
 
@@ -596,8 +597,7 @@ enum Startup {
 /// Env vars whose presence (non-empty — empty values count as unset,
 /// consistent with `settings.rs`) expresses a connection intent that the
 /// picker must not second-guess.
-const PICKER_SUPPRESSING_ENV: [&str; 4] =
-    ["PGHOST", "PGSERVICE", "PG_LENS_SERVICE", "PG_LENS_DSN"];
+const PICKER_SUPPRESSING_ENV: [&str; 4] = ["PGHOST", "PGSERVICE", "PG_LENS_SERVICE", "PG_LENS_DSN"];
 
 /// Interactive service picker trigger rule (TUI mode only — never `serve`,
 /// never `--mock`; see README "Interactive service picker"). The picker
@@ -713,7 +713,10 @@ fn prompt_service_choice(services: &[ServiceSummary]) -> color_eyre::Result<Stri
     }
 
     for _ in 0..PROMPT_MAX_ATTEMPTS {
-        eprint!("select a service [1-{}] (or Ctrl+C to abort): ", services.len());
+        eprint!(
+            "select a service [1-{}] (or Ctrl+C to abort): ",
+            services.len()
+        );
         std::io::stderr().flush().ok();
         let mut line = String::new();
         let read = std::io::stdin().read_line(&mut line)?;
@@ -798,8 +801,11 @@ fn spawn_poller(
             // host and user, never the password. When the resolution came
             // with a password_cmd, the poller re-runs it per (re)connection.
             let label = resolved.label.to_string();
-            let history_path_fn: pg_lens_core::poller::HistoryPathFn =
-                Arc::new(|config: &pg_lens_core::tokio_postgres::Config, db: Option<&str>| history_file_path(config, db));
+            let history_path_fn: pg_lens_core::poller::HistoryPathFn = Arc::new(
+                |config: &pg_lens_core::tokio_postgres::Config, db: Option<&str>| {
+                    history_file_path(config, db)
+                },
+            );
             let (snapshots, handle) = pg_lens_core::poller::spawn(
                 resolved.config,
                 resolved.password_source,
@@ -928,14 +934,12 @@ fn history_file_path(
     let state_dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".local").join("state"))
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("state"))
         })?;
-    Some(
-        state_dir
-            .join("pg_lens")
-            .join(format!("history-{}.jsonl", history_key(config, db_override))),
-    )
+    Some(state_dir.join("pg_lens").join(format!(
+        "history-{}.jsonl",
+        history_key(config, db_override)
+    )))
 }
 
 /// A stable, filesystem-safe key for one connection target (host_port_db),
@@ -995,7 +999,12 @@ async fn main() -> color_eyre::Result<()> {
     // setup, no connection-flag validation, no DB) — handled first and returns
     // before any of that runs.
     if let Some(Command::Completions { shell }) = cli.command {
-        clap_complete::generate(shell, &mut Cli::command(), "pg_lens", &mut std::io::stdout());
+        clap_complete::generate(
+            shell,
+            &mut Cli::command(),
+            "pg_lens",
+            &mut std::io::stdout(),
+        );
         return Ok(());
     }
     if let Some(Command::Licenses) = cli.command {
@@ -1024,7 +1033,9 @@ async fn main() -> color_eyre::Result<()> {
         Some(Command::View { file }) => run_replay(file, 1.0, false).await,
         #[cfg(feature = "web")]
         Some(Command::Serve(args)) => run_serve(cli.conn, args).await,
-        Some(Command::Licenses) | Some(Command::Completions { .. }) => unreachable!("handled above"),
+        Some(Command::Licenses) | Some(Command::Completions { .. }) => {
+            unreachable!("handled above")
+        }
     }
 }
 
@@ -1059,7 +1070,10 @@ async fn run_replay(file: PathBuf, speed: f64, loop_playback: bool) -> color_eyr
 
     let mut app = App::new();
     let initial_frame = frames[0].clone();
-    app.host = format!("replay: {}", file.file_name().unwrap_or_default().to_string_lossy());
+    app.host = format!(
+        "replay: {}",
+        file.file_name().unwrap_or_default().to_string_lossy()
+    );
     app.read_only = true;
     app.replay_state = Some(crate::app::ReplayState {
         frames: frames.clone(),
@@ -1636,7 +1650,9 @@ mod tests {
     #[test]
     fn history_key_uses_the_configs_own_dbname_with_no_override() {
         let config: pg_lens_core::tokio_postgres::Config =
-            "host=db.internal port=5433 dbname=shop user=ro".parse().expect("dsn");
+            "host=db.internal port=5433 dbname=shop user=ro"
+                .parse()
+                .expect("dsn");
         assert_eq!(history_key(&config, None), "db_internal_5433_shop");
     }
 
@@ -1647,7 +1663,9 @@ mod tests {
     #[test]
     fn history_key_override_replaces_only_the_database_component() {
         let config: pg_lens_core::tokio_postgres::Config =
-            "host=db.internal port=5433 dbname=shop user=ro".parse().expect("dsn");
+            "host=db.internal port=5433 dbname=shop user=ro"
+                .parse()
+                .expect("dsn");
         assert_eq!(
             history_key(&config, Some("warehouse")),
             "db_internal_5433_warehouse"
@@ -1712,11 +1730,17 @@ mod tests {
     fn read_only_env_var_is_loosely_truthy() {
         for value in ["1", "true", "TRUE", "yes", "on", "anything"] {
             let e = env(&[("PG_LENS_READ_ONLY", value)]);
-            assert!(resolve_read_only(false, &e, None), "{value:?} must be truthy");
+            assert!(
+                resolve_read_only(false, &e, None),
+                "{value:?} must be truthy"
+            );
         }
         for value in ["0", "false", "FALSE", "no", "off", ""] {
             let e = env(&[("PG_LENS_READ_ONLY", value)]);
-            assert!(!resolve_read_only(false, &e, None), "{value:?} must be falsy");
+            assert!(
+                !resolve_read_only(false, &e, None),
+                "{value:?} must be falsy"
+            );
         }
     }
 
@@ -1779,7 +1803,10 @@ mod tests {
 
         let config = settings::AppConfig::default();
         assert!(cli.conn.record_compress(&config));
-        assert_eq!(cli.conn.record_max_total_bytes(&config), Some(500 * 1024 * 1024));
+        assert_eq!(
+            cli.conn.record_max_total_bytes(&config),
+            Some(500 * 1024 * 1024)
+        );
         assert_eq!(cli.conn.record_retention_days(&config), Some(14));
 
         // Defaults when unset
@@ -1796,7 +1823,10 @@ mod tests {
             ..Default::default()
         };
         assert!(bare.conn.record_compress(&with_conf));
-        assert_eq!(bare.conn.record_max_total_bytes(&with_conf), Some(200 * 1024 * 1024));
+        assert_eq!(
+            bare.conn.record_max_total_bytes(&with_conf),
+            Some(200 * 1024 * 1024)
+        );
         assert_eq!(bare.conn.record_retention_days(&with_conf), Some(7));
     }
 
@@ -1804,12 +1834,9 @@ mod tests {
 
     #[test]
     fn config_url_flag_parses_from_the_cli() {
-        let cli = Cli::try_parse_from([
-            "pg_lens",
-            "--config-url",
-            "github:acme/infra/services.toml",
-        ])
-        .expect("parse --config-url");
+        let cli =
+            Cli::try_parse_from(["pg_lens", "--config-url", "github:acme/infra/services.toml"])
+                .expect("parse --config-url");
         assert_eq!(
             cli.conn.config_url.as_deref(),
             Some("github:acme/infra/services.toml")
@@ -1900,7 +1927,10 @@ mod tests {
             .resolve_remote_overlay(&settings::AppConfig::default())
             .await
             .expect("no --config-url must never fail");
-        assert!(overlay.is_none(), "classic disk-only path must be untouched");
+        assert!(
+            overlay.is_none(),
+            "classic disk-only path must be untouched"
+        );
     }
 
     // --- CLI parsing: global connection flags ---------------------------------
@@ -1937,7 +1967,10 @@ mod tests {
             };
             let mut buf = Vec::new();
             clap_complete::generate(shell, &mut Cli::command(), "pg_lens", &mut buf);
-            assert!(!buf.is_empty(), "generated completion script must not be empty");
+            assert!(
+                !buf.is_empty(),
+                "generated completion script must not be empty"
+            );
         }
     }
 
@@ -1964,7 +1997,9 @@ mod tests {
         assert_eq!(flat.conn.dsn.as_deref(), Some("host=x"));
 
         // Conflict is enforced regardless of position relative to `serve`.
-        assert!(Cli::try_parse_from(["pg_lens", "--dsn", "host=x", "--service", "y", "serve"]).is_err());
+        assert!(
+            Cli::try_parse_from(["pg_lens", "--dsn", "host=x", "--service", "y", "serve"]).is_err()
+        );
     }
 
     /// clap's `conflicts_with` silently misses `--dsn`/`--service` when they
@@ -2014,7 +2049,10 @@ mod tests {
 
         let mut app = App::new();
         // Micro Lens, selected row, open the cancel modal, confirm with y.
-        update(&mut app, Action::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        update(
+            &mut app,
+            Action::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        );
         let pid = app.selected_row().expect("selection").pid;
         update(
             &mut app,
@@ -2154,8 +2192,7 @@ mod tests {
     fn picker_suppressed_by_insecure_file_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let file = services_file(TWO_SERVICES);
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666))
-            .expect("chmod 666");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666)).expect("chmod 666");
         assert!(
             picker_services(&spec_with_file(&file, &[])).is_none(),
             "group/other-writable file must fail the permission check"

@@ -64,7 +64,10 @@ mod tests {
         assert_eq!(line.spans[1].style, value_style());
         // The rendered text is exactly label + value.
         assert_eq!(
-            line.spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>(),
             "Active : 42"
         );
     }

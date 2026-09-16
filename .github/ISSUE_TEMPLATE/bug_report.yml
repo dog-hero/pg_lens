@@ -115,3 +115,4 @@ body:
           required: true
         - label: I am using a supported PostgreSQL version (PostgreSQL 13+).
           required: true
+

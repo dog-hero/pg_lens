@@ -32,11 +32,12 @@ use crate::history_store::HistoryStore;
 use crate::index_advisor::{self, IndexCatalogRow};
 use crate::models::{
     ActiveLockRow, AdminActionResult, AdminCommand, AdminOutcome, BloatRow, CheckpointerStats,
-    DatabaseConflicts, DatabaseRow, DbSnapshot, DdlProgressRow, IdleSessionRow, IndexRow, IoStatRow,
-    LockCapacity, PollerStatus, PreparedXactRow, PublicationRow, ReplicationInfo,
-    ReplicationSlotRow, SchemaSnapshot, SchemaStatus, SequenceRow, ServerVitals, SlruRow, SlruStats,
-    StatementRow, StatementsSnapshot, StatementsStatus, SubscriptionRow, TableDetail,
-    TableDetailRequest, TelemetryError, VacuumClusterAge, VacuumProgressRow, VacuumTableRow, WalStats,
+    DatabaseConflicts, DatabaseRow, DbSnapshot, DdlProgressRow, IdleSessionRow, IndexRow,
+    IoStatRow, LockCapacity, PollerStatus, PreparedXactRow, PublicationRow, ReplicationInfo,
+    ReplicationSlotRow, SchemaSnapshot, SchemaStatus, SequenceRow, ServerVitals, SlruRow,
+    SlruStats, StatementRow, StatementsSnapshot, StatementsStatus, SubscriptionRow, TableDetail,
+    TableDetailRequest, TelemetryError, VacuumClusterAge, VacuumProgressRow, VacuumTableRow,
+    WalStats,
 };
 use crate::schema_growth::{GROWTH_LOOKBACK_MS, SchemaGrowthTracker};
 use crate::services::{self, PasswordSource};
@@ -284,7 +285,9 @@ impl SchemaState {
             table_bloat: previous.map(|p| p.table_bloat.clone()).unwrap_or_default(),
             index_bloat: previous.map(|p| p.index_bloat.clone()).unwrap_or_default(),
             vacuum_cluster_age: previous.and_then(|p| p.vacuum_cluster_age.clone()),
-            vacuum_tables: previous.map(|p| p.vacuum_tables.clone()).unwrap_or_default(),
+            vacuum_tables: previous
+                .map(|p| p.vacuum_tables.clone())
+                .unwrap_or_default(),
             indexes: previous.map(|p| p.indexes.clone()).unwrap_or_default(),
             stats_reset_epoch_secs: previous.and_then(|p| p.stats_reset_epoch_secs),
             sequences: previous.map(|p| p.sequences.clone()).unwrap_or_default(),
@@ -408,11 +411,17 @@ struct IoStatsState {
 /// The previous slow-cadence collection's raw counters, keyed by
 /// `(backend_type, context)`, plus when it ran — factored out of
 /// [`IoStatsState`] purely to keep clippy's type-complexity lint quiet.
-type IoStatsPrev = (Instant, std::collections::HashMap<(String, String), db::IoStatRawRow>);
+type IoStatsPrev = (
+    Instant,
+    std::collections::HashMap<(String, String), db::IoStatRawRow>,
+);
 
 impl IoStatsState {
     fn new() -> Self {
-        Self { current: None, prev: None }
+        Self {
+            current: None,
+            prev: None,
+        }
     }
 
     /// Stores a successful collection, deriving per-tick rates against
@@ -437,7 +446,11 @@ impl IoStatsState {
 /// `ServerVitals::cache_hit_ratio`). A key present now but absent from
 /// `prev` (a `backend_type`/`context` combination that just started
 /// producing I/O) gets the same "no delta window yet" treatment.
-fn derive_io_stats(raws: &[db::IoStatRawRow], now: Instant, prev: Option<&IoStatsPrev>) -> Vec<IoStatRow> {
+fn derive_io_stats(
+    raws: &[db::IoStatRawRow],
+    now: Instant,
+    prev: Option<&IoStatsPrev>,
+) -> Vec<IoStatRow> {
     raws.iter()
         .map(|raw| {
             let avg_read_ms = avg_ms(raw.track_io_timing_on, raw.read_time_ms, raw.reads);
@@ -508,7 +521,11 @@ fn avg_ms(track_io_timing_on: bool, time_ms: f64, count: i64) -> Option<f64> {
 /// The cumulative-ratio fallback: `None` only when the denominator is 0.
 fn hit_ratio_from(hits: i64, reads: i64) -> Option<f64> {
     let denom = hits + reads;
-    if denom > 0 { Some(hits as f64 / denom as f64) } else { None }
+    if denom > 0 {
+        Some(hits as f64 / denom as f64)
+    } else {
+        None
+    }
 }
 
 /// The pure elapsed check behind [`SchemaState::due`], factored out so the
@@ -674,7 +691,11 @@ async fn begin_write(client: &mut Client) -> Result<Transaction<'_>, tokio_postg
 /// inside a transaction (pooler-safe). Errors (usually privilege) become
 /// `AdminOutcome::Error` — an admin failure must never tear the polling
 /// session down; a genuinely dead connection will surface on the next poll.
-async fn execute_admin(client: &mut Client, q: &queries::QuerySet, cmd: AdminCommand) -> AdminActionResult {
+async fn execute_admin(
+    client: &mut Client,
+    q: &queries::QuerySet,
+    cmd: AdminCommand,
+) -> AdminActionResult {
     let sql = match cmd {
         AdminCommand::CancelBackend(_) => q.cancel_backend,
         AdminCommand::TerminateBackend(_) => q.terminate_backend,
@@ -690,7 +711,9 @@ async fn execute_admin(client: &mut Client, q: &queries::QuerySet, cmd: AdminCom
     let signalled = async {
         let tx = begin_write(client).await.map_err(server_msg)?;
         let row = tx.query_one(sql, &[&cmd.pid()]).await.map_err(server_msg)?;
-        let stopped = row.try_get::<_, bool>("is_stopped").map_err(|e| e.to_string())?;
+        let stopped = row
+            .try_get::<_, bool>("is_stopped")
+            .map_err(|e| e.to_string())?;
         tx.commit().await.map_err(server_msg)?;
         Ok(stopped)
     }
@@ -892,7 +915,8 @@ async fn run(
                 io_stats = IoStatsState::new();
                 table_detail = TableDetailState::new();
                 last_admin = None;
-                *shared_telemetry.write().unwrap_or_else(|p| p.into_inner()) = SharedTelemetry::default();
+                *shared_telemetry.write().unwrap_or_else(|p| p.into_inner()) =
+                    SharedTelemetry::default();
                 store = history_path_fn
                     .as_ref()
                     .and_then(|f| f(&config, Some(&name)))
@@ -914,7 +938,8 @@ async fn run(
                 io_stats = IoStatsState::new();
                 table_detail = TableDetailState::new();
                 last_admin = None;
-                *shared_telemetry.write().unwrap_or_else(|p| p.into_inner()) = SharedTelemetry::default();
+                *shared_telemetry.write().unwrap_or_else(|p| p.into_inner()) =
+                    SharedTelemetry::default();
                 store = history_path_fn
                     .as_ref()
                     .and_then(|f| f(&config, None))
@@ -1205,7 +1230,10 @@ async fn fast_loop(
         is_in_recovery.store(res.is_in_recovery, std::sync::atomic::Ordering::Relaxed);
 
         let shared = {
-            shared_telemetry.read().unwrap_or_else(|p| p.into_inner()).clone()
+            shared_telemetry
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
         };
 
         let oldest_xid_age = shared
@@ -1342,11 +1370,11 @@ async fn telemetry_loop(
                 shared.lock_capacity = t2.lock_capacity;
                 if t2.last_error.is_some() {
                     shared.last_error = t2.last_error;
-                } else if shared
-                    .last_error
-                    .as_ref()
-                    .is_some_and(|e| e.subsystem == "replication_slots" || e.subsystem == "replication" || e.subsystem == "wal_receiver")
-                {
+                } else if shared.last_error.as_ref().is_some_and(|e| {
+                    e.subsystem == "replication_slots"
+                        || e.subsystem == "replication"
+                        || e.subsystem == "wal_receiver"
+                }) {
                     shared.last_error = None;
                 }
             }
@@ -1363,11 +1391,11 @@ async fn telemetry_loop(
                 shared.subscriptions = t3.subscriptions;
                 if t3.last_error.is_some() {
                     shared.last_error = t3.last_error;
-                } else if shared
-                    .last_error
-                    .as_ref()
-                    .is_some_and(|e| e.subsystem == "subscriptions" || e.subsystem == "publications" || e.subsystem == "databases")
-                {
+                } else if shared.last_error.as_ref().is_some_and(|e| {
+                    e.subsystem == "subscriptions"
+                        || e.subsystem == "publications"
+                        || e.subsystem == "databases"
+                }) {
                     shared.last_error = None;
                 }
             }
@@ -1452,7 +1480,9 @@ async fn telemetry_loop(
             None => Duration::ZERO,
             Some(_) => TELEMETRY_TIER2_INTERVAL.saturating_sub(now.elapsed()),
         };
-        let sleep_dur = next_tier2_in.min(Duration::from_millis(500)).max(Duration::from_millis(100));
+        let sleep_dur = next_tier2_in
+            .min(Duration::from_millis(500))
+            .max(Duration::from_millis(100));
 
         tokio::select! {
             _ = tokio::time::sleep(sleep_dur) => {}
@@ -1534,11 +1564,11 @@ async fn single_conn_poll_loop(
                 shared.lock_capacity = t2.lock_capacity;
                 if t2.last_error.is_some() {
                     shared.last_error = t2.last_error;
-                } else if shared
-                    .last_error
-                    .as_ref()
-                    .is_some_and(|e| e.subsystem == "replication_slots" || e.subsystem == "replication" || e.subsystem == "wal_receiver")
-                {
+                } else if shared.last_error.as_ref().is_some_and(|e| {
+                    e.subsystem == "replication_slots"
+                        || e.subsystem == "replication"
+                        || e.subsystem == "wal_receiver"
+                }) {
                     shared.last_error = None;
                 }
             }
@@ -1553,11 +1583,11 @@ async fn single_conn_poll_loop(
                 shared.subscriptions = t3.subscriptions;
                 if t3.last_error.is_some() {
                     shared.last_error = t3.last_error;
-                } else if shared
-                    .last_error
-                    .as_ref()
-                    .is_some_and(|e| e.subsystem == "subscriptions" || e.subsystem == "publications" || e.subsystem == "databases")
-                {
+                } else if shared.last_error.as_ref().is_some_and(|e| {
+                    e.subsystem == "subscriptions"
+                        || e.subsystem == "publications"
+                        || e.subsystem == "databases"
+                }) {
                     shared.last_error = None;
                 }
             }
@@ -1636,7 +1666,10 @@ async fn single_conn_poll_loop(
         }
 
         let shared = {
-            shared_telemetry.read().unwrap_or_else(|p| p.into_inner()).clone()
+            shared_telemetry
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
         };
 
         let oldest_xid_age = shared
@@ -1718,7 +1751,11 @@ async fn single_conn_poll_loop(
             Some(PollWake::Admin(cmd)) => {
                 *last_admin = Some(execute_admin(client, q, cmd).await);
             }
-            Some(PollWake::Detail(TableDetailRequest::Fetch { oid, schema: s, name })) => {
+            Some(PollWake::Detail(TableDetailRequest::Fetch {
+                oid,
+                schema: s,
+                name,
+            })) => {
                 let detail = collect_table_detail(client, q, oid, s, name).await;
                 table_detail.store(detail);
                 if let Ok(mut shared) = shared_telemetry.write() {
@@ -1835,7 +1872,9 @@ fn derive_slru_stats(
     let mut next_subsystems = std::collections::HashMap::with_capacity(raws.len());
     let mut subtrans_warning = false;
 
-    let dt = prev.map(|p| now.duration_since(p.at).as_secs_f64()).unwrap_or(0.0);
+    let dt = prev
+        .map(|p| now.duration_since(p.at).as_secs_f64())
+        .unwrap_or(0.0);
 
     for raw in raws {
         total_hit += raw.blks_hit;
@@ -1963,8 +2002,10 @@ fn derive_conflicts(
         if dt > 0.0 {
             conflicts_per_sec = Some((confl_total - p.confl_total).max(0) as f64 / dt);
             lock_conflicts_per_sec = Some((raw.confl_lock - p.confl_lock).max(0) as f64 / dt);
-            snapshot_conflicts_per_sec = Some((raw.confl_snapshot - p.confl_snapshot).max(0) as f64 / dt);
-            deadlock_conflicts_per_sec = Some((raw.confl_deadlock - p.confl_deadlock).max(0) as f64 / dt);
+            snapshot_conflicts_per_sec =
+                Some((raw.confl_snapshot - p.confl_snapshot).max(0) as f64 / dt);
+            deadlock_conflicts_per_sec =
+                Some((raw.confl_deadlock - p.confl_deadlock).max(0) as f64 / dt);
         }
     }
 
@@ -2204,11 +2245,8 @@ async fn poll_once_fast(
         None => (0.0, cumulative_ratio),
     };
 
-    let (checkpointer_stats, checkpointer_delta) = derive_checkpointer_stats(
-        &bgwriter_raw,
-        now,
-        deltas.as_ref().map(|d| &d.checkpointer),
-    );
+    let (checkpointer_stats, checkpointer_delta) =
+        derive_checkpointer_stats(&bgwriter_raw, now, deltas.as_ref().map(|d| &d.checkpointer));
 
     *deltas = Some(DeltaState {
         at: now,
@@ -2369,7 +2407,10 @@ async fn collect_schema(
         .flatten();
 
     // User sequences exhaustion tracking (v0.19, `pg_sequences`).
-    let seq_rows = stx.query(q.sequences, &[]).await.map_err(|e| e.to_string())?;
+    let seq_rows = stx
+        .query(q.sequences, &[])
+        .await
+        .map_err(|e| e.to_string())?;
     let mut sequences = Vec::with_capacity(seq_rows.len());
     for row in &seq_rows {
         sequences.push(db::sequence_from_row(row).map_err(|e| e.to_string())?);
@@ -2426,10 +2467,7 @@ fn bloat_rows(rows: &[tokio_postgres::Row]) -> Result<Vec<BloatRow>, String> {
 
 /// Runs the (slow) statements query — only reachable when the extension was
 /// detected as available at session start, and only on the schema cadence.
-async fn collect_statements(
-    client: &mut Client,
-    sql: &str,
-) -> Result<Vec<StatementRow>, String> {
+async fn collect_statements(client: &mut Client, sql: &str) -> Result<Vec<StatementRow>, String> {
     let tx = begin_read(client).await.map_err(|e| e.to_string())?;
     let rows = tx.query(sql, &[]).await.map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(rows.len());
@@ -2443,17 +2481,21 @@ async fn collect_statements(
 /// Runs the I/O profile collection (v0.16, `pg_stat_io`, PG 16+), same slow
 /// cadence and same shape of read as `collect_statements`. The caller only
 /// invokes this when `q.io_stats` is `Some` (PG 16+) — see `poll_loop`.
-async fn collect_io_stats(
-    client: &mut Client,
-    sql: &str,
-) -> Result<Vec<db::IoStatRawRow>, String> {
-    let tx = begin_read(client).await.map_err(|e| db_error_message("begin_read failed", &e))?;
-    let rows = tx.query(sql, &[]).await.map_err(|e| db_error_message("io_stats query failed", &e))?;
+async fn collect_io_stats(client: &mut Client, sql: &str) -> Result<Vec<db::IoStatRawRow>, String> {
+    let tx = begin_read(client)
+        .await
+        .map_err(|e| db_error_message("begin_read failed", &e))?;
+    let rows = tx
+        .query(sql, &[])
+        .await
+        .map_err(|e| db_error_message("io_stats query failed", &e))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(db::io_stat_from_row(row).map_err(|e| format!("io_stat parse error: {e}"))?);
     }
-    tx.commit().await.map_err(|e| db_error_message("commit failed", &e))?;
+    tx.commit()
+        .await
+        .map_err(|e| db_error_message("commit failed", &e))?;
     Ok(out)
 }
 
@@ -2610,7 +2652,11 @@ async fn collect_replication_tier2(
     client: &mut Client,
     q: &queries::QuerySet,
     is_in_recovery: bool,
-) -> (Option<ReplicationInfo>, Option<Vec<ReplicationSlotRow>>, Option<TelemetryError>) {
+) -> (
+    Option<ReplicationInfo>,
+    Option<Vec<ReplicationSlotRow>>,
+    Option<TelemetryError>,
+) {
     let mut last_err = None;
 
     // 1. Wal senders (primary) or wal receiver (standby)
@@ -2706,7 +2752,11 @@ async fn collect_replication_tier2(
 async fn collect_logical_replication(
     client: &mut Client,
     q: &queries::QuerySet,
-) -> (Option<Vec<PublicationRow>>, Option<Vec<SubscriptionRow>>, Option<TelemetryError>) {
+) -> (
+    Option<Vec<PublicationRow>>,
+    Option<Vec<SubscriptionRow>>,
+    Option<TelemetryError>,
+) {
     let mut last_err = None;
 
     let publications = if let Ok(tx) = begin_read(client).await {
@@ -2845,7 +2895,8 @@ async fn collect_tier2(
         None
     };
 
-    let conflicts = if let Some(raw) = collect_conflicts_raw(client, q.replication_conflicts).await {
+    let conflicts = if let Some(raw) = collect_conflicts_raw(client, q.replication_conflicts).await
+    {
         let (stats, next) = derive_conflicts(&raw, now, deltas.conflicts.as_ref());
         deltas.conflicts = Some(next);
         Some(stats)
@@ -3114,8 +3165,11 @@ fn fold_relation_locks(
     locks: Option<&[db::RelationLockRow]>,
 ) -> Option<Arc<SchemaSnapshot>> {
     let schema = schema?;
-    let by_oid: Option<std::collections::HashMap<i64, (i64, i64)>> =
-        locks.map(|rows| rows.iter().map(|r| (r.rel_oid, (r.locks, r.waiting))).collect());
+    let by_oid: Option<std::collections::HashMap<i64, (i64, i64)>> = locks.map(|rows| {
+        rows.iter()
+            .map(|r| (r.rel_oid, (r.locks, r.waiting)))
+            .collect()
+    });
     let mut fresh = (*schema).clone();
     for table in &mut fresh.tables {
         match by_oid.as_ref().and_then(|m| m.get(&table.oid)) {
@@ -3211,7 +3265,11 @@ fn db_error_message(context: &str, e: &tokio_postgres::Error) -> String {
 
 fn hit_ratio(hit: i64, read: i64) -> f64 {
     let total = hit + read;
-    if total > 0 { hit as f64 / total as f64 } else { 0.0 }
+    if total > 0 {
+        hit as f64 / total as f64
+    } else {
+        0.0
+    }
 }
 
 /// Re-publishes the last snapshot with `status = Error(msg)`: frontends show
@@ -3319,7 +3377,11 @@ pub fn spawn_mock(
                 // (`TableDetail::mock().oid`); any other requested oid gets
                 // the calm "no fixture" shape instead of silently reusing
                 // `order_items`'s data — see `TableDetail::mock_unavailable`.
-                Some(PollWake::Detail(TableDetailRequest::Fetch { oid, schema: s, name })) => {
+                Some(PollWake::Detail(TableDetailRequest::Fetch {
+                    oid,
+                    schema: s,
+                    name,
+                })) => {
                     let mock = TableDetail::mock();
                     table_detail = Some(Arc::new(if oid == mock.oid {
                         mock
@@ -3369,7 +3431,9 @@ fn apply_mock_admin(
     cancelled: &std::collections::HashSet<i32>,
     terminated: &std::collections::HashSet<i32>,
 ) {
-    snapshot.activity.retain(|row| !terminated.contains(&row.pid));
+    snapshot
+        .activity
+        .retain(|row| !terminated.contains(&row.pid));
     snapshot
         .locks
         .retain(|lock| !terminated.contains(&lock.pid) && !cancelled.contains(&lock.pid));
@@ -3675,7 +3739,9 @@ mod tests {
     #[tokio::test]
     async fn wait_db_switch_resolves_with_the_sent_name() {
         let (tx, mut rx) = mpsc::channel::<String>(1);
-        tx.send("warehouse".to_string()).await.expect("receiver alive");
+        tx.send("warehouse".to_string())
+            .await
+            .expect("receiver alive");
         assert_eq!(wait_db_switch(&mut rx).await, "warehouse");
     }
 
@@ -3686,7 +3752,8 @@ mod tests {
     async fn wait_db_switch_never_resolves_after_the_sender_drops() {
         let (tx, mut rx) = mpsc::channel::<String>(1);
         drop(tx);
-        let outcome = tokio::time::timeout(Duration::from_millis(50), wait_db_switch(&mut rx)).await;
+        let outcome =
+            tokio::time::timeout(Duration::from_millis(50), wait_db_switch(&mut rx)).await;
         assert!(outcome.is_err(), "must stay pending, not resolve");
     }
 
@@ -3750,7 +3817,11 @@ mod tests {
     #[test]
     fn force_refresh_signal_makes_the_next_tick_due() {
         let (refresh_tx, refresh_rx) = watch::channel(0u64);
-        let mut schema = SchemaState::new(Duration::from_secs(3600), refresh_rx, queries::SCHEMA_TABLE_LIMIT_DEFAULT);
+        let mut schema = SchemaState::new(
+            Duration::from_secs(3600),
+            refresh_rx,
+            queries::SCHEMA_TABLE_LIMIT_DEFAULT,
+        );
         let t0 = Instant::now();
         schema.last_attempt = Some(t0); // just collected: not due for an hour
         assert_eq!(schema.due(t0 + Duration::from_secs(2)), None);
@@ -3773,7 +3844,11 @@ mod tests {
     #[test]
     fn auto_cadence_skips_bloat_force_refresh_includes_it() {
         let (refresh_tx, refresh_rx) = watch::channel(0u64);
-        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx, queries::SCHEMA_TABLE_LIMIT_DEFAULT);
+        let mut schema = SchemaState::new(
+            Duration::from_secs(60),
+            refresh_rx,
+            queries::SCHEMA_TABLE_LIMIT_DEFAULT,
+        );
         let t0 = Instant::now();
         // Never collected → auto due, but table-stats only (no bloat).
         assert_eq!(schema.due(t0), Some(false));
@@ -3789,7 +3864,11 @@ mod tests {
     /// while refreshing the table stats.
     #[test]
     fn auto_tick_carries_bloat_forward() {
-        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx(), queries::SCHEMA_TABLE_LIMIT_DEFAULT);
+        let mut schema = SchemaState::new(
+            Duration::from_secs(60),
+            refresh_rx(),
+            queries::SCHEMA_TABLE_LIMIT_DEFAULT,
+        );
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
@@ -3828,7 +3907,11 @@ mod tests {
     /// objects, so carrying it forward under the new name would mislead.
     #[test]
     fn schema_state_reset_drops_the_last_collection() {
-        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx(), queries::SCHEMA_TABLE_LIMIT_DEFAULT);
+        let mut schema = SchemaState::new(
+            Duration::from_secs(60),
+            refresh_rx(),
+            queries::SCHEMA_TABLE_LIMIT_DEFAULT,
+        );
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
@@ -3846,7 +3929,10 @@ mod tests {
 
         schema.reset();
 
-        assert!(schema.current.is_none(), "old database's data must not survive");
+        assert!(
+            schema.current.is_none(),
+            "old database's data must not survive"
+        );
         assert!(schema.last_attempt.is_none(), "cadence timer restarts too");
         // The next tick is due immediately (no need to wait out the old
         // database's cadence before the new one gets its first collection).
@@ -3858,7 +3944,11 @@ mod tests {
     /// flips to Error. Mirrors the activity pipeline's resilience.
     #[test]
     fn schema_error_keeps_last_good_tables() {
-        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx(), queries::SCHEMA_TABLE_LIMIT_DEFAULT);
+        let mut schema = SchemaState::new(
+            Duration::from_secs(60),
+            refresh_rx(),
+            queries::SCHEMA_TABLE_LIMIT_DEFAULT,
+        );
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
@@ -3876,9 +3966,20 @@ mod tests {
         schema.store_error("permission denied for pg_stat_user_tables".to_string());
         let after = schema.current.clone().expect("still present");
         assert_eq!(after.tables.len(), good.tables.len(), "data kept");
-        assert_eq!(after.table_bloat.len(), good.table_bloat.len(), "bloat kept");
-        assert_eq!(after.index_bloat.len(), good.index_bloat.len(), "bloat kept");
-        assert_eq!(after.collected_at_epoch_ms, collected_at, "staleness honest");
+        assert_eq!(
+            after.table_bloat.len(),
+            good.table_bloat.len(),
+            "bloat kept"
+        );
+        assert_eq!(
+            after.index_bloat.len(),
+            good.index_bloat.len(),
+            "bloat kept"
+        );
+        assert_eq!(
+            after.collected_at_epoch_ms, collected_at,
+            "staleness honest"
+        );
         assert!(matches!(after.status, SchemaStatus::Error(ref m)
             if m.contains("permission denied")));
     }
@@ -3888,7 +3989,11 @@ mod tests {
     /// previous bloat vectors are kept, and the status carries the error.
     #[test]
     fn bloat_failure_keeps_table_stats_and_previous_bloat() {
-        let mut schema = SchemaState::new(Duration::from_secs(60), refresh_rx(), queries::SCHEMA_TABLE_LIMIT_DEFAULT);
+        let mut schema = SchemaState::new(
+            Duration::from_secs(60),
+            refresh_rx(),
+            queries::SCHEMA_TABLE_LIMIT_DEFAULT,
+        );
         let good = SchemaSnapshot::mock();
         schema.store(SchemaCollection {
             tables: good.tables.clone(),
@@ -3911,7 +4016,9 @@ mod tests {
             indexes: good.indexes.clone(),
             stats_reset_epoch_secs: good.stats_reset_epoch_secs,
             sequences: good.sequences.clone(),
-            bloat: Some(Err("canceling statement due to statement timeout".to_string())),
+            bloat: Some(Err(
+                "canceling statement due to statement timeout".to_string()
+            )),
         });
 
         let after = schema.current.clone().expect("stored");
@@ -4005,7 +4112,10 @@ mod tests {
         state.store_error("permission denied for view pg_stat_statements".to_string());
         let after = state.current.clone().expect("still present");
         assert_eq!(after.statements.len(), good.statements.len(), "data kept");
-        assert_eq!(after.collected_at_epoch_ms, collected_at, "staleness honest");
+        assert_eq!(
+            after.collected_at_epoch_ms, collected_at,
+            "staleness honest"
+        );
         assert!(matches!(after.status, StatementsStatus::Error(ref m)
             if m.contains("permission denied")));
     }
@@ -4020,7 +4130,10 @@ mod tests {
             "pg_stat_statements must be loaded via \"shared_preload_libraries\"".to_string(),
         );
         let after = state.current.clone().expect("present");
-        assert!(after.statements.is_empty(), "no stale rows behind an explainer");
+        assert!(
+            after.statements.is_empty(),
+            "no stale rows behind an explainer"
+        );
         assert!(matches!(after.status, StatementsStatus::Unavailable(ref m)
             if m.contains("shared_preload_libraries")));
     }
@@ -4032,8 +4145,10 @@ mod tests {
         let current = state.current.clone().expect("present");
         assert!(current.statements.is_empty());
         assert!(current.collected_at_epoch_ms > 0);
-        assert!(matches!(current.status, StatementsStatus::Unavailable(ref m)
-            if m == "extension missing"));
+        assert!(
+            matches!(current.status, StatementsStatus::Unavailable(ref m)
+            if m == "extension missing")
+        );
     }
 
     /// The mock poller swaps the statements Arc on the SAME slow tick as the
@@ -4283,7 +4398,10 @@ mod tests {
         let (stats1, _delta1) = derive_checkpointer_stats(&raw1, t1, Some(&delta0));
         assert!(stats1.avg_checkpoint_write_ms.is_none());
         assert!(stats1.avg_checkpoint_sync_ms.is_none());
-        assert!(stats1.buffers_backend_per_sec.is_none(), "absent on 17+ style rows");
+        assert!(
+            stats1.buffers_backend_per_sec.is_none(),
+            "absent on 17+ style rows"
+        );
         assert!(stats1.buffers_checkpoint_per_sec.is_some());
     }
 
@@ -4414,7 +4532,10 @@ mod tests {
     fn io_stats_query_is_absent_below_pg16_and_present_on_16_plus() {
         for version in [130_011, 140_000, 150_007] {
             let q = queries::for_version(version).expect("supported");
-            assert!(q.io_stats.is_none(), "pg_stat_io does not exist below PG 16");
+            assert!(
+                q.io_stats.is_none(),
+                "pg_stat_io does not exist below PG 16"
+            );
         }
         for version in [160_000, 160_003, 170_000] {
             let q = queries::for_version(version).expect("supported");
@@ -4426,7 +4547,11 @@ mod tests {
 
     #[test]
     fn io_stats_first_collection_has_no_rates_but_a_cumulative_hit_ratio() {
-        let raw = io_raw("client backend", "normal", (1_000, 200, 9_000, 500.0, 100.0, true));
+        let raw = io_raw(
+            "client backend",
+            "normal",
+            (1_000, 200, 9_000, 500.0, 100.0, true),
+        );
         let rows = derive_io_stats(&[raw], Instant::now(), None);
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -4441,7 +4566,11 @@ mod tests {
 
     #[test]
     fn io_stats_track_io_timing_off_nulls_the_avg_ms_never_a_misleading_zero() {
-        let raw = io_raw("client backend", "normal", (1_000, 200, 9_000, 0.0, 0.0, false));
+        let raw = io_raw(
+            "client backend",
+            "normal",
+            (1_000, 200, 9_000, 0.0, 0.0, false),
+        );
         let rows = derive_io_stats(&[raw], Instant::now(), None);
         assert!(rows[0].avg_read_ms.is_none());
         assert!(rows[0].avg_write_ms.is_none());
@@ -4449,14 +4578,22 @@ mod tests {
 
     #[test]
     fn io_stats_second_collection_derives_delta_rates_and_ratio() {
-        let raw0 = io_raw("client backend", "normal", (1_000, 200, 9_000, 500.0, 100.0, true));
+        let raw0 = io_raw(
+            "client backend",
+            "normal",
+            (1_000, 200, 9_000, 500.0, 100.0, true),
+        );
         let t0 = Instant::now();
         let mut prev = std::collections::HashMap::new();
         prev.insert(("client backend".to_string(), "normal".to_string()), raw0);
         let t1 = t0 + Duration::from_secs(10);
 
         // 10s later: +500 reads, +100 writes, +490 hits.
-        let raw1 = io_raw("client backend", "normal", (1_500, 300, 9_490, 700.0, 150.0, true));
+        let raw1 = io_raw(
+            "client backend",
+            "normal",
+            (1_500, 300, 9_490, 700.0, 150.0, true),
+        );
         let rows = derive_io_stats(&[raw1], t1, Some(&(t0, prev)));
         let row = &rows[0];
         assert_eq!(row.reads_per_sec, Some(50.0));
@@ -4467,7 +4604,11 @@ mod tests {
 
     #[test]
     fn io_stats_reset_shows_no_negative_rate() {
-        let raw0 = io_raw("client backend", "normal", (5_000, 800, 40_000, 2_000.0, 400.0, true));
+        let raw0 = io_raw(
+            "client backend",
+            "normal",
+            (5_000, 800, 40_000, 2_000.0, 400.0, true),
+        );
         let t0 = Instant::now();
         let mut prev = std::collections::HashMap::new();
         prev.insert(("client backend".to_string(), "normal".to_string()), raw0);
@@ -4478,7 +4619,10 @@ mod tests {
         let raw1 = io_raw("client backend", "normal", (50, 10, 400, 20.0, 4.0, true));
         let rows = derive_io_stats(&[raw1], t1, Some(&(t0, prev)));
         let row = &rows[0];
-        assert!(row.reads_per_sec.is_none(), "a reset must never show a negative rate");
+        assert!(
+            row.reads_per_sec.is_none(),
+            "a reset must never show a negative rate"
+        );
         assert!(row.writes_per_sec.is_none());
         // Falls back to this collection's own cumulative ratio.
         assert!((row.hit_ratio.unwrap() - 400.0 / 450.0).abs() < 1e-9);
@@ -4492,11 +4636,19 @@ mod tests {
         let mut prev = std::collections::HashMap::new();
         prev.insert(
             ("client backend".to_string(), "normal".to_string()),
-            io_raw("client backend", "normal", (1_000, 200, 9_000, 500.0, 100.0, true)),
+            io_raw(
+                "client backend",
+                "normal",
+                (1_000, 200, 9_000, 500.0, 100.0, true),
+            ),
         );
         let t0 = Instant::now();
         let t1 = t0 + Duration::from_secs(10);
-        let raw1 = io_raw("autovacuum worker", "vacuum", (40, 10, 300, 12.0, 3.0, true));
+        let raw1 = io_raw(
+            "autovacuum worker",
+            "vacuum",
+            (40, 10, 300, 12.0, 3.0, true),
+        );
         let rows = derive_io_stats(&[raw1], t1, Some(&(t0, prev)));
         assert!(rows[0].reads_per_sec.is_none());
         assert!(rows[0].hit_ratio.is_some());
@@ -4504,14 +4656,30 @@ mod tests {
 
     #[test]
     fn io_stat_from_row_parser_shape_matches_the_sql_column_names() {
-        let sql = queries::for_version(160_003).expect("PG16 supported").io_stats.unwrap();
+        let sql = queries::for_version(160_003)
+            .expect("PG16 supported")
+            .io_stats
+            .unwrap();
         // Every column the parser reads by name must exist in the SQL.
         for col in [
-            "backend_type", "context", "reads", "writes", "writebacks", "extends", "hits",
-            "evictions", "reuses", "fsyncs", "read_time_ms", "write_time_ms",
+            "backend_type",
+            "context",
+            "reads",
+            "writes",
+            "writebacks",
+            "extends",
+            "hits",
+            "evictions",
+            "reuses",
+            "fsyncs",
+            "read_time_ms",
+            "write_time_ms",
             "track_io_timing_on",
         ] {
-            assert!(sql.contains(&format!("AS {col}")), "missing column alias: {col}");
+            assert!(
+                sql.contains(&format!("AS {col}")),
+                "missing column alias: {col}"
+            );
         }
     }
 
@@ -4539,13 +4707,19 @@ mod tests {
     #[test]
     fn wal_stats_query_is_absent_below_pg14_and_present_on_14_plus() {
         let q13 = queries::for_version(130_011).expect("supported");
-        assert!(q13.wal_stats.is_none(), "pg_stat_wal does not exist below PG 14");
+        assert!(
+            q13.wal_stats.is_none(),
+            "pg_stat_wal does not exist below PG 14"
+        );
         for version in [140_000, 150_007, 160_003, 170_000] {
             let q = queries::for_version(version).expect("supported");
             let sql = q.wal_stats.expect("pg_stat_wal must be selected on PG 14+");
             assert!(sql.contains("pg_stat_wal"));
             assert!(sql.contains("track_wal_io_timing_on"));
-            assert!(sql.contains("wal_bytes::int8"), "numeric wal_bytes must be cast to int8");
+            assert!(
+                sql.contains("wal_bytes::int8"),
+                "numeric wal_bytes must be cast to int8"
+            );
         }
     }
 
@@ -4612,19 +4786,33 @@ mod tests {
         let raw1 = wal_raw(500, 40_000, 0, 20.0, 4.0, true);
         let t1 = t0 + Duration::from_secs(10);
         let (stats1, _delta1) = derive_wal_stats(&raw1, t1, Some(&delta0));
-        assert!(stats1.wal_bytes_per_sec.is_none(), "a reset must never show a negative rate");
+        assert!(
+            stats1.wal_bytes_per_sec.is_none(),
+            "a reset must never show a negative rate"
+        );
         assert!(stats1.wal_records_per_sec.is_none());
         assert!(stats1.wal_buffers_full_delta.is_none());
     }
 
     #[test]
     fn wal_stat_from_row_parser_shape_matches_the_sql_column_names() {
-        let sql = queries::for_version(140_000).expect("PG14 supported").wal_stats.unwrap();
+        let sql = queries::for_version(140_000)
+            .expect("PG14 supported")
+            .wal_stats
+            .unwrap();
         for col in [
-            "wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full", "wal_write_time_ms",
-            "wal_sync_time_ms", "track_wal_io_timing_on",
+            "wal_records",
+            "wal_fpi",
+            "wal_bytes",
+            "wal_buffers_full",
+            "wal_write_time_ms",
+            "wal_sync_time_ms",
+            "track_wal_io_timing_on",
         ] {
-            assert!(sql.contains(&format!("AS {col}")), "missing column alias: {col}");
+            assert!(
+                sql.contains(&format!("AS {col}")),
+                "missing column alias: {col}"
+            );
         }
     }
 
@@ -4717,7 +4905,7 @@ mod tests {
             datid: 12345,
             datname: "testdb".to_string(),
             confl_tablespace: 1,
-            confl_lock: 9,     // +4
+            confl_lock: 9,      // +4
             confl_snapshot: 14, // +4
             confl_bufferpin: 2,
             confl_deadlock: 0,

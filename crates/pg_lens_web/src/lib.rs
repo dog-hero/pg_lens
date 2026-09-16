@@ -195,8 +195,14 @@ pub fn router(
         .route("/schema/detail", post(schema_detail_handler))
         // Records Lens: list, download, and delete incident recordings/bookmarks
         .route("/records", get(records_list_handler))
-        .route("/records/download/{filename}", get(records_download_handler))
-        .route("/records/{filename}", axum::routing::delete(records_delete_handler))
+        .route(
+            "/records/download/{filename}",
+            get(records_download_handler),
+        )
+        .route(
+            "/records/{filename}",
+            axum::routing::delete(records_delete_handler),
+        )
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
         .nest("/api", api)
@@ -240,9 +246,7 @@ async fn require_auth(
     let query_token = request
         .uri()
         .query()
-        .and_then(|query| {
-            form_urlencoded::parse(query.as_bytes()).find(|(key, _)| key == "token")
-        })
+        .and_then(|query| form_urlencoded::parse(query.as_bytes()).find(|(key, _)| key == "token"))
         .map(|(_, value)| value.into_owned());
     // `ct_eq` on byte slices: length mismatch returns false immediately
     // (only the token's *length* can leak), equal lengths compare every
@@ -1013,7 +1017,13 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(h.admin_rx.try_recv().is_err(), "nothing was queued");
 
-        let cancel = send(h.router.clone(), "POST", "/api/admin/cancel/50", Some("sekret")).await;
+        let cancel = send(
+            h.router.clone(),
+            "POST",
+            "/api/admin/cancel/50",
+            Some("sekret"),
+        )
+        .await;
         assert_eq!(cancel.status(), StatusCode::FORBIDDEN);
         assert!(h.admin_rx.try_recv().is_err());
     }
@@ -1034,13 +1044,23 @@ mod tests {
         let h = mock_harness_with(None, false);
         let response = get_response(h.router, "/api/config", None).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.expect("body").to_bytes();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(value["read_only"], false);
 
         let h = mock_harness_with(None, true);
         let response = get_response(h.router, "/api/config", None).await;
-        let body = response.into_body().collect().await.expect("body").to_bytes();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(value["read_only"], true);
     }
@@ -1081,7 +1101,10 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        assert_eq!(h.db_switch_rx.try_recv().expect("forwarded"), "shop".to_string());
+        assert_eq!(
+            h.db_switch_rx.try_recv().expect("forwarded"),
+            "shop".to_string()
+        );
     }
 
     /// An unknown database name is refused before ever reaching the poller.
@@ -1125,7 +1148,10 @@ mod tests {
         )
         .await;
         assert_eq!(allowed.status(), StatusCode::ACCEPTED);
-        assert_eq!(h.db_switch_rx.try_recv().expect("forwarded"), "warehouse".to_string());
+        assert_eq!(
+            h.db_switch_rx.try_recv().expect("forwarded"),
+            "warehouse".to_string()
+        );
     }
 
     /// Unlike `admin`, a database switch is a read-only reconnect: it must
@@ -1142,7 +1168,10 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        assert_eq!(h.db_switch_rx.try_recv().expect("forwarded"), "warehouse".to_string());
+        assert_eq!(
+            h.db_switch_rx.try_recv().expect("forwarded"),
+            "warehouse".to_string()
+        );
     }
 
     // --- v0.15: POST /api/schema/detail ---------------------------------------
@@ -1224,7 +1253,10 @@ mod tests {
         assert!(ensure_listen_allowed(&loopback6, false).is_ok());
         assert!(ensure_listen_allowed(&public, true).is_ok());
         let error = ensure_listen_allowed(&public, false).expect_err("must refuse");
-        assert!(error.contains("PG_LENS_AUTH_TOKEN"), "error names the env var");
+        assert!(
+            error.contains("PG_LENS_AUTH_TOKEN"),
+            "error names the env var"
+        );
     }
 
     #[tokio::test]
@@ -1254,28 +1286,60 @@ mod tests {
         let (_tx, router) = mock_router(Some("test_token"));
 
         // 1. Download without token is rejected
-        let res_no_auth = get_response(router.clone(), "/api/records/download/rec-test_web-20260907_120000.jsonl", None).await;
+        let res_no_auth = get_response(
+            router.clone(),
+            "/api/records/download/rec-test_web-20260907_120000.jsonl",
+            None,
+        )
+        .await;
         assert_eq!(res_no_auth.status(), StatusCode::UNAUTHORIZED);
 
         // 2. Download with token succeeds
-        let res_auth = get_response(router.clone(), "/api/records/download/rec-test_web-20260907_120000.jsonl", Some("test_token")).await;
+        let res_auth = get_response(
+            router.clone(),
+            "/api/records/download/rec-test_web-20260907_120000.jsonl",
+            Some("test_token"),
+        )
+        .await;
         assert_eq!(res_auth.status(), StatusCode::OK);
         assert_eq!(res_auth.headers()[header::CONTENT_TYPE], "application/json");
-        assert!(res_auth.headers()[header::CONTENT_DISPOSITION].to_str().unwrap().contains("attachment"));
+        assert!(
+            res_auth.headers()[header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .contains("attachment")
+        );
 
         // 3. Delete in read-only mode is refused
         let h_ro = mock_harness_with(Some("test_token"), true);
-        let res_ro = send(h_ro.router, "DELETE", "/api/records/rec-test_web-20260907_120000.jsonl", Some("test_token")).await;
+        let res_ro = send(
+            h_ro.router,
+            "DELETE",
+            "/api/records/rec-test_web-20260907_120000.jsonl",
+            Some("test_token"),
+        )
+        .await;
         assert_eq!(res_ro.status(), StatusCode::FORBIDDEN);
         assert!(test_file.exists());
 
         // 4. Delete with token succeeds
-        let res_del = send(router.clone(), "DELETE", "/api/records/rec-test_web-20260907_120000.jsonl", Some("test_token")).await;
+        let res_del = send(
+            router.clone(),
+            "DELETE",
+            "/api/records/rec-test_web-20260907_120000.jsonl",
+            Some("test_token"),
+        )
+        .await;
         assert_eq!(res_del.status(), StatusCode::OK);
         assert!(!test_file.exists());
 
         // 5. Download after delete returns 404
-        let res_404 = get_response(router, "/api/records/download/rec-test_web-20260907_120000.jsonl", Some("test_token")).await;
+        let res_404 = get_response(
+            router,
+            "/api/records/download/rec-test_web-20260907_120000.jsonl",
+            Some("test_token"),
+        )
+        .await;
         assert_eq!(res_404.status(), StatusCode::NOT_FOUND);
     }
 
@@ -1368,7 +1432,10 @@ mod tests {
         .await;
         assert_eq!(allowed.status(), StatusCode::ACCEPTED);
         assert_eq!(
-            h.server_switch_rx.try_recv().expect("forwarded").service_name,
+            h.server_switch_rx
+                .try_recv()
+                .expect("forwarded")
+                .service_name,
             "staging"
         );
     }
@@ -1386,9 +1453,11 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert_eq!(
-            h.server_switch_rx.try_recv().expect("forwarded").service_name,
+            h.server_switch_rx
+                .try_recv()
+                .expect("forwarded")
+                .service_name,
             "staging"
         );
     }
 }
-

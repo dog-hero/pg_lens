@@ -30,9 +30,13 @@
 use std::collections::HashSet;
 
 use pg_lens_core::blocking::{BlockingChain, blocking_chain};
-use pg_lens_core::idle_sessions::{Severity as IdleSeverity, oldest_idle_session, severity as idle_session_severity};
+use pg_lens_core::idle_sessions::{
+    Severity as IdleSeverity, oldest_idle_session, severity as idle_session_severity,
+};
 use pg_lens_core::waits::{WaitSummary, top_waits};
-use pg_lens_core::xact_age::{OldestXact, Severity as XactSeverity, oldest_open_xact, xact_age_severity};
+use pg_lens_core::xact_age::{
+    OldestXact, Severity as XactSeverity, oldest_open_xact, xact_age_severity,
+};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -219,10 +223,7 @@ fn draw_idle_view(app: &mut App, frame: &mut Frame, area: Rect) {
 /// is itself useful information the operator asked for by pressing `I`).
 fn idle_headline(rows: &[pg_lens_core::IdleSessionRow]) -> Line<'static> {
     if rows.is_empty() {
-        return Line::from(Span::styled(
-            " no idle connections",
-            style::label_style(),
-        ));
+        return Line::from(Span::styled(" no idle connections", style::label_style()));
     }
     let oldest = oldest_idle_session(rows).expect("rows is non-empty");
     let color = idle_severity_color(oldest.severity);
@@ -304,7 +305,9 @@ fn draw_idle_empty(frame: &mut Frame, area: Rect) {
     }
     let para = Paragraph::new(Line::from(Span::styled(
         "No idle connections",
-        Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::new()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )))
     .alignment(ratatui::layout::Alignment::Center);
     frame.render_widget(para, inner);
@@ -361,7 +364,9 @@ fn draw_empty(app: &App, frame: &mut Frame, area: Rect) {
     };
     let para = Paragraph::new(Line::from(Span::styled(
         msg,
-        Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::new()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )))
     .alignment(ratatui::layout::Alignment::Center);
     frame.render_widget(para, inner);
@@ -465,16 +470,28 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
             let pid_cell = Cell::from(Span::styled(row.pid.to_string(), pid_style));
 
             // DB cell: cyan / blue
-            let db_cell = Cell::from(Span::styled(row.database.clone(), Style::new().fg(Color::Cyan)));
+            let db_cell = Cell::from(Span::styled(
+                row.database.clone(),
+                Style::new().fg(Color::Cyan),
+            ));
 
             // User cell: white / light
-            let user_cell = Cell::from(Span::styled(row.username.clone(), Style::new().fg(Color::White)));
+            let user_cell = Cell::from(Span::styled(
+                row.username.clone(),
+                Style::new().fg(Color::White),
+            ));
 
             // Client cell: dark gray
-            let client_cell = Cell::from(Span::styled(row.client.clone(), Style::new().fg(Color::DarkGray)));
+            let client_cell = Cell::from(Span::styled(
+                row.client.clone(),
+                Style::new().fg(Color::DarkGray),
+            ));
 
             // State cell: state-specific color
-            let state_cell = Cell::from(Span::styled(row.state.clone(), Style::new().fg(state_color(&row.state))));
+            let state_cell = Cell::from(Span::styled(
+                row.state.clone(),
+                Style::new().fg(state_color(&row.state)),
+            ));
 
             // Wait cell: Lock (red bold), IO (yellow), other (yellow), none (dim dash)
             let wait_cell = match &row.wait_event {
@@ -492,7 +509,10 @@ fn draw_table(app: &mut App, frame: &mut Frame, area: Rect) {
             let xact_cell = match row.xact_age_secs {
                 Some(age) => {
                     let color = xact_severity_color(xact_age_severity(age, &row.state));
-                    Cell::from(Span::styled(format::human_duration(age), Style::new().fg(color)))
+                    Cell::from(Span::styled(
+                        format::human_duration(age),
+                        Style::new().fg(color),
+                    ))
                 }
                 None => Cell::from(Span::styled("\u{2014}", style::label_style())),
             };
@@ -557,7 +577,9 @@ fn activity_title(app: &App) -> Line<'static> {
         // A block cursor makes the edit field obvious in a screenshot.
         spans.push(Span::styled(
             "\u{2588}",
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK),
+            Style::new()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::SLOW_BLINK),
         ));
         spans.push(Span::styled(
             format!("  {shown}/{total}"),
@@ -1062,10 +1084,13 @@ mod tests {
             )),
         );
         assert_eq!(app.micro_view, crate::app::MicroView::Idle);
-        crate::app::update(&mut app, crate::app::Action::Key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Esc,
-            crossterm::event::KeyModifiers::NONE,
-        )));
+        crate::app::update(
+            &mut app,
+            crate::app::Action::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
         assert_eq!(app.micro_view, crate::app::MicroView::Activity);
     }
 
@@ -1105,7 +1130,10 @@ mod tests {
         let line = idle_headline(&rows);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("2 idle connections"), "{text}");
-        assert!(text.contains("pid 2"), "{text}: must headline the oldest, not the first");
+        assert!(
+            text.contains("pid 2"),
+            "{text}: must headline the oldest, not the first"
+        );
         // The age span is tinted red (past BAD_AGE_SECS).
         let age_span = line
             .spans
@@ -1174,10 +1202,7 @@ mod tests {
             wait_event_style(Some("Client:ClientRead")),
             Style::new().fg(Color::Yellow)
         );
-        assert_eq!(
-            wait_event_style(None),
-            Style::new().fg(Color::DarkGray)
-        );
+        assert_eq!(wait_event_style(None), Style::new().fg(Color::DarkGray));
     }
 
     /// Render proof: a >30s active row renders red, AND the selected row
@@ -1283,7 +1308,10 @@ mod tests {
                 c.fg == Color::Cyan && c.modifier.contains(Modifier::BOLD) && c.symbol() != " "
             })
         });
-        assert!(!cyan_bold_present, "the table row must not carry keyword highlighting");
+        assert!(
+            !cyan_bold_present,
+            "the table row must not carry keyword highlighting"
+        );
 
         // Open the detail panel on the same row: the full query DOES carry
         // keyword highlighting there.
@@ -1300,7 +1328,10 @@ mod tests {
                 })
             })
         });
-        assert!(cyan_bold_present, "the detail panel must still highlight SQL keywords");
+        assert!(
+            cyan_bold_present,
+            "the detail panel must still highlight SQL keywords"
+        );
     }
 
     #[test]

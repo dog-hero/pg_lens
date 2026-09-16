@@ -103,8 +103,7 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
         // is short-lived): a friendly placeholder, not an empty table.
         let placeholder = Paragraph::new(vec![
             Line::default(),
-            Line::from(" collecting statement stats\u{2026} (first slow collection pending)")
-                .dim(),
+            Line::from(" collecting statement stats\u{2026} (first slow collection pending)").dim(),
         ])
         .block(Block::bordered().title("Statements"));
         frame.render_widget(placeholder, area);
@@ -129,8 +128,10 @@ pub fn draw(app: &mut App, frame: &mut Frame, area: Rect) {
 
     draw_table(app, &statements, frame, table_area);
     if let StatementsStatus::Error(msg) = &statements.status {
-        let line = Line::from(format!(" statements: {msg} \u{2014} showing last collection"))
-            .style(Style::new().fg(Color::White).bg(Color::Red).bold());
+        let line = Line::from(format!(
+            " statements: {msg} \u{2014} showing last collection"
+        ))
+        .style(Style::new().fg(Color::White).bg(Color::Red).bold());
         frame.render_widget(Paragraph::new(line), error_area);
     }
     draw_footer(app, &statements, frame, footer_area);
@@ -239,7 +240,9 @@ fn statements_title(app: &App) -> Line<'static> {
         ));
         spans.push(Span::styled(
             "\u{2588}",
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK),
+            Style::new()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::SLOW_BLINK),
         ));
         spans.push(Span::styled(
             format!("  {shown}/{total}"),
@@ -266,12 +269,7 @@ fn statements_title(app: &App) -> Line<'static> {
 
 /// Centered placeholder drawn inside the table body when the filter matches
 /// nothing — mirrors `ui/micro_lens.rs::draw_empty`.
-fn draw_table_empty(
-    app: &App,
-    statements: &StatementsSnapshot,
-    frame: &mut Frame,
-    area: Rect,
-) {
+fn draw_table_empty(app: &App, statements: &StatementsSnapshot, frame: &mut Frame, area: Rect) {
     let inner = Rect {
         x: area.x + 1,
         y: area.y + 2,
@@ -282,13 +280,18 @@ fn draw_table_empty(
         return;
     }
     let msg = if !statements.statements.is_empty() && !app.statements_filter.is_empty() {
-        format!("No statements match \u{201c}{}\u{201d}", app.statements_filter)
+        format!(
+            "No statements match \u{201c}{}\u{201d}",
+            app.statements_filter
+        )
     } else {
         "No statements".to_string()
     };
     let para = Paragraph::new(Line::from(Span::styled(
         msg,
-        Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::new()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )))
     .alignment(ratatui::layout::Alignment::Center);
     frame.render_widget(para, inner);
@@ -384,8 +387,10 @@ fn draw_detail(app: &App, frame: &mut Frame, area: Rect) {
             "block I/O:    ",
             format!(
                 "read {} \u{b7} write {}",
-                row.blk_read_time_ms.map_or_else(|| NO_DATA.to_string(), format::human_ms),
-                row.blk_write_time_ms.map_or_else(|| NO_DATA.to_string(), format::human_ms),
+                row.blk_read_time_ms
+                    .map_or_else(|| NO_DATA.to_string(), format::human_ms),
+                row.blk_write_time_ms
+                    .map_or_else(|| NO_DATA.to_string(), format::human_ms),
             ),
         ),
         style::kv(

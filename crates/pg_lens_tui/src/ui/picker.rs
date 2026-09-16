@@ -83,8 +83,11 @@ pub fn draw(app: &App, frame: &mut Frame) {
     );
 
     frame.render_widget(
-        Paragraph::new(entry_lines(picker, name_width))
-            .block(Block::bordered().title(title).border_style(style::label_style())),
+        Paragraph::new(entry_lines(picker, name_width)).block(
+            Block::bordered()
+                .title(title)
+                .border_style(style::label_style()),
+        ),
         panel_area,
     );
 

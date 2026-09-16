@@ -214,12 +214,11 @@ impl ServicesFile {
     /// from that cache still goes through the normal `load` permission path.
     pub fn from_remote_bytes(bytes: &[u8]) -> Result<Self, SettingsError> {
         let remote_path = PathBuf::from("<--config-url>");
-        let contents = String::from_utf8(bytes.to_vec()).map_err(|_| {
-            SettingsError::ServicesFileParse {
+        let contents =
+            String::from_utf8(bytes.to_vec()).map_err(|_| SettingsError::ServicesFileParse {
                 path: remote_path.clone(),
                 message: "remote services file is not valid UTF-8".to_string(),
-            }
-        })?;
+            })?;
         let mut file: ServicesFile =
             toml::from_str(&contents).map_err(|e| SettingsError::ServicesFileParse {
                 path: remote_path,
@@ -333,12 +332,11 @@ mod tests {
     use std::io::Write;
 
     fn parse(toml_src: &str) -> Result<ServicesFile, SettingsError> {
-        let mut file: ServicesFile = toml::from_str(toml_src).map_err(|e| {
-            SettingsError::ServicesFileParse {
+        let mut file: ServicesFile =
+            toml::from_str(toml_src).map_err(|e| SettingsError::ServicesFileParse {
                 path: std::path::PathBuf::from("<test>"),
                 message: e.to_string(),
-            }
-        })?;
+            })?;
         file.validate()?;
         Ok(file)
     }
@@ -473,8 +471,7 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().expect("temp file");
         f.write_all(contents.as_bytes()).expect("write");
         f.flush().expect("flush");
-        std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(mode))
-            .expect("chmod");
+        std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(mode)).expect("chmod");
         f.into_temp_path()
     }
 
@@ -514,7 +511,10 @@ mod tests {
             .expect_err("0644 + plaintext password must be refused");
         let msg = err.to_string();
         assert!(msg.contains("plaintext"), "got: {msg}");
-        assert!(!msg.contains("pw\""), "error must not echo the password: {msg}");
+        assert!(
+            !msg.contains("pw\""),
+            "error must not echo the password: {msg}"
+        );
     }
 
     #[cfg(unix)]

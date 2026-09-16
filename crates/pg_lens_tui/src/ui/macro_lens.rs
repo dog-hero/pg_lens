@@ -49,13 +49,19 @@ fn replication_lines(
     slots: Option<&[ReplicationSlotRow]>,
 ) -> Option<Vec<Line<'static>>> {
     let more_line = |n: usize, what: &str| {
-        Line::from(Span::styled(format!("   \u{2026} +{n} more {what}"), style::label_style()))
+        Line::from(Span::styled(
+            format!("   \u{2026} +{n} more {what}"),
+            style::label_style(),
+        ))
     };
     let mut clipped = false;
     let mut lines: Vec<Line<'static>> = match repl {
         Some(ReplicationInfo::Primary { senders }) => {
-            let mut lines: Vec<Line<'static>> =
-                senders.iter().take(SENDERS_SHOWN).map(sender_line).collect();
+            let mut lines: Vec<Line<'static>> = senders
+                .iter()
+                .take(SENDERS_SHOWN)
+                .map(sender_line)
+                .collect();
             if senders.len() > SENDERS_SHOWN {
                 lines.push(more_line(senders.len() - SENDERS_SHOWN, "replicas"));
                 clipped = true;
@@ -227,7 +233,10 @@ fn backend_rate_text(cp: &CheckpointerStats) -> String {
 /// pre-first-snapshot treatment of TPS. `wal` is `None` on PG < 14, a
 /// restricted role, or before the first successful collection — silently
 /// omitted, never a scary empty line.
-fn checkpointer_lines(cp: Option<&CheckpointerStats>, wal: Option<&WalStats>) -> Vec<Line<'static>> {
+fn checkpointer_lines(
+    cp: Option<&CheckpointerStats>,
+    wal: Option<&WalStats>,
+) -> Vec<Line<'static>> {
     let Some(cp) = cp else {
         return vec![Line::from(Span::styled(
             "collecting checkpointer stats\u{2026}",
@@ -271,10 +280,7 @@ fn checkpointer_lines(cp: Option<&CheckpointerStats>, wal: Option<&WalStats>) ->
                 backend_rate_text(cp),
             ),
         ),
-        style::kv(
-            "  avg write/sync: ",
-            format!("{avg_write} / {avg_sync}"),
-        ),
+        style::kv("  avg write/sync: ", format!("{avg_write} / {avg_sync}")),
     ];
     if let Some(wal) = wal {
         lines.push(wal_generation_line(wal));
@@ -565,13 +571,20 @@ pub fn draw(app: &App, frame: &mut Frame, area: Rect) {
     // whole column, unchanged from before v0.16) on PG < 16 or before the
     // first slow collection.
     let io_lines = io_stats_lines(app.snapshot.io_stats.as_deref());
-    let io_height = io_lines.as_ref().map(|l| (l.len() as u16 + 2).min(8)).unwrap_or(0);
+    let io_height = io_lines
+        .as_ref()
+        .map(|l| (l.len() as u16 + 2).min(8))
+        .unwrap_or(0);
     let [checkpoint_area, io_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(io_height)]).areas(checkpoint_area);
+        Layout::vertical([Constraint::Min(0), Constraint::Length(io_height)])
+            .areas(checkpoint_area);
 
-    let checkpoint_lines =
-        checkpointer_lines(app.snapshot.checkpointer.as_ref(), app.snapshot.wal.as_ref());
-    let checkpoint_panel = Paragraph::new(checkpoint_lines).block(titled_block("Checkpoints / writer"));
+    let checkpoint_lines = checkpointer_lines(
+        app.snapshot.checkpointer.as_ref(),
+        app.snapshot.wal.as_ref(),
+    );
+    let checkpoint_panel =
+        Paragraph::new(checkpoint_lines).block(titled_block("Checkpoints / writer"));
     frame.render_widget(checkpoint_panel, checkpoint_area);
 
     if let Some(lines) = io_lines {
@@ -610,7 +623,10 @@ mod tests {
     #[test]
     fn lock_capacity_color_matches_the_severity_tiers() {
         assert_eq!(lock_capacity_color(LockCapacitySeverity::Ok), Color::Green);
-        assert_eq!(lock_capacity_color(LockCapacitySeverity::Warn), Color::Yellow);
+        assert_eq!(
+            lock_capacity_color(LockCapacitySeverity::Warn),
+            Color::Yellow
+        );
         assert_eq!(lock_capacity_color(LockCapacitySeverity::Bad), Color::Red);
     }
 
@@ -656,7 +672,11 @@ mod tests {
 
     // --- F2.5: replication slots -----------------------------------------
 
-    fn slot(active: bool, wal_status: Option<&str>, retained_wal_bytes: Option<i64>) -> ReplicationSlotRow {
+    fn slot(
+        active: bool,
+        wal_status: Option<&str>,
+        retained_wal_bytes: Option<i64>,
+    ) -> ReplicationSlotRow {
         ReplicationSlotRow {
             slot_name: "probe_slot".to_string(),
             plugin: None,
@@ -797,7 +817,10 @@ mod tests {
             "no collection yet"
         );
         let schema = schema_with_age(150_000_000);
-        assert!(vacuum_banner_line(Some(&schema)).is_none(), "healthy: no banner");
+        assert!(
+            vacuum_banner_line(Some(&schema)).is_none(),
+            "healthy: no banner"
+        );
     }
 
     #[test]
@@ -840,18 +863,9 @@ mod tests {
 
     #[test]
     fn checkpoint_pressure_is_calm_below_and_at_the_fifty_percent_line() {
-        assert!(matches!(
-            checkpoint_pressure_severity(None),
-            Lag::Ok
-        ));
-        assert!(matches!(
-            checkpoint_pressure_severity(Some(0.0)),
-            Lag::Ok
-        ));
-        assert!(matches!(
-            checkpoint_pressure_severity(Some(0.5)),
-            Lag::Ok
-        ));
+        assert!(matches!(checkpoint_pressure_severity(None), Lag::Ok));
+        assert!(matches!(checkpoint_pressure_severity(Some(0.0)), Lag::Ok));
+        assert!(matches!(checkpoint_pressure_severity(Some(0.5)), Lag::Ok));
     }
 
     #[test]
@@ -860,10 +874,7 @@ mod tests {
             checkpoint_pressure_severity(Some(0.51)),
             Lag::Warn
         ));
-        assert!(matches!(
-            checkpoint_pressure_severity(Some(1.0)),
-            Lag::Warn
-        ));
+        assert!(matches!(checkpoint_pressure_severity(Some(1.0)), Lag::Warn));
     }
 
     #[test]
@@ -1007,7 +1018,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(screen.contains("Lock table"), "{screen}");
-        assert!(screen.contains('\u{2191}'), "expected an up arrow: {screen}");
+        assert!(
+            screen.contains('\u{2191}'),
+            "expected an up arrow: {screen}"
+        );
     }
 
     #[test]

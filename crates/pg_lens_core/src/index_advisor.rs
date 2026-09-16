@@ -228,8 +228,16 @@ mod tests {
             is_constraint: is_unique || is_primary,
             indexdef: format!("CREATE INDEX {name} ON {table} USING btree (...)"),
             indkey: indkey.to_string(),
-            indclass: indkey.split_whitespace().map(|_| "1978").collect::<Vec<_>>().join(" "),
-            indcollation: indkey.split_whitespace().map(|_| "0").collect::<Vec<_>>().join(" "),
+            indclass: indkey
+                .split_whitespace()
+                .map(|_| "1978")
+                .collect::<Vec<_>>()
+                .join(" "),
+            indcollation: indkey
+                .split_whitespace()
+                .map(|_| "0")
+                .collect::<Vec<_>>()
+                .join(" "),
             indpred: String::new(),
         }
     }
@@ -285,7 +293,10 @@ mod tests {
         ];
         // Different table would obviously not match either; same table but
         // different uniqueness semantics must also not match.
-        assert_eq!(classify(&rows), vec![IndexFinding::None, IndexFinding::None]);
+        assert_eq!(
+            classify(&rows),
+            vec![IndexFinding::None, IndexFinding::None]
+        );
     }
 
     #[test]
@@ -294,14 +305,24 @@ mod tests {
             row("orders", "orders_a", 10, false, false, "2"),
             row("line_items", "line_items_a", 5, false, false, "2"),
         ];
-        assert_eq!(classify(&rows), vec![IndexFinding::None, IndexFinding::None]);
+        assert_eq!(
+            classify(&rows),
+            vec![IndexFinding::None, IndexFinding::None]
+        );
     }
 
     #[test]
     fn prefix_redundant_flags_the_narrower_index_only() {
         let rows = vec![
             row("orders", "orders_customer_idx", 3, false, false, "2"),
-            row("orders", "orders_customer_created_idx", 900, false, false, "2 5"),
+            row(
+                "orders",
+                "orders_customer_created_idx",
+                900,
+                false,
+                false,
+                "2 5",
+            ),
         ];
         let findings = classify(&rows);
         assert_eq!(
@@ -330,9 +351,19 @@ mod tests {
         // (5) is not a prefix of (2, 5) — order matters for btree indexes.
         let rows = vec![
             row("orders", "orders_created_idx", 3, false, false, "5"),
-            row("orders", "orders_customer_created_idx", 900, false, false, "2 5"),
+            row(
+                "orders",
+                "orders_customer_created_idx",
+                900,
+                false,
+                false,
+                "2 5",
+            ),
         ];
-        assert_eq!(classify(&rows), vec![IndexFinding::None, IndexFinding::None]);
+        assert_eq!(
+            classify(&rows),
+            vec![IndexFinding::None, IndexFinding::None]
+        );
     }
 
     #[test]

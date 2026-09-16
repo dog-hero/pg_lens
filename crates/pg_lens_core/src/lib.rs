@@ -31,10 +31,16 @@ pub use tokio_postgres;
 
 pub use blocking::{BlockingChain, blocking_chain};
 pub use blocks::{BlockTreeNode, build_blocking_tree};
+pub use error_log::{error_log_path, log_error};
 pub use history::{
     HistoryPoint, SnapshotHistory, TREND_DEADBAND, TREND_LOOKBACK_TICKS, Trend, trend,
 };
+pub use idle_sessions::{
+    OldestIdleSession, Severity as IdleSessionSeverity, oldest_idle_session,
+    severity as idle_session_severity,
+};
 pub use index_advisor::{IndexCatalogRow, classify as classify_indexes};
+pub use lock_capacity::{Severity as LockCapacitySeverity, severity as lock_capacity_severity};
 pub use models::{
     ActiveLockRow, ActivityRow, AdminActionResult, AdminCommand, AdminKind, AdminOutcome, BloatRow,
     CheckpointerStats, DatabaseConflicts, DatabaseRow, DbSnapshot, DdlProgressRow, IdleSessionRow,
@@ -47,11 +53,6 @@ pub use models::{
     calculate_sequence_exhaustion,
 };
 pub use poller::ServerSwitchTarget;
-pub use idle_sessions::{
-    OldestIdleSession, Severity as IdleSessionSeverity, oldest_idle_session,
-    severity as idle_session_severity,
-};
-pub use lock_capacity::{Severity as LockCapacitySeverity, severity as lock_capacity_severity};
 pub use prepared_xacts::{
     OldestPreparedXact, Severity as PreparedXactSeverity, oldest_prepared_xact,
     severity as prepared_xact_severity,
@@ -61,8 +62,6 @@ pub use recording::{
     recordings_dir, sanitize_target_name,
 };
 pub use services::PasswordSource;
-pub use waits::{WaitSummary, top_waits};
 pub use settings::{ConnLabel, ConnSpec, Resolved, SettingsError};
+pub use waits::{WaitSummary, top_waits};
 pub use xact_age::{OldestXact, Severity as XactAgeSeverity, oldest_open_xact, xact_age_severity};
-pub use error_log::{error_log_path, log_error};
-

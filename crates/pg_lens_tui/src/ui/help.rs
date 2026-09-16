@@ -50,8 +50,14 @@ const ROWS: &[Row] = &[
     Row::Bind("v", "Vacuum sub-view (Schema Lens only)"),
     Row::Bind("S", "Sequences exhaustion sub-view (Schema Lens only)"),
     Row::Bind("p", "switch pane (Blocks Lens) / show partitions (Schema)"),
-    Row::Bind("i", "jump to Index Lens filtered on this table (Schema Tables)"),
-    Row::Bind("x", "jump to Query Lens filtered on this table (Schema Tables)"),
+    Row::Bind(
+        "i",
+        "jump to Index Lens filtered on this table (Schema Tables)",
+    ),
+    Row::Bind(
+        "x",
+        "jump to Query Lens filtered on this table (Schema Tables)",
+    ),
     Row::Bind("Delete / x", "delete selected file (Records Lens)"),
     Row::Bind("C", "server / cluster picker (any lens)"),
     Row::Bind("d", "database picker (any lens)"),
@@ -60,13 +66,22 @@ const ROWS: &[Row] = &[
     Row::Bind("?", "this help"),
     Row::Section("Data & refresh"),
     Row::Bind("B", "force schema/bloat refresh (or rescan on Records)"),
-    Row::Bind("Shift+R / Ctrl+R", "toggle incident recording (Flight Recorder)"),
+    Row::Bind(
+        "Shift+R / Ctrl+R",
+        "toggle incident recording (Flight Recorder)",
+    ),
     Row::Bind("E", "export current snapshot to JSON bookmark"),
     Row::Bind("s", "cycle sort (Micro/Schema Tables/Query Lens / Records)"),
     Row::Bind("+ / =", "increase poll interval"),
     Row::Bind("-", "decrease poll interval"),
-    Row::Bind("Space", "pause / resume display (live) or playback (replay)"),
-    Row::Bind("\u{2190} / \u{2192}", "step backward / forward 1 frame (replay mode)"),
+    Row::Bind(
+        "Space",
+        "pause / resume display (live) or playback (replay)",
+    ),
+    Row::Bind(
+        "\u{2190} / \u{2192}",
+        "step backward / forward 1 frame (replay mode)",
+    ),
     Row::Bind("[ / ]", "decrease / increase playback speed (replay mode)"),
     Row::Section("Admin (Micro / Blocks Lens, selected row)"),
     Row::Bind("c", "cancel the query (asks to confirm)"),
@@ -75,7 +90,10 @@ const ROWS: &[Row] = &[
     Row::Section("Quit"),
     Row::Bind("q", "quit immediately"),
     Row::Bind("Ctrl+C", "quit immediately (works everywhere)"),
-    Row::Bind("Esc", "close the open overlay/panel, or arm a 2s quit \u{2014}"),
+    Row::Bind(
+        "Esc",
+        "close the open overlay/panel, or arm a 2s quit \u{2014}",
+    ),
     Row::Bind("", "a second Esc within that window quits"),
 ];
 
